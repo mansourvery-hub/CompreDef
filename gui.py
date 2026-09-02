@@ -21,6 +21,58 @@ from aqt.qt import (
 )
 
 
+# Keyword lists for auto-matching target word and definition fields
+_TARGET_WORD_KEYWORDS = [
+    "word", "expression", "kanji", "reading", "furigana",
+    "hiragana", "romaji", "katakana", "jp", "japanese", "ja"
+]
+
+_DEFINITION_KEYWORDS = [
+    "definition", "meaning", "glossary", "translation",
+    "translation_", "translation_", "explanation", "sense", "desc"
+]
+
+
+    def _get_addon_name() -> str:
+        """
+        Safely retrieves the root Anki add-on name for config persistence.
+
+        Returns the correct root addon name instead of the submodule name
+        to ensure config.json is saved under the correct key.
+        """
+        if hasattr(mw, 'addonManager'):
+            root_name = mw.addonManager.addonFromModule(__name__)
+            if root_name:
+                return root_name
+        # Fallback to first part of module name
+        return __name__.split('.')[0]
+
+    def _find_best_field_match(self, fields: List[str], keywords: List[str], fallback: str = None) -> Optional[str]:
+        """
+        Finds the best matching field name based on keyword similarity.
+
+        Performs case-insensitive matching against provided keywords, with
+        priority given to exact matches followed by substring matches.
+        """
+        if not fields or not keywords:
+            return fallback
+
+        # Normalize fields for comparison
+        fields_lower = [f.lower().replace("_", " ").replace("-", " ") for f in fields]
+
+        for keyword in keywords:
+            # Check for exact match
+            for f_lower in fields_lower:
+                if f_lower == keyword.lower():
+                    return f
+            # Check for substring match (case-insensitive)
+            for f_lower in fields_lower:
+                if keyword.lower() in f_lower:
+                    return f
+
+        return fallback
+
+
 class ConfigDialog(QDialog):
     """
     Dialog for configuring CompreDef add-on options.
@@ -36,7 +88,8 @@ class ConfigDialog(QDialog):
         self.resize(450, 250)
 
         # Retrieve existing user configuration or fall back to empty defaults
-        self.config: Dict[str, Any] = mw.addonManager.getConfig(__name__) or {}
+        addon_name = _get_addon_name()
+        self.config: Dict[str, Any] = mw.addonManager.getConfig(addon_name) or {}
 
         # Initialize UI layout and controls
         self._init_ui()
@@ -118,7 +171,8 @@ class ConfigDialog(QDialog):
         """
         Slot triggered when the selected Note Type changes.
 
-        Dynamically updates the items in both Word Field and Definition Field dropdowns.
+        Dynamically updates the items in both Word Field and Definition Field dropdowns,
+        auto-selects fields based on keywords if applicable, and preserves valid previous selections.
         """
         fields = self._get_field_names(note_type_name)
 
@@ -132,11 +186,25 @@ class ConfigDialog(QDialog):
         self.definition_field_combo.clear()
         self.definition_field_combo.addItems(fields)
 
-        # Restore previous selection if valid for this note type
+        # Try to auto-match fields based on keywords if no previous selection exists
+        auto_word_field = None
+        auto_def_field = None
+
+        if not prev_word_field:
+            auto_word_field = self._find_best_field_match(fields, _TARGET_WORD_KEYWORDS, fallback=None)
+        if not prev_def_field:
+            auto_def_field = self._find_best_field_match(fields, _DEFINITION_KEYWORDS, fallback=None)
+
+        # Restore previous selection if valid, otherwise use auto-match, otherwise keep as is
         if prev_word_field in fields:
             self.word_field_combo.setCurrentText(prev_word_field)
+        elif auto_word_field:
+            self.word_field_combo.setCurrentText(auto_word_field)
+
         if prev_def_field in fields:
             self.definition_field_combo.setCurrentText(prev_def_field)
+        elif auto_def_field:
+            self.definition_field_combo.setCurrentText(auto_def_field)
 
     def _load_config(self) -> None:
         """Populates form controls with available Anki models/fields and current config values."""
@@ -196,8 +264,8 @@ class ConfigDialog(QDialog):
             "dictionary_folder": self.dict_folder_input.text().strip(),
         }
 
-        # Persist updated configuration via Anki's addonManager API
-        mw.addonManager.writeConfig(__name__, updated_config)
+        # Persist updated configuration via Anki's addonManager API using root addon name
+        mw.addonManager.writeConfig(addon_name, updated_config)
         self.accept()
 
 

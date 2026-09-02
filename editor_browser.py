@@ -17,11 +17,29 @@ from aqt.qt import QMenu, QKeySequence
 from aqt.utils import tooltip
 
 
+def _get_addon_name() -> str:
+    """
+    Safely retrieves the root Anki add-on name for config persistence.
+
+    Returns the correct root addon name instead of the submodule name
+    to ensure config.json is saved under the correct key.
+    """
+    if hasattr(mw, 'addonManager'):
+        root_name = mw.addonManager.addonFromModule(__name__)
+        if root_name:
+            return root_name
+    # Fallback to first part of module name
+    return __name__.split('.')[0]
+
+
 def _get_addon_config() -> Dict[str, Any]:
-    """Retrieves current add-on configuration dictionary."""
+    """
+    Retrieves current add-on configuration dictionary using correct root addon name.
+    """
     if not mw or not mw.addonManager:
         return {}
-    return mw.addonManager.getConfig(__name__) or {}
+    addon_name = _get_addon_name()
+    return mw.addonManager.getConfig(addon_name) or {}
 
 
 def _generate_stub_definition(target_word: str, mode: str) -> str:

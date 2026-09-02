@@ -21,3 +21,7 @@
 
 ## 5. PyQt Compatibility
 - Anki versions differ in their Qt backend. When importing UI components, always import from `aqt.qt` (e.g., `from aqt.qt import QDialog, QVBoxLayout, QPushButton`) rather than hardcoding `PyQt5` or `PyQt6`.
+
+## 6. Git Remote & Repository Sync Mandate
+- **ALWAYS** push all committed changes to the official GitHub remote (`https://github.com/mansourvery-hub/CompreDef`) as the final step of your work session:
+  `git push origin master` (or `git push origin main`).
