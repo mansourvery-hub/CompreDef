@@ -33,21 +33,22 @@ _DEFINITION_KEYWORDS = [
 ]
 
 
-    def _get_addon_name() -> str:
-        """
-        Safely retrieves the root Anki add-on name for config persistence.
+def _get_addon_name() -> str:
+    """
+    Safely retrieves the root Anki add-on name for config persistence.
 
-        Returns the correct root addon name instead of the submodule name
-        to ensure config.json is saved under the correct key.
-        """
-        if hasattr(mw, 'addonManager'):
-            root_name = mw.addonManager.addonFromModule(__name__)
-            if root_name:
-                return root_name
-        # Fallback to first part of module name
-        return __name__.split('.')[0]
+    Returns the correct root addon name instead of the submodule name
+    to ensure config.json is saved under the correct key.
+    """
+    if hasattr(mw, 'addonManager'):
+        root_name = mw.addonManager.addonFromModule(__name__)
+        if root_name:
+            return root_name
+    # Fallback to first part of module name
+    return __name__.split('.')[0]
 
-    def _find_best_field_match(self, fields: List[str], keywords: List[str], fallback: str = None) -> Optional[str]:
+
+def _find_best_field_match(fields: List[str], keywords: List[str], fallback: str = None) -> Optional[str]:
         """
         Finds the best matching field name based on keyword similarity.
 
