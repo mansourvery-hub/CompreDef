@@ -85,6 +85,19 @@ def on_editor_generate_definition(editor: Editor) -> None:
         tooltip(f"Field '{word_field}' is empty.", parent=editor.parentWindow)
         return
 
+    # Early validation: without a dictionary folder nothing can be generated
+    # (fail fast instead of spinning the background thread for nothing).
+    if not dictionary_folder:
+        tooltip(
+            "CompreDef: No dictionary folder configured.\nSet it under Tools -> Add-ons -> CompreDef -> Config.",
+            parent=editor.parentWindow,
+        )
+        return
+
+    # The first generation after startup loads/caches all dictionaries; show
+    # the user what is happening so Anki never looks frozen.
+    tooltip("CompreDef: Generating definition...", parent=editor.parentWindow)
+
     # Execute generation task in background thread to prevent UI freezing
     def task() -> str:
         return generate_definition(word_text, mode, dictionary_folder)
@@ -145,6 +158,22 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
     def_field = config.get("definition_field", "")
     mode = config.get("mode", "Mode A")
     dictionary_folder = config.get("dictionary_folder", "")
+
+    # Early validation: without a dictionary folder nothing can be generated
+    # (fail fast instead of spinning the background thread for nothing).
+    if not dictionary_folder:
+        tooltip(
+            "CompreDef: No dictionary folder configured.\nSet it under Tools -> Add-ons -> CompreDef -> Config.",
+            parent=browser,
+        )
+        return
+
+    # First generation after startup loads/caches all dictionaries; show the
+    # user what is happening so Anki never looks frozen.
+    tooltip(
+        f"CompreDef: Generating definitions for {len(nids)} note(s)...\n(first run may take a moment)",
+        parent=browser,
+    )
 
     def task() -> int:
         """Background task running across all selected note IDs."""

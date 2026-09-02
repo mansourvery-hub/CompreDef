@@ -1,9 +1,12 @@
 __pycache__/
 
-*.json
-
 *.zip
 
 *.db
 
 .env
+
+# Ignore all JSON except the add-on's own config.json
+*.json
+!config.json
+user_files/

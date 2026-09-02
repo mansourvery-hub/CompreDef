@@ -138,14 +138,45 @@ class DictionaryLoader:
         """
         Computes a stable cache file path for a dictionary folder.
 
-        The path is derived from a hash of the folder path so multiple
-        folders can coexist without collisions. Caches live in the
-        system temp directory (deleted on reboot, always rebuildable).
+        The cache lives in the add-on's persistent `user_files` folder (the
+        standard Anki location for add-on data that must survive restarts
+        and updates). /tmp is unsuitable because tmpfs is wiped on reboot,
+        which would force a 170s re-parse of every dictionary.
+
+        The path is normalized (trailing slashes stripped, real path
+        resolved) before hashing so the same folder always maps to the
+        same cache even if the user typed it with a trailing slash.
         """
         if not directory:
             return None
-        digest = hashlib.md5(directory.encode("utf-8")).hexdigest()[:16]
+        # Normalize: expand ~, resolve .., strip trailing separator
+        try:
+            normalized = os.path.realpath(os.path.expanduser(directory))
+        except Exception:
+            normalized = directory.rstrip(os.sep)
+
+        digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()[:16]
+        cache_dir = self._user_cache_dir()
+        if cache_dir:
+            return os.path.join(cache_dir, f"compredef_cache_{digest}.pkl")
+        # Fallback if user_files is somehow unavailable
         return os.path.join("/tmp", f"compredef_cache_{digest}.pkl")
+
+    def _user_cache_dir(self) -> Optional[str]:
+        """
+        Locates (and creates if needed) the add-on's user_files cache dir.
+
+        Resolves to <addon_folder>/user_files/cache. Uses the fact that
+        parser.py lives inside the add-on folder itself.
+        """
+        try:
+            addon_dir = os.path.dirname(os.path.abspath(__file__))
+            cache_dir = os.path.join(addon_dir, "user_files", "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            return cache_dir
+        except Exception as e:
+            print(f"CompreDef: Could not create user_files cache dir: {e}")
+            return None
 
     def _save_cache(self, cache_path: str) -> None:
         """Persists the parsed dictionary structure to the pickle cache."""

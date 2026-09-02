@@ -69,14 +69,34 @@ def _generate_mode_a(target_word: str, loader: DictionaryLoader) -> str:
 
     # Ladder rungs are ordered easiest-first, so the first rung whose
     # definitions contain only known kanji wins (per ARCHITECTURE.md).
+    # Cross-reference titles are skipped so real definitions are preferred.
     for rung_defs in ladder:
         for definition in rung_defs:
+            if _is_reference_title(definition):
+                continue
             if _all_kanji_known(definition, known_kanji):
                 return definition
 
     # LLM fallback placeholder: no local definition was fully comprehensible.
-    # For now, fall back to the simplest (first) definition available.
+    # For now, fall back to the first real (non-reference) definition.
+    for rung_defs in ladder:
+        for definition in rung_defs:
+            if not _is_reference_title(definition):
+                return definition
     return ladder[0][0]
+
+
+def _is_reference_title(text: str) -> bool:
+    """
+    Detects entries that are just cross-reference titles (e.g. "会社更生法")
+    rather than actual definitions.
+
+    Heuristic: short text (under 10 chars) with no sentence punctuation
+    (。、) is almost always a "see also" headword, not a definition.
+    """
+    if len(text) >= 10:
+        return False
+    return not any(p in text for p in ("。", "、", "：", "，"))
 
 
 def _generate_mode_b(target_word: str, loader: DictionaryLoader) -> str:
@@ -85,8 +105,12 @@ def _generate_mode_b(target_word: str, loader: DictionaryLoader) -> str:
 
     Gathers every definition across all dictionaries and deterministically
     selects the one with the highest kanji comprehension score.
+    Cross-reference titles are filtered out so real definitions win.
     """
-    definitions = loader.lookup_all(target_word)
+    definitions = [
+        d for d in loader.lookup_all(target_word)
+        if not _is_reference_title(d)
+    ]
 
     if not definitions:
         return f"[Mode B] No definition found for: {target_word}"
