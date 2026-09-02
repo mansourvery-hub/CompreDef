@@ -1,16 +1,16 @@
 """
 parser.py - JSON Dictionary loading and definition parsing for CompreDef.
 
-Loads Yomitan/Yomichan-format term bank JSON files (term_bank_*.json)
-from a dictionary folder, including nested subdirectories (each unzipped
-dictionary lives in its own subfolder).
-
-Text extraction supports both plain-text definitions and structured-content
-(HTML-like nested dicts) so that any dictionary format yields readable text.
-
-The ladder (Children's -> Standard -> Advanced) is determined by the
-alphabetical order of the dictionary folder names, then by term bank number,
-mirroring the file ordering rules from ARCHITECTURE.md.
+Loads Yomitan/Yomichan-format term bank JSON files (term_bank_*.json).
+Supports:
+- Individual dictionary representation (SingleDictionary) with per-dictionary
+  disk caching in user_files/cache/.
+- On-demand lazy loading: dictionaries early in the ladder (e.g. Children's)
+  are loaded first; if an early dictionary produces a fully comprehensible
+  definition, later dictionaries don't even need to be touched.
+- Title extraction from index.json for beautiful UI display.
+- Discovery helper to detect dictionary subfolders inside a parent folder.
+- Plain-text and nested structured-content extraction.
 """
 
 import json
@@ -18,7 +18,7 @@ import os
 import pickle
 import re
 import hashlib
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 def _extract_text_from_structured_content(node: object) -> str:
@@ -30,43 +30,30 @@ def _extract_text_from_structured_content(node: object) -> str:
     - a plain string,
     - a list of nodes, or
     - a dict like {"tag": ..., "content": ...} possibly with "rt" (ruby text).
-
-    Returns the concatenated text with noise (image paths, etc.) removed.
     """
-    # Base case: plain text node
     if isinstance(node, str):
         return node
 
-    # List of child nodes: process each and join
     if isinstance(node, list):
         parts = [_extract_text_from_structured_content(child) for child in node]
         return "".join(p for p in parts if p)
 
-    # Dict node: recurse into its "content", append ruby text from "rt"
     if isinstance(node, dict):
         parts = []
         content = node.get("content")
         if content is not None:
             parts.append(_extract_text_from_structured_content(content))
-        # Ruby text (furigana) also carries useful characters for kanji scoring
+        # Ruby text (furigana) also carries characters
         rt = node.get("rt")
         if rt is not None:
             parts.append(_extract_text_from_structured_content(rt))
         return "".join(p for p in parts if p)
 
-    # Anything else (numbers, booleans, None) is not displayable text
     return ""
 
 
 def _definition_to_text(def_block: object) -> str:
-    """
-    Converts a single Yomitan definition block into plain text.
-
-    Yomitan definition blocks come in two flavors:
-    - {"type": "text", "text": "..."}                     -> plain text
-    - {"type": "structured-content", "content": [...]}     -> nested content
-    - plain JSON string                                   -> already text
-    """
+    """Converts a single Yomitan definition block into plain text."""
     if isinstance(def_block, str):
         return def_block.strip()
 
@@ -89,211 +76,253 @@ def _clean_definition_text(text: str) -> str:
     """
     if not text:
         return ""
-    # Remove residual SVG/image references that sometimes leak through
     text = re.sub(r"svg[^\s\"']*", "", text)
-    # Collapse multiple spaces (but keep intentional newlines)
     text = re.sub(r"[ \t]+", " ", text)
-    # Collapse 3+ newlines down to 2
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-class DictionaryLoader:
+def get_dictionary_title(path: str) -> str:
     """
-    Loads and manages JSON dictionary files (Yomitan term banks) from a
-    directory tree.
+    Retrieves the display title for a dictionary folder.
 
-    Each immediate subdirectory is treated as one dictionary (one rung on
-    the ladder). Definitions are kept per-dictionary so Mode A can walk the
-    ladder in order while Mode B can score all candidates at once.
+    First inspects index.json if present (standard Yomitan metadata),
+    falling back to the folder's base name.
     """
+    if not path:
+        return ""
+    try:
+        norm_path = os.path.realpath(os.path.expanduser(path))
+        index_file = os.path.join(norm_path, "index.json")
+        if os.path.isfile(index_file):
+            with open(index_file, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                if isinstance(meta, dict) and meta.get("title"):
+                    return str(meta["title"]).strip()
+        return os.path.basename(norm_path)
+    except Exception:
+        return os.path.basename(path.rstrip("/\\")) or path
 
-    def __init__(self, directory: str):
-        self.directory = directory
-        # Ordered list of per-dictionary maps: {word: [definitions...]}
-        self.dictionaries: List[Dict[str, List[str]]] = []
-        # Flat index for quick lookups: {word: [definitions...]}
-        self.data: Dict[str, List[str]] = {}
 
-        # Parsing hundreds of JSON term banks takes minutes on first load,
-        # so we persist the parsed structure to a pickle cache in the
-        # add-on's user files folder. Subsequent loads take milliseconds.
-        cache_path = self._cache_path_for(directory)
-        if cache_path and os.path.exists(cache_path):
-            try:
-                with open(cache_path, "rb") as f:
-                    self.dictionaries, self.data = pickle.load(f)
-                print(f"CompreDef: Loaded {len(self.dictionaries)} dictionaries from cache")
-                return
-            except Exception as e:
-                # Corrupt cache must never break loading; fall through to a
-                # full re-parse.
-                print(f"CompreDef: Cache read failed ({e}), re-parsing...")
+def find_dictionary_folders(parent_or_dict_path: str) -> List[str]:
+    """
+    Scans a directory path and returns all valid dictionary folder paths.
 
-        self._load_dictionaries()
-        if cache_path and self.dictionaries:
-            self._save_cache(cache_path)
+    If `parent_or_dict_path` directly contains term_bank_*.json files,
+    it returns `[parent_or_dict_path]`.
+    Otherwise, it checks immediate subdirectories and returns all that
+    contain term_bank_*.json files or index.json.
+    """
+    if not parent_or_dict_path or not os.path.isdir(parent_or_dict_path):
+        return []
 
-    def _cache_path_for(self, directory: str) -> Optional[str]:
-        """
-        Computes a stable cache file path for a dictionary folder.
+    norm = os.path.realpath(os.path.expanduser(parent_or_dict_path))
 
-        The cache lives in the add-on's persistent `user_files` folder (the
-        standard Anki location for add-on data that must survive restarts
-        and updates). /tmp is unsuitable because tmpfs is wiped on reboot,
-        which would force a 170s re-parse of every dictionary.
+    # Check if the folder itself is a dictionary
+    has_banks = any(
+        f.startswith("term_bank") and f.endswith(".json")
+        for f in os.listdir(norm)
+    )
+    if has_banks:
+        return [norm]
 
-        The path is normalized (trailing slashes stripped, real path
-        resolved) before hashing so the same folder always maps to the
-        same cache even if the user typed it with a trailing slash.
-        """
-        if not directory:
-            return None
-        # Normalize: expand ~, resolve .., strip trailing separator
+    # Check immediate subdirectories
+    results = []
+    for entry in sorted(os.listdir(norm)):
+        sub = os.path.join(norm, entry)
+        if not os.path.isdir(sub):
+            continue
         try:
-            normalized = os.path.realpath(os.path.expanduser(directory))
+            sub_files = os.listdir(sub)
+            if any(f.startswith("term_bank") and f.endswith(".json") for f in sub_files) or "index.json" in sub_files:
+                results.append(sub)
         except Exception:
-            normalized = directory.rstrip(os.sep)
+            continue
 
-        digest = hashlib.md5(normalized.encode("utf-8")).hexdigest()[:16]
-        cache_dir = self._user_cache_dir()
-        if cache_dir:
-            return os.path.join(cache_dir, f"compredef_cache_{digest}.pkl")
-        # Fallback if user_files is somehow unavailable
-        return os.path.join("/tmp", f"compredef_cache_{digest}.pkl")
+    return results
 
-    def _user_cache_dir(self) -> Optional[str]:
+
+def _get_cache_dir() -> str:
+    """
+    Locates and creates the persistent cache directory inside the add-on's user_files.
+    Falls back to /tmp if unavailable.
+    """
+    try:
+        addon_dir = os.path.dirname(os.path.abspath(__file__))
+        cache_dir = os.path.join(addon_dir, "user_files", "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+    except Exception:
+        fallback = os.path.join("/tmp", "compredef_cache")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+
+class SingleDictionary:
+    """
+    Represents a single Yomitan dictionary folder.
+
+    Maintains its own independent cache file so reordering dictionaries in
+    the ladder requires ZERO re-parsing.
+    """
+
+    def __init__(self, path: str):
+        self.path = os.path.realpath(os.path.expanduser(path))
+        self.title = get_dictionary_title(self.path)
+        self.data: Dict[str, List[str]] = {}
+        self.is_loaded: bool = False
+
+    def _compute_signature(self, bank_files: List[str]) -> str:
+        """Computes signature of term bank files to detect dictionary updates."""
+        parts = []
+        for f in sorted(bank_files):
+            full_p = os.path.join(self.path, f)
+            try:
+                st = os.stat(full_p)
+                parts.append(f"{f}:{st.st_mtime_ns}:{st.st_size}")
+            except Exception:
+                parts.append(f)
+        return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
+
+    def _cache_file_path(self) -> str:
+        """Returns the pickle cache file path specific to this dictionary."""
+        digest = hashlib.md5(self.path.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(_get_cache_dir(), f"dict_{digest}.pkl")
+
+    def load(self) -> None:
         """
-        Locates (and creates if needed) the add-on's user_files cache dir.
+        Loads the dictionary into memory.
 
-        Resolves to <addon_folder>/user_files/cache. Uses the fact that
-        parser.py lives inside the add-on folder itself.
+        Attempts to load from its dedicated pickle cache. If the cache is
+        missing or outdated, parses the JSON term banks and saves the cache.
         """
-        try:
-            addon_dir = os.path.dirname(os.path.abspath(__file__))
-            cache_dir = os.path.join(addon_dir, "user_files", "cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            return cache_dir
-        except Exception as e:
-            print(f"CompreDef: Could not create user_files cache dir: {e}")
-            return None
-
-    def _save_cache(self, cache_path: str) -> None:
-        """Persists the parsed dictionary structure to the pickle cache."""
-        try:
-            with open(cache_path, "wb") as f:
-                pickle.dump((self.dictionaries, self.data), f)
-            print(f"CompreDef: Saved dictionary cache to {cache_path}")
-        except Exception as e:
-            # Cache writing is best-effort; failing to cache must never
-            # break dictionary loading.
-            print(f"CompreDef: Cache write failed: {e}")
-
-    def _find_term_banks(self) -> Dict[str, List[str]]:
-        """
-        Discovers term bank files, grouped per dictionary subfolder.
-
-        Returns a mapping of {dictionary_name: [absolute bank paths in
-        natural ladder order]} so the ladder order is deterministic.
-        """
-        banks_by_dict: Dict[str, List[str]] = {}
-
-        if not os.path.isdir(self.directory):
-            print(f"CompreDef Error: Dictionary directory not found: {self.directory}")
-            return banks_by_dict
-
-        # Case 1: term banks directly inside the configured folder
-        top_level = [
-            f for f in os.listdir(self.directory)
-            if f.startswith("term_bank") and f.endswith(".json")
-        ]
-        if top_level:
-            banks_by_dict[self.directory] = sorted(
-                os.path.join(self.directory, f) for f in top_level
-            )
-
-        # Case 2: each subfolder is one unzipped dictionary
-        for entry in sorted(os.listdir(self.directory)):
-            sub_path = os.path.join(self.directory, entry)
-            if not os.path.isdir(sub_path):
-                continue
-            banks = [
-                f for f in os.listdir(sub_path)
-                if f.startswith("term_bank") and f.endswith(".json")
-            ]
-            if banks:
-                banks_by_dict[entry] = sorted(
-                    os.path.join(sub_path, f) for f in banks
-                )
-
-        return banks_by_dict
-
-    def _load_dictionaries(self) -> None:
-        """Loads all discovered term banks into memory, preserving ladder order."""
-        banks_by_dict = self._find_term_banks()
-
-        if not banks_by_dict:
-            print(
-                "CompreDef Warning: No term_bank_*.json files found in "
-                f"{self.directory} (checked subfolders too)."
-            )
+        if self.is_loaded:
             return
 
-        # Sort dictionary names so the ladder (easy -> advanced) is stable;
-        # users can prefix folders with numbers to control difficulty order.
-        total_words = 0
-        for dict_name in sorted(banks_by_dict.keys()):
-            dict_data: Dict[str, List[str]] = {}
-            for bank_path in banks_by_dict[dict_name]:
-                try:
-                    with open(bank_path, "r", encoding="utf-8") as f:
-                        entries = json.load(f)
-                except (json.JSONDecodeError, IOError) as e:
-                    print(f"CompreDef Error loading {os.path.basename(bank_path)}: {e}")
+        if not os.path.isdir(self.path):
+            print(f"CompreDef: Dictionary path not found: {self.path}")
+            self.is_loaded = True
+            return
+
+        bank_files = [
+            f for f in os.listdir(self.path)
+            if f.startswith("term_bank") and f.endswith(".json")
+        ]
+        if not bank_files:
+            print(f"CompreDef: No term banks in: {self.path}")
+            self.is_loaded = True
+            return
+
+        current_sig = self._compute_signature(bank_files)
+        cache_path = self._cache_file_path()
+
+        # Try fast load from disk cache
+        if os.path.isfile(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    cached_sig, cached_data = pickle.load(f)
+                if cached_sig == current_sig:
+                    self.data = cached_data
+                    self.is_loaded = True
+                    print(f"CompreDef: Loaded '{self.title}' from cache ({len(self.data)} words)")
+                    return
+            except Exception as e:
+                print(f"CompreDef: Cache read failed for '{self.title}' ({e}), re-parsing...")
+
+        # Parse term banks
+        print(f"CompreDef: Parsing '{self.title}' ({len(bank_files)} banks)...")
+        parsed_data: Dict[str, List[str]] = {}
+
+        for b_name in sorted(bank_files):
+            b_path = os.path.join(self.path, b_name)
+            try:
+                with open(b_path, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+            except Exception as e:
+                print(f"CompreDef: Failed to load {b_name}: {e}")
+                continue
+
+            for entry in entries:
+                if not isinstance(entry, list) or len(entry) < 6:
                     continue
 
-                for entry in entries:
-                    # Yomitan format: [term, reading, ..., definitions(at index 5), ...]
-                    if not isinstance(entry, list) or len(entry) < 6:
-                        continue
+                word = entry[0]
+                if not word or not isinstance(word, str):
+                    continue
 
-                    word = entry[0]
-                    if not word or not isinstance(word, str):
-                        continue
+                for def_block in entry[5]:
+                    text = _clean_definition_text(_definition_to_text(def_block))
+                    if text:
+                        parsed_data.setdefault(word, []).append(text)
 
-                    for def_block in entry[5]:
-                        text = _clean_definition_text(
-                            _definition_to_text(def_block)
-                        )
-                        if not text:
-                            continue
-                        dict_data.setdefault(word, []).append(text)
+        self.data = parsed_data
+        self.is_loaded = True
+        print(f"CompreDef: Finished parsing '{self.title}' ({len(self.data)} words)")
 
-            if dict_data:
-                self.dictionaries.append(dict_data)
-                total_words += len(dict_data)
-
-        # Build flat lookup index across all dictionaries
-        for dict_data in self.dictionaries:
-            for word, defs in dict_data.items():
-                self.data.setdefault(word, []).extend(defs)
-
-        print(f"CompreDef: Loaded {len(self.dictionaries)} dictionaries, {total_words} unique words")
-
-    def lookup_all(self, word: str) -> List[str]:
-        """
-        Returns every definition for a word across all dictionaries,
-        concatenated (used by Mode B for scoring all candidates).
-        """
-        return self.data.get(word, [])
+        # Persist to disk cache
+        try:
+            with open(cache_path, "wb") as f:
+                pickle.dump((current_sig, self.data), f)
+        except Exception as e:
+            print(f"CompreDef: Failed to save cache for '{self.title}': {e}")
 
     def lookup(self, word: str) -> List[str]:
-        """Backwards-compatible alias for `lookup_all`."""
-        return self.lookup_all(word)
+        """Looks up all definitions for `word`, loading data on demand."""
+        if not self.is_loaded:
+            self.load()
+        return self.data.get(word, [])
 
-    def lookup_ladder(self, word: str) -> List[List[str]]:
+
+# In-memory dictionary cache to prevent duplicate instances
+_loaded_dicts: Dict[str, SingleDictionary] = {}
+
+
+def get_single_dictionary(path: str) -> SingleDictionary:
+    """Returns or creates a cached SingleDictionary instance for the given path."""
+    norm = os.path.realpath(os.path.expanduser(path))
+    if norm not in _loaded_dicts:
+        _loaded_dicts[norm] = SingleDictionary(norm)
+    return _loaded_dicts[norm]
+
+
+class DictionaryLoader:
+    """
+    Backwards-compatible loader managing an ordered list of dictionaries.
+    """
+
+    def __init__(self, directory_or_paths: object):
+        self.dictionaries: List[SingleDictionary] = []
+
+        paths: List[str] = []
+        if isinstance(directory_or_paths, list):
+            paths = [str(p) for p in directory_or_paths if p]
+        elif isinstance(directory_or_paths, str) and directory_or_paths:
+            # Discover subfolders or use the single folder
+            found = find_dictionary_folders(directory_or_paths)
+            paths = found if found else [directory_or_paths]
+
+        for p in paths:
+            if os.path.isdir(p):
+                self.dictionaries.append(get_single_dictionary(p))
+
+    def lookup_ladder(self, word: str) -> List[Tuple[SingleDictionary, List[str]]]:
         """
-        Returns definitions grouped per dictionary in ladder order:
-        [[dict1 defs...], [dict2 defs...], ...] (used by Mode A).
+        Returns a list of (dictionary, definitions) for each dictionary in
+        ladder order.
         """
-        return [d.get(word, []) for d in self.dictionaries if d.get(word)]
+        results = []
+        for d in self.dictionaries:
+            defs = d.lookup(word)
+            if defs:
+                results.append((d, defs))
+        return results
+
+    def lookup_all(self, word: str) -> List[str]:
+        """Concatenates all definitions across all dictionaries."""
+        all_defs = []
+        for d in self.dictionaries:
+            all_defs.extend(d.lookup(word))
+        return all_defs
+
+    def lookup(self, word: str) -> List[str]:
+        return self.lookup_all(word)
