@@ -15,6 +15,7 @@ from aqt.editor import Editor
 from aqt.browser import Browser
 from aqt.qt import QMenu, QKeySequence
 from aqt.utils import tooltip
+from .generator import generate_definition
 
 
 def _get_addon_name() -> str:
@@ -42,15 +43,6 @@ def _get_addon_config() -> Dict[str, Any]:
     return mw.addonManager.getConfig(addon_name) or {}
 
 
-def _generate_stub_definition(target_word: str, mode: str) -> str:
-    """
-    Placeholder definition generator until MeCab and Kanji Matrix modules are linked.
-
-    Formats a descriptive stub based on the selected mode and target word.
-    """
-    return f"[{mode}] Definition for: {target_word}"
-
-
 def on_editor_generate_definition(editor: Editor) -> None:
     """
     Action callback triggered when user clicks the CompreDef editor toolbar button.
@@ -67,6 +59,7 @@ def on_editor_generate_definition(editor: Editor) -> None:
     word_field = config.get("word_field", "")
     def_field = config.get("definition_field", "")
     mode = config.get("mode", "Mode A")
+    dictionary_folder = config.get("dictionary_folder", "")
 
     # Validate note type match
     note_model_name = editor.note.model()["name"]
@@ -93,8 +86,7 @@ def on_editor_generate_definition(editor: Editor) -> None:
 
     # Execute generation task in background thread to prevent UI freezing
     def task() -> str:
-        # Long-running dictionary / LLM query will execute here
-        return _generate_stub_definition(word_text, mode)
+        return generate_definition(word_text, mode, dictionary_folder)
 
     def on_done(future) -> None:
         try:
@@ -112,6 +104,7 @@ def on_editor_generate_definition(editor: Editor) -> None:
             tooltip(f"Error generating definition: {exc}", parent=editor.parentWindow)
 
     mw.taskman.run_in_background(task, on_done)
+
 
 
 def add_editor_button(buttons: List[str], editor: Editor) -> None:
@@ -150,6 +143,7 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
     word_field = config.get("word_field", "")
     def_field = config.get("definition_field", "")
     mode = config.get("mode", "Mode A")
+    dictionary_folder = config.get("dictionary_folder", "")
 
     def task() -> int:
         """Background task running across all selected note IDs."""
@@ -169,7 +163,7 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                     continue
 
                 # Generate definition for note
-                definition_result = _generate_stub_definition(word_text, mode)
+                definition_result = generate_definition(word_text, mode, dictionary_folder)
                 note[def_field] = definition_result
                 mw.col.update_note(note)
                 updated_count += 1
