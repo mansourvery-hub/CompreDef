@@ -192,9 +192,9 @@ class ConfigDialog(QDialog):
         auto_def_field = None
 
         if not prev_word_field:
-            auto_word_field = self._find_best_field_match(fields, _TARGET_WORD_KEYWORDS, fallback=None)
+            auto_word_field = _find_best_field_match(fields, _TARGET_WORD_KEYWORDS, fallback=None)
         if not prev_def_field:
-            auto_def_field = self._find_best_field_match(fields, _DEFINITION_KEYWORDS, fallback=None)
+            auto_def_field = _find_best_field_match(fields, _DEFINITION_KEYWORDS, fallback=None)
 
         # Restore previous selection if valid, otherwise use auto-match, otherwise keep as is
         if prev_word_field in fields:
