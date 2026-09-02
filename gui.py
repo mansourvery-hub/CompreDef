@@ -49,29 +49,29 @@ def _get_addon_name() -> str:
 
 
 def _find_best_field_match(fields: List[str], keywords: List[str], fallback: str = None) -> Optional[str]:
-        """
-        Finds the best matching field name based on keyword similarity.
+    """
+    Finds the best matching field name based on keyword similarity.
 
-        Performs case-insensitive matching against provided keywords, with
-        priority given to exact matches followed by substring matches.
-        """
-        if not fields or not keywords:
-            return fallback
-
-        # Normalize fields for comparison
-        fields_lower = [f.lower().replace("_", " ").replace("-", " ") for f in fields]
-
-        for keyword in keywords:
-            # Check for exact match
-            for f_lower in fields_lower:
-                if f_lower == keyword.lower():
-                    return f
-            # Check for substring match (case-insensitive)
-            for f_lower in fields_lower:
-                if keyword.lower() in f_lower:
-                    return f
-
+    Performs case-insensitive matching against provided keywords, with
+    priority given to exact matches followed by substring matches.
+    """
+    if not fields or not keywords:
         return fallback
+
+    # Normalize fields for comparison
+    fields_lower = [f.lower().replace("_", " ").replace("-", " ") for f in fields]
+
+    for keyword in keywords:
+        # Check for exact match
+        for i, f_lower in enumerate(fields_lower):
+            if f_lower == keyword.lower():
+                return fields[i]
+        # Check for substring match (case-insensitive)
+        for i, f_lower in enumerate(fields_lower):
+            if keyword.lower() in f_lower:
+                return fields[i]
+
+    return fallback
 
 
 class ConfigDialog(QDialog):
@@ -87,10 +87,12 @@ class ConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("CompreDef Configuration")
         self.resize(450, 250)
+        
+        # Store root addon name for persistent config
+        self.addon_name = _get_addon_name()
 
         # Retrieve existing user configuration or fall back to empty defaults
-        addon_name = _get_addon_name()
-        self.config: Dict[str, Any] = mw.addonManager.getConfig(addon_name) or {}
+        self.config: Dict[str, Any] = mw.addonManager.getConfig(self.addon_name) or {}
 
         # Initialize UI layout and controls
         self._init_ui()
@@ -266,7 +268,7 @@ class ConfigDialog(QDialog):
         }
 
         # Persist updated configuration via Anki's addonManager API using root addon name
-        mw.addonManager.writeConfig(addon_name, updated_config)
+        mw.addonManager.writeConfig(self.addon_name, updated_config)
         self.accept()
 
 
