@@ -16,6 +16,7 @@ from aqt.browser import Browser
 from aqt.qt import QMenu, QKeySequence
 from aqt.utils import tooltip
 from .generator import generate_definition
+from .db_utils import reset_caches
 
 
 def _get_addon_name() -> str:
@@ -170,6 +171,10 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
             except Exception:
                 # Avoid crashing the loop on an individual note failure
                 continue
+
+        # Note fields were modified, so the memoized known-kanji/vocab
+        # sets are stale; force a rescan on next use.
+        reset_caches()
 
         return updated_count
 

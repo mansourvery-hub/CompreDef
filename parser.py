@@ -15,7 +15,9 @@ mirroring the file ordering rules from ARCHITECTURE.md.
 
 import json
 import os
+import pickle
 import re
+import hashlib
 from typing import Dict, List, Optional
 
 
@@ -112,7 +114,49 @@ class DictionaryLoader:
         self.dictionaries: List[Dict[str, List[str]]] = []
         # Flat index for quick lookups: {word: [definitions...]}
         self.data: Dict[str, List[str]] = {}
+
+        # Parsing hundreds of JSON term banks takes minutes on first load,
+        # so we persist the parsed structure to a pickle cache in the
+        # add-on's user files folder. Subsequent loads take milliseconds.
+        cache_path = self._cache_path_for(directory)
+        if cache_path and os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    self.dictionaries, self.data = pickle.load(f)
+                print(f"CompreDef: Loaded {len(self.dictionaries)} dictionaries from cache")
+                return
+            except Exception as e:
+                # Corrupt cache must never break loading; fall through to a
+                # full re-parse.
+                print(f"CompreDef: Cache read failed ({e}), re-parsing...")
+
         self._load_dictionaries()
+        if cache_path and self.dictionaries:
+            self._save_cache(cache_path)
+
+    def _cache_path_for(self, directory: str) -> Optional[str]:
+        """
+        Computes a stable cache file path for a dictionary folder.
+
+        The path is derived from a hash of the folder path so multiple
+        folders can coexist without collisions. Caches live in the
+        system temp directory (deleted on reboot, always rebuildable).
+        """
+        if not directory:
+            return None
+        digest = hashlib.md5(directory.encode("utf-8")).hexdigest()[:16]
+        return os.path.join("/tmp", f"compredef_cache_{digest}.pkl")
+
+    def _save_cache(self, cache_path: str) -> None:
+        """Persists the parsed dictionary structure to the pickle cache."""
+        try:
+            with open(cache_path, "wb") as f:
+                pickle.dump((self.dictionaries, self.data), f)
+            print(f"CompreDef: Saved dictionary cache to {cache_path}")
+        except Exception as e:
+            # Cache writing is best-effort; failing to cache must never
+            # break dictionary loading.
+            print(f"CompreDef: Cache write failed: {e}")
 
     def _find_term_banks(self) -> Dict[str, List[str]]:
         """
