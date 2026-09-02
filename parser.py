@@ -1,92 +1,224 @@
 """
-parser.py - JSON Dictionary loading and definition parsing.
+parser.py - JSON Dictionary loading and definition parsing for CompreDef.
 
-Handles loading local dictionary JSON files (Yomitan/Yomichan format)
-and parsing them for definition lookups.
+Loads Yomitan/Yomichan-format term bank JSON files (term_bank_*.json)
+from a dictionary folder, including nested subdirectories (each unzipped
+dictionary lives in its own subfolder).
+
+Text extraction supports both plain-text definitions and structured-content
+(HTML-like nested dicts) so that any dictionary format yields readable text.
+
+The ladder (Children's -> Standard -> Advanced) is determined by the
+alphabetical order of the dictionary folder names, then by term bank number,
+mirroring the file ordering rules from ARCHITECTURE.md.
 """
 
 import json
 import os
-from typing import Dict, List, Any
+import re
+from typing import Dict, List, Optional
+
+
+def _extract_text_from_structured_content(node: object) -> str:
+    """
+    Recursively walks a Yomitan structured-content node and collects
+    all human-readable text.
+
+    Structured content is either:
+    - a plain string,
+    - a list of nodes, or
+    - a dict like {"tag": ..., "content": ...} possibly with "rt" (ruby text).
+
+    Returns the concatenated text with noise (image paths, etc.) removed.
+    """
+    # Base case: plain text node
+    if isinstance(node, str):
+        return node
+
+    # List of child nodes: process each and join
+    if isinstance(node, list):
+        parts = [_extract_text_from_structured_content(child) for child in node]
+        return "".join(p for p in parts if p)
+
+    # Dict node: recurse into its "content", append ruby text from "rt"
+    if isinstance(node, dict):
+        parts = []
+        content = node.get("content")
+        if content is not None:
+            parts.append(_extract_text_from_structured_content(content))
+        # Ruby text (furigana) also carries useful characters for kanji scoring
+        rt = node.get("rt")
+        if rt is not None:
+            parts.append(_extract_text_from_structured_content(rt))
+        return "".join(p for p in parts if p)
+
+    # Anything else (numbers, booleans, None) is not displayable text
+    return ""
+
+
+def _definition_to_text(def_block: object) -> str:
+    """
+    Converts a single Yomitan definition block into plain text.
+
+    Yomitan definition blocks come in two flavors:
+    - {"type": "text", "text": "..."}                     -> plain text
+    - {"type": "structured-content", "content": [...]}     -> nested content
+    - plain JSON string                                   -> already text
+    """
+    if isinstance(def_block, str):
+        return def_block.strip()
+
+    if isinstance(def_block, dict):
+        if def_block.get("type") == "text":
+            return str(def_block.get("text", "")).strip()
+        if "content" in def_block:
+            return _extract_text_from_structured_content(
+                def_block["content"]
+            ).strip()
+
+    return ""
+
+
+def _clean_definition_text(text: str) -> str:
+    """
+    Normalizes extracted definition text:
+    collapses excessive whitespace and removes leftover image markers,
+    while preserving Japanese punctuation and newlines between senses.
+    """
+    if not text:
+        return ""
+    # Remove residual SVG/image references that sometimes leak through
+    text = re.sub(r"svg[^\s\"']*", "", text)
+    # Collapse multiple spaces (but keep intentional newlines)
+    text = re.sub(r"[ \t]+", " ", text)
+    # Collapse 3+ newlines down to 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class DictionaryLoader:
     """
-    Loads and manages JSON dictionary files from a specified directory.
-    Supports Yomitan/Yomichan term bank format.
+    Loads and manages JSON dictionary files (Yomitan term banks) from a
+    directory tree.
+
+    Each immediate subdirectory is treated as one dictionary (one rung on
+    the ladder). Definitions are kept per-dictionary so Mode A can walk the
+    ladder in order while Mode B can score all candidates at once.
     """
+
     def __init__(self, directory: str):
         self.directory = directory
-        # Store as dict: {word: [definition1, ...]}
+        # Ordered list of per-dictionary maps: {word: [definitions...]}
+        self.dictionaries: List[Dict[str, List[str]]] = []
+        # Flat index for quick lookups: {word: [definitions...]}
         self.data: Dict[str, List[str]] = {}
         self._load_dictionaries()
 
-    def _load_dictionaries(self) -> None:
-        """Loads all JSON files from the directory and stores them."""
-        if not os.path.exists(self.directory):
-            print(f"CompreDef Error: Dictionary directory not found: {self.directory}")
-            return
+    def _find_term_banks(self) -> Dict[str, List[str]]:
+        """
+        Discovers term bank files, grouped per dictionary subfolder.
 
-        # Look for term_bank_*.json files
-        files = [
-            os.path.join(self.directory, f)
-            for f in os.listdir(self.directory)
+        Returns a mapping of {dictionary_name: [absolute bank paths in
+        natural ladder order]} so the ladder order is deterministic.
+        """
+        banks_by_dict: Dict[str, List[str]] = {}
+
+        if not os.path.isdir(self.directory):
+            print(f"CompreDef Error: Dictionary directory not found: {self.directory}")
+            return banks_by_dict
+
+        # Case 1: term banks directly inside the configured folder
+        top_level = [
+            f for f in os.listdir(self.directory)
             if f.startswith("term_bank") and f.endswith(".json")
         ]
-        
-        if not files:
-            print(f"CompreDef Warning: No term_bank_*.json files found in {self.directory}.")
-            return
-        
-        print(f"CompreDef: Loading {len(files)} dictionary files...")
-        
-        for path in files:
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    entries = json.load(f)
-                    
-                    for entry in entries:
-                        # Yomitan format: ["word", "reading", "reading2", "reading3", value, definitions, value2, extra]
-                        # Check if entry is a list with at least 2 items
-                        if not isinstance(entry, list) or len(entry) < 2:
-                            continue
-                        
-                        word = entry[0]
-                        
-                        # If we can't get the word, skip
-                        if not word or not isinstance(word, str):
-                            continue
-                        
-                        # Extract definitions from index 5
-                        definitions_data = entry[5] if len(entry) > 5 else []
-                        
-                        # Process each definition block
-                        definitions = []
-                        for def_block in definitions_data:
-                            if isinstance(def_block, list):
-                                for item in def_block:
-                                    if isinstance(item, dict):
-                                        # Try to find content in the structured format
-                                        content = item.get('content', [])
-                                        if isinstance(content, list):
-                                            for content_item in content:
-                                                if isinstance(content_item, str):
-                                                    definitions.append(content_item)
-                                        elif isinstance(content, str):
-                                            definitions.append(content)
-                        
-                        # If we found definitions, store them
-                        if definitions:
-                            if word not in self.data:
-                                self.data[word] = []
-                            self.data[word].extend(definitions)
-                            
-            except (json.JSONDecodeError, IOError, IndexError) as e:
-                print(f"CompreDef Error loading {os.path.basename(path)}: {e}")
+        if top_level:
+            banks_by_dict[self.directory] = sorted(
+                os.path.join(self.directory, f) for f in top_level
+            )
+
+        # Case 2: each subfolder is one unzipped dictionary
+        for entry in sorted(os.listdir(self.directory)):
+            sub_path = os.path.join(self.directory, entry)
+            if not os.path.isdir(sub_path):
                 continue
-        
-        print(f"CompreDef: Loaded {len(self.data)} unique words")
+            banks = [
+                f for f in os.listdir(sub_path)
+                if f.startswith("term_bank") and f.endswith(".json")
+            ]
+            if banks:
+                banks_by_dict[entry] = sorted(
+                    os.path.join(sub_path, f) for f in banks
+                )
+
+        return banks_by_dict
+
+    def _load_dictionaries(self) -> None:
+        """Loads all discovered term banks into memory, preserving ladder order."""
+        banks_by_dict = self._find_term_banks()
+
+        if not banks_by_dict:
+            print(
+                "CompreDef Warning: No term_bank_*.json files found in "
+                f"{self.directory} (checked subfolders too)."
+            )
+            return
+
+        # Sort dictionary names so the ladder (easy -> advanced) is stable;
+        # users can prefix folders with numbers to control difficulty order.
+        total_words = 0
+        for dict_name in sorted(banks_by_dict.keys()):
+            dict_data: Dict[str, List[str]] = {}
+            for bank_path in banks_by_dict[dict_name]:
+                try:
+                    with open(bank_path, "r", encoding="utf-8") as f:
+                        entries = json.load(f)
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"CompreDef Error loading {os.path.basename(bank_path)}: {e}")
+                    continue
+
+                for entry in entries:
+                    # Yomitan format: [term, reading, ..., definitions(at index 5), ...]
+                    if not isinstance(entry, list) or len(entry) < 6:
+                        continue
+
+                    word = entry[0]
+                    if not word or not isinstance(word, str):
+                        continue
+
+                    for def_block in entry[5]:
+                        text = _clean_definition_text(
+                            _definition_to_text(def_block)
+                        )
+                        if not text:
+                            continue
+                        dict_data.setdefault(word, []).append(text)
+
+            if dict_data:
+                self.dictionaries.append(dict_data)
+                total_words += len(dict_data)
+
+        # Build flat lookup index across all dictionaries
+        for dict_data in self.dictionaries:
+            for word, defs in dict_data.items():
+                self.data.setdefault(word, []).extend(defs)
+
+        print(f"CompreDef: Loaded {len(self.dictionaries)} dictionaries, {total_words} unique words")
+
+    def lookup_all(self, word: str) -> List[str]:
+        """
+        Returns every definition for a word across all dictionaries,
+        concatenated (used by Mode B for scoring all candidates).
+        """
+        return self.data.get(word, [])
 
     def lookup(self, word: str) -> List[str]:
-        """Looks up a word in the loaded dictionary data."""
-        return self.data.get(word, [])
+        """Backwards-compatible alias for `lookup_all`."""
+        return self.lookup_all(word)
+
+    def lookup_ladder(self, word: str) -> List[List[str]]:
+        """
+        Returns definitions grouped per dictionary in ladder order:
+        [[dict1 defs...], [dict2 defs...], ...] (used by Mode A).
+        """
+        return [d.get(word, []) for d in self.dictionaries if d.get(word)]
