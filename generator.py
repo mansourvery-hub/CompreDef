@@ -10,37 +10,78 @@ Implements the Dictionary Ladder with Kanji Matrix Scoring:
 - Maximal Fallback: If no dictionary has a 100% known definition, the algorithm
   returns the maximal definition (the definition with the highest kanji
   comprehension score / least complicated) across all installed dictionaries.
+- HTML-Aware: Evaluates kanji scoring strictly on base kanji characters
+  (stripping <rt> furigana readings so kana readings never pollute kanji counts),
+  while returning the rich, fully styled Yomitan HTML for insertion into Anki.
 """
 
-from typing import List, Optional, Union
-from .db_utils import get_known_kanji_set
-from .parser import (
-    get_single_dictionary,
-    find_dictionary_folders,
-    SingleDictionary,
-)
+import re
+import html
+from typing import List, Optional, Union, Set
+
+try:
+    from .db_utils import get_known_kanji_set
+    from .parser import (
+        get_single_dictionary,
+        find_dictionary_folders,
+        SingleDictionary,
+    )
+except ImportError:
+    from db_utils import get_known_kanji_set
+    from parser import (
+        get_single_dictionary,
+        find_dictionary_folders,
+        SingleDictionary,
+    )
+
+# Matches kanji in CJK Unified Ideographs block
+_KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
+
+# Regular expressions to strip ruby readings and tags for accurate kanji scoring
+_RT_RE = re.compile(r'<rt\b[^>]*>.*?</rt>', flags=re.DOTALL | re.IGNORECASE)
+_RP_RE = re.compile(r'<rp\b[^>]*>.*?</rp>', flags=re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r'<[^>]+>')
 
 
-def _is_reference_title(text: str) -> bool:
+def _extract_base_text(html_or_text: str) -> str:
+    """
+    Extracts visible base text from HTML, stripping ruby furigana (<rt> tags).
+    """
+    if not html_or_text:
+        return ""
+    # Strip furigana reading tags
+    no_rt = _RT_RE.sub("", html_or_text)
+    no_rp = _RP_RE.sub("", no_rt)
+    # Strip remaining HTML tags
+    plain = _TAG_RE.sub("", no_rp)
+    return html.unescape(plain).strip()
+
+
+def _is_reference_title(html_or_text: str) -> bool:
     """
     Detects entries that are just cross-reference titles (e.g. "会社更生法")
     rather than actual definitions.
 
-    Heuristic: short text (under 10 chars) with no sentence punctuation
+    Heuristic: visible text under 10 chars with no sentence punctuation
     (。、) is almost always a "see also" headword, not a definition.
     """
-    if len(text) >= 10:
+    clean_text = _extract_base_text(html_or_text)
+    if len(clean_text) >= 10:
         return False
-    return not any(p in text for p in ("。", "、", "：", "，"))
+    return not any(p in clean_text for p in ("。", "、", "：", "，"))
 
 
-def _calculate_kanji_score(text: str, known_kanji: set) -> float:
+def _calculate_kanji_score(html_or_text: str, known_kanji: Set[str]) -> float:
     """
-    Calculates kanji comprehension score: known kanji / total kanji.
+    Calculates kanji comprehension score: known base kanji / total base kanji.
 
-    A definition with no kanji at all is treated as fully comprehensible (1.0).
+    Accurately ignores <rt> furigana readings so only the base kanji the user
+    is expected to know are counted.
+
+    A definition with no kanji at all (kana only) returns 1.0 (fully comprehensible).
     """
-    kanji_in_text = [char for char in text if '\u4e00' <= char <= '\u9fff']
+    clean_text = _extract_base_text(html_or_text)
+    kanji_in_text = _KANJI_RE.findall(clean_text)
 
     if not kanji_in_text:
         return 1.0
@@ -54,20 +95,19 @@ def generate_definition(
     mode: str = "",
     dictionary_folder: str = "",
     dictionaries: Optional[List[str]] = None,
-) -> str:
+) -> Optional[str]:
     """
     Generates a definition for `target_word` following the Dictionary Ladder algorithm.
 
     Args:
         target_word: The Japanese word/expression to look up.
         mode: Kept for backwards compatibility (ignored, LLM removed).
-        dictionary_folder: Fallback single folder path.
-        dictionaries: Ordered list of dictionary directory paths from user config.
+        dictionary_folder: Fallback single folder or zip path.
+        dictionaries: Ordered list of dictionary directory/zip paths from user config.
 
     Returns:
-        The chosen definition string.
+        The chosen rich Yomitan HTML definition string, or None if not found.
     """
-    # Resolve ordered list of dictionary paths
     ladder_paths: List[str] = []
 
     if dictionaries and isinstance(dictionaries, list):
@@ -98,13 +138,13 @@ def generate_definition(
         for definition in valid_defs:
             score = _calculate_kanji_score(definition, known_kanji)
 
-            # EARLY EXIT: If 100% of kanji in this definition are known,
+            # EARLY EXIT: If 100% of kanji in this definition are known (on mature cards),
             # select it immediately and stop searching further dictionaries.
             # This delivers the simplest level-appropriate definition and saves CPU.
             if score >= 1.0:
                 print(
                     f"CompreDef: Early exit at '{dict_obj.title}' "
-                    f"(100% kanji match) for '{target_word}'"
+                    f"(100% mature kanji match) for '{target_word}'"
                 )
                 return definition
 

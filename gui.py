@@ -32,6 +32,7 @@ from aqt.qt import (
 from .parser import (
     get_dictionary_title,
     find_dictionary_folders,
+    is_zip_dictionary,
 )
 
 
@@ -164,13 +165,18 @@ class ConfigDialog(QDialog):
         # Buttons on the side for reordering and management
         buttons_vbox = QVBoxLayout()
 
-        self.add_dict_btn = QPushButton("Add Dictionary...")
-        self.add_dict_btn.setToolTip("Select a single dictionary folder containing term_bank_*.json")
+        self.add_zip_btn = QPushButton("Add Zip Archive...")
+        self.add_zip_btn.setToolTip("Select a Yomitan dictionary .zip file")
+        self.add_zip_btn.clicked.connect(self._on_add_zip)
+        buttons_vbox.addWidget(self.add_zip_btn)
+
+        self.add_dict_btn = QPushButton("Add Folder...")
+        self.add_dict_btn.setToolTip("Select a single unzipped dictionary folder")
         self.add_dict_btn.clicked.connect(self._on_add_dictionary)
         buttons_vbox.addWidget(self.add_dict_btn)
 
         self.add_folder_btn = QPushButton("Scan Folder...")
-        self.add_folder_btn.setToolTip("Scan a parent folder to automatically find and add all dictionary subfolders")
+        self.add_folder_btn.setToolTip("Scan a parent folder to automatically find and add all dictionary archives (.zip) and subfolders")
         self.add_folder_btn.clicked.connect(self._on_scan_folder)
         buttons_vbox.addWidget(self.add_folder_btn)
 
@@ -267,11 +273,16 @@ class ConfigDialog(QDialog):
             item.setToolTip(path)
 
     def _add_dict_path(self, path: str) -> bool:
-        """Adds a dictionary folder path to the ladder list if not already present."""
-        if not path or not os.path.isdir(path):
+        """Adds a dictionary path (zip or folder) to the ladder list if not already present."""
+        if not path:
             return False
 
         norm_path = os.path.realpath(os.path.expanduser(path))
+        is_zip = is_zip_dictionary(norm_path)
+
+        if not is_zip and not os.path.isdir(norm_path):
+            return False
+
         role = _user_role()
 
         # Check for duplicates
@@ -287,10 +298,21 @@ class ConfigDialog(QDialog):
         return True
 
     def _on_add_dictionary(self) -> None:
-        """Opens folder dialog to add an individual dictionary."""
+        """Opens folder dialog to add an individual unzipped dictionary folder."""
         folder = QFileDialog.getExistingDirectory(self, "Select Dictionary Directory")
         if folder:
             self._add_dict_path(folder)
+
+    def _on_add_zip(self) -> None:
+        """Opens file dialog to add a Yomitan dictionary .zip archive."""
+        zip_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Dictionary Zip File",
+            "",
+            "Yomitan Dictionaries (*.zip);;All Files (*)"
+        )
+        if zip_path:
+            self._add_dict_path(zip_path)
 
     def _on_scan_folder(self) -> None:
         """Opens folder dialog and scans for all dictionary subfolders."""

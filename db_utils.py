@@ -36,8 +36,13 @@ _caches_loaded: bool = False
 
 def _fetch_learned_note_fields() -> list:
     """
-    Fetches the field blob of every note that has at least one card with
-    interval > 0 (i.e. the user has actually learned the material).
+    Fetches the field blob of every note that has at least one 'Mature' card
+    with interval >= 21 days (indicating long-term retention).
+
+    In Anki statistics, cards with an interval of 21 days or longer are
+    classified as Mature. Filtering for ivl >= 21 ensures that only kanji
+    and vocabulary the user has genuinely retained long-term are counted
+    as known in the matrix.
 
     Selects note ids + flds without DISTINCT on the text blob (see
     performance notes above) and dedupes by note id in Python.
@@ -50,12 +55,12 @@ def _fetch_learned_note_fields() -> list:
             return []
 
         # Kanji Grid-style query: join notes with their cards and keep only
-        # material the user has seen through review (interval > 0).
+        # material on mature cards (interval >= 21 days for long-term retention).
         query = """
         SELECT DISTINCT notes.id, notes.flds
         FROM notes
         JOIN cards ON notes.id = cards.nid
-        WHERE cards.ivl > 0
+        WHERE cards.ivl >= 21
         """
         return mw.col.db.all(query) or []
     except Exception as e:
@@ -101,10 +106,10 @@ def _build_caches() -> None:
 
 def get_known_kanji_set() -> Set[str]:
     """
-    Scans the Anki database for all kanji present on cards with interval > 0.
+    Scans the Anki database for all kanji present on mature cards (interval >= 21).
 
     Returns:
-        A set of unique kanji characters considered 'known'.
+        A set of unique kanji characters considered 'known' through long-term retention.
     """
     _build_caches()
     return _known_kanji_cache
@@ -112,8 +117,8 @@ def get_known_kanji_set() -> Set[str]:
 
 def get_known_vocabulary_set() -> Set[str]:
     """
-    Scans the Anki database for all vocabulary (words) present on cards
-    with an interval > 0.
+    Scans the Anki database for all vocabulary (words) present on mature cards
+    with an interval >= 21 days.
 
     The first field of each note is treated as the word/expression field
     (the standard convention for Japanese note types).
