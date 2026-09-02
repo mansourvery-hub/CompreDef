@@ -7,8 +7,10 @@ to the user's known vocabulary and kanji.
 
 from aqt import mw
 from .gui import show_config_dialog
+from .editor_browser import setup_editor_browser_hooks
 
 # Register the configuration dialog callback with Anki's Addon Manager
 # This allows users to configure the add-on directly from Tools -> Add-ons -> Config
 if mw:
     mw.addonManager.setConfigAction(__name__, show_config_dialog)
+    setup_editor_browser_hooks()
