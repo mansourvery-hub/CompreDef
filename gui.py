@@ -5,7 +5,7 @@ Provides a PyQt dialog allowing users to configure note types, field mappings,
 generation modes (Mode A vs Mode B), and local dictionary directory paths.
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from aqt import mw
 from aqt.qt import (
     QDialog,
@@ -26,7 +26,8 @@ class ConfigDialog(QDialog):
     Dialog for configuring CompreDef add-on options.
 
     Reads current settings from Anki's addonManager config, presents a form
-    to the user, and updates the configuration upon saving.
+    to the user with cascading dropdowns for Note Types and Fields, and updates
+    the configuration upon saving.
     """
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -48,20 +49,19 @@ class ConfigDialog(QDialog):
 
         form_layout = QFormLayout()
 
-        # Input for target Note Type (e.g., "Japanese", "Cloze")
-        self.note_type_input = QLineEdit()
-        self.note_type_input.setPlaceholderText("e.g. Japanese")
-        form_layout.addRow("Target Note Type:", self.note_type_input)
+        # Cascading dropdown for Note Type selection
+        self.note_type_combo = QComboBox()
+        # Connect signal to update available field dropdowns whenever Note Type changes
+        self.note_type_combo.currentTextChanged.connect(self._on_note_type_changed)
+        form_layout.addRow("Target Note Type:", self.note_type_combo)
 
-        # Input for Target Word field (e.g., "Expression", "Word")
-        self.word_field_input = QLineEdit()
-        self.word_field_input.setPlaceholderText("e.g. Expression")
-        form_layout.addRow("Target Word Field:", self.word_field_input)
+        # Dropdown for Target Word field selection
+        self.word_field_combo = QComboBox()
+        form_layout.addRow("Target Word Field:", self.word_field_combo)
 
-        # Input for Definition field (e.g., "Definition", "Glossary")
-        self.definition_field_input = QLineEdit()
-        self.definition_field_input.setPlaceholderText("e.g. Definition")
-        form_layout.addRow("Definition Field:", self.definition_field_input)
+        # Dropdown for Definition field selection
+        self.definition_field_combo = QComboBox()
+        form_layout.addRow("Definition Field:", self.definition_field_combo)
 
         # Dropdown selection for Generation Mode
         self.mode_combo = QComboBox()
@@ -98,11 +98,71 @@ class ConfigDialog(QDialog):
         button_box.rejected.connect(self.reject)
         main_layout.addWidget(button_box)
 
+    def _get_field_names(self, note_type_name: str) -> List[str]:
+        """
+        Retrieves the field names associated with a specified note type.
+
+        Uses Anki's native `mw.col.models` API to safely fetch field definitions.
+        """
+        if not mw or not mw.col or not note_type_name:
+            return []
+        
+        # Access the collection model dictionary safely via Anki native wrapper
+        model = mw.col.models.by_name(note_type_name)
+        if not model or "flds" not in model:
+            return []
+        
+        return [field["name"] for field in model["flds"]]
+
+    def _on_note_type_changed(self, note_type_name: str) -> None:
+        """
+        Slot triggered when the selected Note Type changes.
+
+        Dynamically updates the items in both Word Field and Definition Field dropdowns.
+        """
+        fields = self._get_field_names(note_type_name)
+
+        # Save current selections to preserve them if available in the new field list
+        prev_word_field = self.word_field_combo.currentText()
+        prev_def_field = self.definition_field_combo.currentText()
+
+        self.word_field_combo.clear()
+        self.word_field_combo.addItems(fields)
+
+        self.definition_field_combo.clear()
+        self.definition_field_combo.addItems(fields)
+
+        # Restore previous selection if valid for this note type
+        if prev_word_field in fields:
+            self.word_field_combo.setCurrentText(prev_word_field)
+        if prev_def_field in fields:
+            self.definition_field_combo.setCurrentText(prev_def_field)
+
     def _load_config(self) -> None:
-        """Populates form inputs with current config values."""
-        self.note_type_input.setText(self.config.get("note_type", "Japanese"))
-        self.word_field_input.setText(self.config.get("word_field", "Expression"))
-        self.definition_field_input.setText(self.config.get("definition_field", "Definition"))
+        """Populates form controls with available Anki models/fields and current config values."""
+        # Populate Note Type dropdown from active collection models
+        if mw and mw.col:
+            all_note_types = mw.col.models.all_names()
+            self.note_type_combo.blockSignals(True)
+            self.note_type_combo.clear()
+            self.note_type_combo.addItems(all_note_types)
+            self.note_type_combo.blockSignals(False)
+
+        saved_note_type = self.config.get("note_type", "")
+        if saved_note_type and self.note_type_combo.findText(saved_note_type) != -1:
+            self.note_type_combo.setCurrentText(saved_note_type)
+
+        # Manually trigger field update for current note type
+        current_note_type = self.note_type_combo.currentText()
+        self._on_note_type_changed(current_note_type)
+
+        saved_word_field = self.config.get("word_field", "")
+        if saved_word_field and self.word_field_combo.findText(saved_word_field) != -1:
+            self.word_field_combo.setCurrentText(saved_word_field)
+
+        saved_def_field = self.config.get("definition_field", "")
+        if saved_def_field and self.definition_field_combo.findText(saved_def_field) != -1:
+            self.definition_field_combo.setCurrentText(saved_def_field)
 
         # Map saved mode string to combobox index
         current_mode = self.config.get("mode", "Mode A")
@@ -130,9 +190,9 @@ class ConfigDialog(QDialog):
 
         updated_config = {
             "mode": mode_str,
-            "note_type": self.note_type_input.text().strip(),
-            "word_field": self.word_field_input.text().strip(),
-            "definition_field": self.definition_field_input.text().strip(),
+            "note_type": self.note_type_combo.currentText().strip(),
+            "word_field": self.word_field_combo.currentText().strip(),
+            "definition_field": self.definition_field_combo.currentText().strip(),
             "dictionary_folder": self.dict_folder_input.text().strip(),
         }
 
@@ -149,3 +209,4 @@ def show_config_dialog() -> None:
     """
     dialog = ConfigDialog(parent=mw.app.activeWindow() if mw and mw.app else None)
     dialog.exec()
+
