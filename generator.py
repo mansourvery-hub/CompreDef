@@ -78,7 +78,7 @@ def generate_definition(
         ladder_paths = find_dictionary_folders(dictionary_folder)
 
     if not ladder_paths:
-        return f"No dictionary configured for lookup of: {target_word}"
+        return None
 
     known_kanji = get_known_kanji_set()
 
@@ -117,4 +117,5 @@ def generate_definition(
     if best_definition:
         return best_definition
 
-    return f"No definition found for: {target_word}"
+    # No definition found in any installed dictionary
+    return None

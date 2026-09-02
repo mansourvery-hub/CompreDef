@@ -108,6 +108,13 @@ def on_editor_generate_definition(editor: Editor) -> None:
     def on_done(future) -> None:
         try:
             definition_result = future.result()
+            if not definition_result:
+                tooltip(
+                    f"CompreDef: No definition found for '{word_text}'.",
+                    parent=editor.parentWindow,
+                )
+                return
+
             editor.note[def_field] = definition_result
             
             # Reload note in editor preserving focus so user immediately sees updated field
@@ -177,9 +184,10 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
         parent=browser,
     )
 
-    def task() -> int:
-        """Background task running across all selected note IDs."""
+    def task() -> tuple[int, int]:
+        """Background task running across all selected note IDs. Returns (updated_count, skipped_count)."""
         updated_count = 0
+        skipped_count = 0
         for nid in nids:
             try:
                 note = mw.col.get_note(nid)
@@ -200,6 +208,10 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                     dictionary_folder=dictionary_folder,
                     dictionaries=dictionaries,
                 )
+                if not definition_result:
+                    skipped_count += 1
+                    continue
+
                 note[def_field] = definition_result
                 mw.col.update_note(note)
                 updated_count += 1
@@ -211,14 +223,23 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
         # sets are stale; force a rescan on next use.
         reset_caches()
 
-        return updated_count
+        return updated_count, skipped_count
 
     def on_done(future) -> None:
         try:
-            count = future.result()
+            updated_count, skipped_count = future.result()
             # Refresh browser view to reflect updated note fields
             browser.search()
-            tooltip(f"CompreDef: Successfully generated definitions for {count} note(s).", parent=browser)
+            if skipped_count > 0:
+                tooltip(
+                    f"CompreDef: Generated definitions for {updated_count} note(s) ({skipped_count} skipped - no definition found).",
+                    parent=browser,
+                )
+            else:
+                tooltip(
+                    f"CompreDef: Successfully generated definitions for {updated_count} note(s).",
+                    parent=browser,
+                )
         except Exception as exc:
             tooltip(f"Error during bulk definition generation: {exc}", parent=browser)
 
