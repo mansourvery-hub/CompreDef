@@ -85,10 +85,15 @@ class ConfigDialog(QDialog):
 
         main_layout.addLayout(form_layout)
 
-        # Standard OK/Cancel dialog buttons (aqt.qt provides enum compatibility)
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
+        # Standard OK/Cancel dialog buttons (PyQt5/PyQt6 cross-version enum compatibility)
+        if hasattr(QDialogButtonBox, "StandardButton"):
+            ok_flag = QDialogButtonBox.StandardButton.Ok
+            cancel_flag = QDialogButtonBox.StandardButton.Cancel
+        else:
+            ok_flag = QDialogButtonBox.Ok
+            cancel_flag = QDialogButtonBox.Cancel
+
+        button_box = QDialogButtonBox(ok_flag | cancel_flag)
         button_box.accepted.connect(self._save_and_accept)
         button_box.rejected.connect(self.reject)
         main_layout.addWidget(button_box)
