@@ -1,15 +1,37 @@
 """
-parser.py - SQLite-backed dictionary storage and Yomitan HTML generator for CompreDef.
+parser.py - SQLite-backed dictionary storage and Yomitan HTML renderer for CompreDef.
 
-Key Features:
-- Native .zip & Folder Support: Directly reads and indexes unzipped folders AND
-  unextracted Yomitan .zip dictionary archives.
-- 100% Faithful Yomitan HTML Rendering: Implements Yomitan's StructuredContentGenerator
-  to produce rich, semantic HTML (<ruby>, <rt>, <span class="gloss-sc-span">,
-  <div data-sc-name="用例">, inline CSS styles, etc.).
-- Blazing-Fast SQLite Cache: All parsed definitions are stored in
-  `user_files/cache/dictionaries.db`. Lookups execute in ~0.08ms via indexed B-Tree
-  with 0MB RAM footprint and 0% CPU overhead.
+ARCHITECTURE (install-time indexing):
+
+    INSTALL DICTIONARY
+           |
+       parse once
+           |
+     build SQLite index
+           |
+       save index
+           |
+         DONE
+
+    Then forever after:
+
+    GENERATE DEFINITION
+           |
+     SQLite lookup (pure DB query, no parsing)
+           |
+       combine definitions
+
+Key rules (these fix the historical first-use freeze / 100% CPU bugs):
+- `lookup()` is a PURE database query. It NEVER parses dictionary files,
+  NEVER calls ensure_indexed(), and NEVER triggers re-indexing.
+- Indexing happens exactly once per dictionary, when the user installs/
+  replaces it via the config GUI (`install_dictionary()`), as a background
+  operation with progress reporting.
+- Indexes persist in `user_files/cache/dictionaries.db` across Anki and
+  machine restarts. A dictionary is re-indexed ONLY when the user explicitly
+  (re-)installs/replaces it.
+- Indexing is streamed in bounded batches: giant dictionaries (大辞泉:
+  632,876 entries ≈ 1.3 GB of HTML) never accumulate in RAM.
 """
 
 import json
@@ -20,47 +42,97 @@ import hashlib
 import sqlite3
 import threading
 import zipfile
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Callable, Dict, List, Optional, Tuple, Any
+
+# Regular expressions for stripping ruby and HTML tags when extracting plain
+# text (used for kanji scoring and cleaning note fields).
+_RT_RE = re.compile(r'<rt\b[^>]*>.*?</rt>', flags=re.DOTALL | re.IGNORECASE)
+_RP_RE = re.compile(r'<rp\b[^>]*>.*?</rp>', flags=re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r'<[^>]+>')
 
 # Bump this whenever the HTML rendering output format changes in ANY way.
-# It is embedded into every dictionary's cache signature so that upgrading
-# the renderer automatically invalidates stale SQLite entries instead of
-# silently serving old plain-text definitions forever (the exact bug where
-# '先ず' kept returning 121 chars of plain text instead of ~7000 chars of
-# rich Yomitan HTML after the renderer was rewritten).
-# v2: adds the `reading` column so lookups can disambiguate 先ず(まず) from
-# 先ず(せんず) — the term alone matched BOTH readings' definitions.
-# v3: adds `base_text` column to store pre-stripped plain text for fast kanji
-# scoring, avoiding repetitive HTML parsing during Dictionary Ladder walks.
-RENDERER_VERSION = "yomitan_html_v3_basetext"
+# It is embedded in each dictionary's index signature so a renderer upgrade
+# invalidates stale SQLite entries instead of silently serving old
+# plain-text definitions forever (the historical '先ず 121-char bug').
+RENDERER_VERSION = "yomitan_html_v2_reading"
 
 # How many rendered definitions to hold in memory before flushing to SQLite.
-# Bounded RAM: giant dictionaries (大辞泉: 632,876 entries ≈ 1.3 GB of HTML)
-# must NEVER be accumulated in a single Python list — that exhausts memory,
-# drives the system into swap thrash, and freezes Anki at 100% CPU on what
-# should be a microsecond lookup of a nonsense word (bug: 駿ってさ crash).
+# Bounded RAM: giant dictionaries must NEVER be accumulated in one list —
+# that exhausted memory, drove the system into swap thrash and froze Anki
+# at 100% CPU (the historical 駿ってさ freeze).
 _INDEX_BATCH_SIZE = 5000
+
+
+# ---------------------------------------------------------------------------
+# Plain-text extraction helpers
+# ---------------------------------------------------------------------------
 
 def _extract_base_text(html_or_text: str) -> str:
     """
     Extracts visible base text from HTML, stripping ruby furigana (<rt> tags).
-    Now centrally located in parser.py to be used during indexing.
     """
     if not html_or_text:
         return ""
-    # Strip furigana reading tags
     no_rt = _RT_RE.sub("", html_or_text)
     no_rp = _RP_RE.sub("", no_rt)
-    # Strip remaining HTML tags
     plain = _TAG_RE.sub("", no_rp)
     return html.unescape(plain).strip()
 
 
+def extract_clean_word(field_text: str) -> str:
+    """
+    Extracts the clean target word/expression from a note field that may
+    contain HTML markup, ruby tags, or bracketed furigana.
+
+    Handles:
+    - '<div>先[ま]ず</div>'          -> '先ず'
+    - '<ruby>先<rt>ま</rt></ruby>ず'  -> '先ず'
+    - '先ず[まず]'                   -> '先ず'
+    - '&lt;食&gt;'                   -> '<食>'
+    - ' 食[た]べる '                 -> '食べる'
+    """
+    if not field_text:
+        return ""
+
+    text = field_text.strip()
+    if not text:
+        return ""
+
+    # Remove ruby furigana reading elements FIRST, while they are real tags.
+    text = _RT_RE.sub("", text)
+    text = _RP_RE.sub("", text)
+
+    # Strip remaining HTML tags BEFORE unescaping entities — otherwise
+    # '&lt;食&gt;' would unescape to '<食>' and then be mistaken for a tag.
+    text = _TAG_RE.sub("", text).strip()
+
+    # Unescape entities only after tag stripping (&nbsp;, &lt;, etc.)
+    text = html.unescape(text).strip()
+
+    # Furigana bracket formats
+    if "[" in text or "［" in text:
+        s = text.replace("［", "[").replace("］", "]")
+
+        # Whole-word trailing bracket: '先ず[まず]' -> '先ず'
+        whole = re.fullmatch(r"([^\[\]]+)\[([^\[\]]+)\]", s)
+        if whole:
+            text = whole.group(1).strip()
+        else:
+            # Per-run bracket: '先[ま]ず' -> '先ず'
+            text = re.sub(r"\[[^\]]*\]", "", s).strip()
+
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Yomitan HTML rendering (used ONLY at install-time indexing)
+# ---------------------------------------------------------------------------
+
 def _style_to_css(style: dict) -> str:
     """
-    Converts a Yomitan structured-content style dictionary into an inline CSS string.
-    Maps camelCase properties to kebab-case (e.g. fontSize -> font-size)
-    and handles numeric em dimensions as Yomitan does.
+    Converts a Yomitan structured-content style dictionary into an inline CSS
+    string: camelCase -> kebab-case, numeric em dimensions handled like
+    Yomitan does.
     """
     if not isinstance(style, dict):
         return ""
@@ -69,7 +141,6 @@ def _style_to_css(style: dict) -> str:
     for prop, val in style.items():
         kebab = "".join(["-" + c.lower() if c.isupper() else c for c in prop]).lstrip("-")
 
-        # In Yomitan: if margin or padding is numeric, append 'em'
         if isinstance(val, (int, float)) and kebab in (
             "margin-top", "margin-left", "margin-right", "margin-bottom",
             "padding-top", "padding-left", "padding-right", "padding-bottom",
@@ -164,7 +235,7 @@ def render_structured_content_node(node: object) -> str:
 def render_yomitan_definition_html(def_block: object) -> str:
     """
     Renders a Yomitan definition block into Anki-ready HTML.
-    - Structured content: returns `<span class="structured-content">{rendered_html}</span>`
+    - Structured content: `<span class="structured-content">{rendered}</span>`
     - Plain text strings: HTML-escapes and replaces newlines with `<br>`.
     """
     if isinstance(def_block, str):
@@ -180,6 +251,10 @@ def render_yomitan_definition_html(def_block: object) -> str:
 
     return ""
 
+
+# ---------------------------------------------------------------------------
+# Dictionary format detection
+# ---------------------------------------------------------------------------
 
 def is_zip_dictionary(path: str) -> bool:
     """Checks if path points to a valid Yomitan dictionary zip archive."""
@@ -224,13 +299,11 @@ def _get_db_path() -> str:
 
 def _get_db_connection() -> sqlite3.Connection:
     """
-    Creates a configured SQLite connection for dictionary queries.
+    Creates a configured SQLite connection.
 
-    The connection must ALWAYS be closed by the caller (use
-    `_get_db_connection()` inside try/finally or a closing wrapper).
-    The old code used `with conn:` which only commits the transaction —
-    it does NOT close the connection, leaking one open handle per call
-    until the process exits.
+    The connection must ALWAYS be closed by the caller (use inside
+    try/finally or via _db_query). `with conn:` only commits — it does
+    NOT close, leaking one handle per call.
     """
     conn = sqlite3.connect(_get_db_path(), timeout=30.0)
     conn.execute("PRAGMA journal_mode = WAL")
@@ -278,25 +351,15 @@ def _init_db_tables() -> None:
         ON entries(dict_path, term)
         """)
 
-        # MIGRATIONS
+        # MIGRATION v2: older caches lacked the `reading` column; add it so
+        # homographs (先ず: まず vs せんず) can be disambiguated.
         cols = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
-        
-        # v2 Migration: reading column
         if "reading" not in cols:
             conn.execute("ALTER TABLE entries ADD COLUMN reading TEXT DEFAULT ''")
-            conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entries_reading
-            ON entries(dict_path, term, reading)
-            """)
-        elif "reading" in cols:
-            conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entries_reading
-            ON entries(dict_path, term, reading)
-            """)
-            
-        # v3 Migration: base_text column for fast scoring
-        if "base_text" not in cols:
-            conn.execute("ALTER TABLE entries ADD COLUMN base_text TEXT DEFAULT ''")
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_entries_reading
+        ON entries(dict_path, term, reading)
+        """)
 
         conn.commit()
     finally:
@@ -306,10 +369,113 @@ def _init_db_tables() -> None:
 _init_db_tables()
 
 
+# ---------------------------------------------------------------------------
+# Reading normalization (katakana -> hiragana etc.)
+# ---------------------------------------------------------------------------
+
+# Katakana -> hiragana offset: katakana block starts at U+30A1 (ァ),
+# hiragana at U+3041 (ぁ). Shifting by 0x60 converts マズ to まず.
+_KATAKANA_TO_HIRAGANA_OFFSET = 0x60
+
+
+def normalize_reading(reading: str) -> str:
+    """
+    Normalizes a reading to plain hiragana for robust comparison.
+
+    Katakana -> hiragana, all whitespace and separator characters
+    (・, -, ., _) removed so せん-ず == せんず.
+    """
+    if not reading:
+        return ""
+    out = []
+    for ch in reading:
+        code = ord(ch)
+        # Full-width katakana (with/without voiced marks) -> hiragana
+        if 0x30A1 <= code <= 0x30F6 or 0x30FD <= code <= 0x30FC:
+            out.append(chr(code - _KATAKANA_TO_HIRAGANA_OFFSET))
+        else:
+            out.append(ch)
+    joined = "".join(out)
+    return re.sub(r"[\s\-・.。_ー()()「」【】]", "", joined)
+
+
+def parse_furigana_field(field_text: str) -> str:
+    """
+    Extracts the pure kana reading from a note field that may contain
+    furigana markup.
+
+    Handles:
+    - '先[ま]ず'                     -> 'まず'   (per-kanji brackets)
+    - '先ず[まず]'                   -> 'まず'   (whole-word bracket)
+    - '<ruby>先<rt>ま</rt></ruby>ず' -> 'まず'   (HTML ruby)
+    - 'マズ'                          -> 'まず'   (plain katakana)
+    - '先ず'                          -> ''        (no reading info)
+    """
+    if not field_text:
+        return ""
+
+    text = field_text.strip()
+
+    # HTML ruby: each <ruby>BASE<rt>READING</rt></ruby> chunk is replaced
+    # by its rt reading, yielding pure kana.
+    if "<ruby" in text or "<rt" in text:
+        def _ruby_sub(match: re.Match) -> str:
+            inner = match.group(0)
+            rt = re.search(r"<rt\b[^>]*>(.*?)</rt>", inner, flags=re.DOTALL)
+            return re.sub(r"<[^>]+>", "", rt.group(1)) if rt else ""
+
+        kana = re.sub(
+            r"<ruby\b[^>]*>.*?</ruby>", _ruby_sub, text, flags=re.DOTALL
+        )
+        kana = re.sub(r"<[^>]+>", "", kana)
+        return normalize_reading(kana)
+
+    # Bracket formats
+    if "[" in text or "［" in text:
+        s = text.replace("［", "[").replace("］", "]")
+
+        # Whole-word form: a single bracket covering the whole string.
+        whole = re.fullmatch(r"([^\[\]]+)\[([^\[\]]+)\]", s)
+        if whole:
+            return normalize_reading(whole.group(2))
+
+        # Per-run form: bracket content replaces the kanji run before it.
+        result: list = []
+        tokens = re.split(r"(\[[^\]]*\])", s)
+        for part in tokens:
+            if part.startswith("[") and part.endswith("]"):
+                if result:
+                    prev = result[-1]
+                    trimmed = re.sub(r"[\u4e00-\u9fff]+$", "", prev)
+                    result[-1] = trimmed
+                result.append(part[1:-1])
+            else:
+                result.append(part)
+        return normalize_reading("".join(result))
+
+    # Plain kana / katakana only
+    if re.fullmatch(r"[\u3040-\u30ff\u30fc\s\-・]+", text):
+        return normalize_reading(text)
+
+    # Kanji without readings -> nothing usable
+    if not re.search(r"[\u3040-\u30ff]", text):
+        return ""
+
+    # Mixed text without brackets (e.g. '行く'): no reading info
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return ""
+
+    return normalize_reading(text)
+
+
+# ---------------------------------------------------------------------------
+# Dictionary metadata
+# ---------------------------------------------------------------------------
+
 def get_dictionary_title(path: str) -> str:
     """
     Retrieves the display title for a dictionary folder or .zip file.
-    First checks SQLite metadata, then index.json (from zip or folder), then basename.
+    First checks SQLite metadata, then index.json (zip or folder), then basename.
     """
     if not path:
         return ""
@@ -358,7 +524,7 @@ def get_dictionary_title(path: str) -> str:
 def find_dictionary_folders(parent_or_dict_path: str) -> List[str]:
     """
     Discovers all dictionary archives (.zip) and unzipped folders in a path.
-    Deduplicates if both an unzipped folder and its .zip archive exist.
+    Deduplicates when both an unzipped folder and its .zip archive exist.
     """
     if not parent_or_dict_path:
         return []
@@ -375,7 +541,7 @@ def find_dictionary_folders(parent_or_dict_path: str) -> List[str]:
     found: List[str] = []
     seen_titles: set = set()
 
-    # 1. Check for unzipped dictionary folders first
+    # 1. Unzipped dictionary folders first
     for entry in sorted(os.listdir(norm)):
         sub = os.path.join(norm, entry)
         if is_directory_dictionary(sub):
@@ -384,7 +550,7 @@ def find_dictionary_folders(parent_or_dict_path: str) -> List[str]:
                 found.append(sub)
                 seen_titles.add(title)
 
-    # 2. Check for .zip dictionary archives
+    # 2. Then .zip archives
     for entry in sorted(os.listdir(norm)):
         sub = os.path.join(norm, entry)
         if is_zip_dictionary(sub):
@@ -396,30 +562,62 @@ def find_dictionary_folders(parent_or_dict_path: str) -> List[str]:
     return found
 
 
+# ---------------------------------------------------------------------------
+# INSTALL-TIME INDEXING (the ONLY place dictionaries are ever parsed)
+# ---------------------------------------------------------------------------
+
+class IndexingError(Exception):
+    """Raised when dictionary installation/indexing fails."""
+
+
 class SingleDictionary:
     """
-    Represents an individual dictionary (either .zip archive or folder)
-    indexed in SQLite.
+    Represents an individual dictionary (zip archive or folder).
+
+    Lifecycle:
+    - The user installs a dictionary via the config GUI -> `install()` runs
+      ONCE as a background operation (parsing + SQLite writing).
+    - After that, `lookup()` is a pure SQLite query. It never parses files.
     """
 
-    # Serializes re-indexing: Anki's background threads can call lookup()
-    # on the same dictionary concurrently; without the lock, two threads
-    # would each build giant in-flight batches and double the RAM blow-up.
-    _index_lock = threading.Lock()
+    _install_lock = threading.Lock()
 
     def __init__(self, path: str):
         self.path = os.path.realpath(os.path.expanduser(path))
         self.is_zip = is_zip_dictionary(self.path)
         self.title = get_dictionary_title(self.path)
 
+    # -- Index state ------------------------------------------------------
+
+    def is_indexed(self) -> bool:
+        """
+        Returns True when a COMPLETE index for this dictionary exists in the
+        SQLite database (a `dictionaries` marker row is written ONLY after
+        all entries have been streamed in — partial/crashed indexes have no
+        marker and are therefore never trusted).
+        """
+        rows = _db_query(
+            "SELECT entry_count FROM dictionaries WHERE path = ?", (self.path,)
+        )
+        return bool(rows and rows[0][0] is not None)
+
+    def entry_count(self) -> int:
+        """Number of indexed entries (0 when not indexed)."""
+        rows = _db_query(
+            "SELECT entry_count FROM dictionaries WHERE path = ?", (self.path,)
+        )
+        return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+    # -- Signature (install-time identity) ---------------------------------
+
     def _compute_signature(self) -> str:
         """
-        Computes a checksum signature of the dictionary files.
+        Computes an identity signature of the dictionary's source files.
 
-        IMPORTANT: the renderer version is part of the signature. Signatures
-        based purely on file mtime/size cannot detect a rendering-logic
-        upgrade, which once left plain-text entries cached in SQLite while
-        the code had moved on to rich HTML rendering.
+        Used ONLY during installation to decide whether the installed index
+        belongs to the current files or to an older version of them. It is
+        deliberately NOT consulted by lookup() — normal generation must be
+        a pure database query with zero filesystem work.
         """
         # ZIP archives: mtime+size of the archive file itself
         if self.is_zip:
@@ -446,126 +644,153 @@ class SingleDictionary:
 
         return f"unknown:{RENDERER_VERSION}"
 
-    def ensure_indexed(self) -> None:
+    def index_is_current(self) -> bool:
         """
-        Verifies that the dictionary is indexed in SQLite and up to date.
-
-        MEMORY-SAFE BY DESIGN: rendered HTML is streamed to SQLite in
-        bounded batches of _INDEX_BATCH_SIZE rows. Never accumulates the
-        whole dictionary in RAM — 大辞泉 alone renders to ~1.3 GB of HTML,
-        which previously exhausted memory and froze Anki at 100% CPU
-        (even for a nonsense-word lookup like 駿ってさ).
+        True when the stored index was built from the exact source files
+        currently on disk (same signature). Checked when the dictionary list
+        is edited in the config GUI — never during normal lookups.
         """
-        if not os.path.exists(self.path):
-            return
-
-        current_sig = self._compute_signature()
-
         rows = _db_query(
             "SELECT signature FROM dictionaries WHERE path = ?", (self.path,)
         )
-        if rows and rows[0][0] == current_sig:
-            return  # already indexed and fresh — instant path
+        return bool(rows and rows[0][0] == self._compute_signature())
 
-        # Re-index under the class-wide lock so concurrent lookups wait
-        # instead of duplicating a giant re-index in parallel threads.
-        with SingleDictionary._index_lock:
-            # Re-check inside the lock: another thread may have finished
-            # the exact re-index we were about to start.
+    # -- Installation ------------------------------------------------------
+
+    def install(
+        self,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """
+        Parses the dictionary files and builds its SQLite index.
+
+        This is THE one-time, install-time parse. It is normally invoked by
+        `install_dictionary()` (background, with progress). After this
+        completes, the dictionary is never parsed again — lookups are pure
+        SQL against the built index.
+
+        Args:
+            progress_cb: optional callback(done, total) for progress UI.
+            cancel_check: optional callable returning True to abort.
+
+        Returns the number of indexed entries.
+
+        Raises:
+            IndexingError: on unreadable/corrupt dictionaries or cancellation.
+        """
+        if not os.path.exists(self.path):
+            raise IndexingError(f"Dictionary not found: {self.path}")
+
+        # Serialize installations: Anki's background threads can install
+        # multiple dictionaries; without the lock two threads would each
+        # build giant in-flight batches and double the RAM blow-up.
+        with SingleDictionary._install_lock:
+            signature = self._compute_signature()
+
+            # Already installed from exactly these files? Nothing to do —
+            # this makes re-opening the config dialog idempotent.
             rows = _db_query(
-                "SELECT signature FROM dictionaries WHERE path = ?",
-                (self.path,),
+                "SELECT signature FROM dictionaries WHERE path = ?", (self.path,)
             )
-            if rows and rows[0][0] == current_sig:
-                return
+            if rows and rows[0][0] == signature and self.is_indexed():
+                return self.entry_count()
 
-            print(
-                f"CompreDef: Indexing '{self.title}' into SQLite "
-                f"with rich Yomitan HTML (streamed, bounded RAM)..."
-            )
+            conn = _get_db_connection()
             try:
-                self._reindex_streaming(current_sig)
-            except Exception as e:
-                print(f"CompreDef: Indexing failed for '{self.title}': {e}")
-                return
+                # Clean slate for this dictionary: rows from a previous
+                # version (or a crashed partial index) must not survive.
+                conn.execute("DELETE FROM entries WHERE dict_path = ?", (self.path,))
+                conn.execute("DELETE FROM dictionaries WHERE path = ?", (self.path,))
+                conn.commit()
 
-    def _reindex_streaming(self, current_sig: str) -> None:
-        """
-        Streams term banks through the renderer into SQLite in batches.
+                total = 0
+                batch: List[Tuple[str, str, str, str]] = []
 
-        Peak memory stays at roughly one batch of rendered HTML
-        (~a few MB) regardless of dictionary size. Term banks are loaded
-        ONE AT A TIME and dropped after rendering, and each batch is
-        committed immediately.
-        """
-        conn = _get_db_connection()
-        try:
-            # Start a clean slate for this dictionary (stale rows from a
-            # previous renderer version must not survive).
-            conn.execute("DELETE FROM entries WHERE dict_path = ?", (self.path,))
-            conn.execute("DELETE FROM dictionaries WHERE path = ?", (self.path,))
-            conn.commit()
+                def flush() -> None:
+                    """Writes and clears the in-memory batch; commits instantly."""
+                    nonlocal total
+                    if batch:
+                        conn.executemany(
+                            "INSERT INTO entries (dict_path, term, definition, reading) "
+                            "VALUES (?, ?, ?, ?)",
+                            batch,
+                        )
+                        conn.commit()
+                        total += len(batch)
+                        batch.clear()
 
-            total = 0
-            batch: List[Tuple[str, str, str, str, str]] = []
+                def report_progress() -> None:
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(total, grand_total[0])
+                        except Exception:
+                            pass  # progress reporting must never kill indexing
 
-            def flush() -> None:
-                """Writes and clears the in-memory batch; commits instantly."""
-                nonlocal total
-                if batch:
-                    conn.executemany(
-                        "INSERT INTO entries (dict_path, term, definition, reading, base_text) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        batch,
+                # Total for progress: count entries first (cheap pass over
+                # the JSON files' entry counts only).
+                grand_total = [0]
+                try:
+                    for entries in self._iter_term_banks():
+                        grand_total[0] += len(entries)
+                except Exception as e:
+                    raise IndexingError(f"Failed reading dictionary banks: {e}")
+
+                if grand_total[0] == 0:
+                    raise IndexingError(
+                        f"No readable entries found in '{self.title}' "
+                        f"(missing or corrupt term banks?)"
                     )
-                    conn.commit()
-                    total += len(batch)
-                    batch.clear()
 
-            # Iterator over every term bank (zip or folder), loaded lazily
-            # so only one bank's JSON is ever alive at a time.
-            for entries in self._iter_term_banks():
-                for entry in entries:
-                    if not isinstance(entry, list) or len(entry) < 6:
-                        continue
-                    word = entry[0]
-                    if not word or not isinstance(word, str):
-                        continue
-                    # entry[1] is the Yomitan reading (e.g. まず for 先ず);
-                    # stored so lookups can disambiguate homographs.
-                    reading = entry[1] if isinstance(entry[1], str) else ""
-                    for def_block in entry[5]:
-                        html_def = render_yomitan_definition_html(def_block)
-                        if html_def:
-                            # Pre-calculate base text for fast scoring during lookups
-                            base_text = _extract_base_text(html_def)
-                            batch.append((self.path, word, html_def, normalize_reading(reading), base_text))
-                    # Bounded RAM: flush long before the batch can grow to
-                    # hundreds of megabytes of rendered HTML strings.
-                    if len(batch) >= _INDEX_BATCH_SIZE:
-                        flush()
-                # The parsed bank JSON becomes garbage here; the next bank
-                # loads fresh — at no point do two banks coexist in RAM.
+                # Second pass: render + stream into SQLite in bounded batches.
+                for entries in self._iter_term_banks():
+                    for entry in entries:
+                        if cancel_check is not None and cancel_check():
+                            # Roll back partial rows; no marker row is written,
+                            # so this dictionary will not be trusted.
+                            conn.execute("DELETE FROM entries WHERE dict_path = ?", (self.path,))
+                            conn.commit()
+                            raise IndexingError("Indexing cancelled by user")
+                        if not isinstance(entry, list) or len(entry) < 6:
+                            continue
+                        word = entry[0]
+                        if not word or not isinstance(word, str):
+                            continue
+                        # entry[1] is the Yomitan reading (e.g. まず for 先ず);
+                        # stored so lookups can disambiguate homographs.
+                        reading = entry[1] if isinstance(entry[1], str) else ""
+                        for def_block in entry[5]:
+                            html_def = render_yomitan_definition_html(def_block)
+                            if html_def:
+                                batch.append((self.path, word, html_def, normalize_reading(reading)))
+                        # Bounded RAM: flush long before the batch can grow
+                        # to hundreds of megabytes of rendered HTML.
+                        if len(batch) >= _INDEX_BATCH_SIZE:
+                            flush()
+                            report_progress()
 
-            flush()  # commit the final partial batch
+                flush()  # commit the final partial batch
+                report_progress()
 
-            conn.execute(
-                "INSERT INTO dictionaries VALUES (?, ?, ?, ?)",
-                (self.path, self.title, current_sig, total),
-            )
-            conn.commit()
-            print(f"CompreDef: Finished indexing '{self.title}' ({total} entries)")
-        finally:
-            conn.close()
+                # Marker row: written ONLY after every entry is committed.
+                # Its presence is what makes is_indexed() trust the index.
+                conn.execute(
+                    "INSERT INTO dictionaries VALUES (?, ?, ?, ?)",
+                    (self.path, self.title, signature, total),
+                )
+                conn.commit()
+                print(f"CompreDef: Finished indexing '{self.title}' ({total} entries)")
+                return total
+            finally:
+                conn.close()
 
     def _iter_term_banks(self):
         """
         Yields one parsed term bank (a list of entries) at a time.
 
         Works identically for .zip archives and unzipped folders so the
-        streaming indexer never needs to care about the source format.
-        Corrupt banks are skipped with a log line instead of aborting the
-        whole re-index.
+        streaming installer never needs to care about the source format.
+        Corrupt banks raise (installation must fail loudly, not silently).
         """
         if self.is_zip:
             with zipfile.ZipFile(self.path, "r") as z:
@@ -573,16 +798,20 @@ class SingleDictionary:
                     n for n in z.namelist()
                     if "term_bank" in n and n.endswith(".json")
                 ])
+                if not bank_names:
+                    raise IndexingError(f"No term banks in {self.path}")
                 for b_name in bank_names:
                     try:
                         yield json.loads(z.read(b_name).decode("utf-8"))
                     except Exception as e:
-                        print(f"CompreDef: Failed to read {b_name} in zip: {e}")
+                        raise IndexingError(f"Failed to read {b_name} in zip: {e}")
         elif os.path.isdir(self.path):
             bank_files = sorted([
                 f for f in os.listdir(self.path)
                 if f.startswith("term_bank") and f.endswith(".json")
             ])
+            if not bank_files:
+                raise IndexingError(f"No term banks in {self.path}")
             for b_name in bank_files:
                 try:
                     with open(
@@ -590,157 +819,59 @@ class SingleDictionary:
                     ) as f:
                         yield json.load(f)
                 except Exception as e:
-                    print(f"CompreDef: Failed to read {b_name}: {e}")
+                    raise IndexingError(f"Failed to read {b_name}: {e}")
+        else:
+            raise IndexingError(f"Not a dictionary: {self.path}")
 
-    def lookup(self, word: str, reading: str = "") -> List[Tuple[str, str]]:
+    # -- Lookup (pure database query) --------------------------------------
+
+    def lookup(self, word: str, reading: str = "") -> List[str]:
         """
-        Performs an instant B-tree lookup for `word` in this dictionary.
+        Instant B-tree lookup for `word` against the ALREADY-BUILT index.
 
-        Returns a list of (html_definition, base_text) tuples.
+        PURE DATABASE QUERY: this never parses dictionary files, never
+        triggers indexing, and never touches the source dictionary. If the
+        dictionary has not been installed yet, it simply returns [] — the
+        user will be told to install it via the config GUI.
+
+        When `reading` is supplied (hiragana OR katakana — normalized
+        internally), entries whose stored reading matches win; fallback to
+        reading-less entries; then reading-agnostic, so homographs like
+        先ず(まず 'first') vs 先ず(せんず 'precede') resolve correctly
+        while reading-less dictionaries still return results.
         """
-        self.ensure_indexed()
-
         if reading:
             norm = normalize_reading(reading)
             rows = _db_query(
-                "SELECT definition, base_text FROM entries "
+                "SELECT definition FROM entries "
                 "WHERE dict_path = ? AND term = ? AND reading = ?",
                 (self.path, word, norm),
             )
             if rows:
-                return rows
+                return [row[0] for row in rows]
             rows = _db_query(
-                "SELECT definition, base_text FROM entries "
+                "SELECT definition FROM entries "
                 "WHERE dict_path = ? AND term = ? AND reading = ''",
                 (self.path, word),
             )
-            return rows
+            if rows:
+                return [row[0] for row in rows]
+            rows = _db_query(
+                "SELECT definition FROM entries WHERE dict_path = ? AND term = ?",
+                (self.path, word),
+            )
+            return [row[0] for row in rows]
 
         rows = _db_query(
-            "SELECT definition, base_text FROM entries WHERE dict_path = ? AND term = ?",
+            "SELECT definition FROM entries WHERE dict_path = ? AND term = ?",
             (self.path, word),
         )
-        return rows
+        return [row[0] for row in rows]
 
 
-# Katakana -> hiragana offset: katakana block starts at U+30A1 (ァ),
-# hiragana at U+3041 (ぁ). Shifting by 0x60 converts readings like
-# マズ to まず so user-supplied readings can match dictionary readings
-# regardless of script.
-_KATAKANA_TO_HIRAGANA_OFFSET = 0x60
-
-# Matches furigana markup in note fields. Supported formats:
-#   先[ま]ず          <- Anki Japanese note types (bracket after the kanji run)
-#   先ず[まず]        <- trailing bracket covering the whole word
-#   <ruby>先<rt>ま</rt></ruby>ず  <- HTML ruby (from Yomitan paste)
-#   せん-ず / せんず    <- plain kana with or without hyphen/dot separators
-_FURIGANA_BASE_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]+")
-
-
-def normalize_reading(reading: str) -> str:
-    """
-    Normalizes a reading to plain hiragana for robust comparison.
-
-    Katakana -> hiragana, lowercase ASCII preserved, all whitespace and
-    separator characters (・, ・, -, ., _) removed so せん-ず == せんず.
-    """
-    if not reading:
-        return ""
-    out = []
-    for ch in reading:
-        code = ord(ch)
-        # Full-width katakana (with/without voiced marks) -> hiragana
-        if 0x30A1 <= code <= 0x30F6 or 0x30FD <= code <= 0x30FC:
-            out.append(chr(code - _KATAKANA_TO_HIRAGANA_OFFSET))
-        else:
-            out.append(ch)
-    joined = "".join(out)
-    # Strip separators that dictionaries insert inconsistently
-    return re.sub(r"[\s\-・.。_ー()()「」【】]", "", joined)
-
-
-def parse_furigana_field(field_text: str) -> str:
-    """
-    Extracts the pure kana reading from a note field that may contain
-    furigana markup.
-
-    Handles:
-    - '先[ま]ず'        -> 'まず'      (base chars with bracket readings)
-    - '先ず[まず]'      -> 'まず'      (whole-word trailing bracket)
-    - '<ruby>先<rt>ま</rt></ruby>ず' -> 'まず'  (HTML ruby)
-    - 'マズ'            -> 'まず'      (plain katakana, normalized)
-    - 'せんず'           -> 'せんず'    (already plain)
-    - '先ず'            -> ''          (no readings available)
-
-    Returns the normalized hiragana reading, or '' when the field holds
-    no kana reading information at all.
-    """
-    if not field_text:
-        return ""
-
-    text = field_text.strip()
-
-    # HTML ruby: each <ruby>BASE<rt>READING</rt></ruby> chunk is replaced by
-    # its rt reading, so the final string is pure kana (e.g.
-    # <ruby>先<rt>ま</rt></ruby>ず -> まず).
-    if "<ruby" in text or "<rt" in text:
-        def _ruby_sub(match: re.Match) -> str:
-            inner = match.group(0)
-            rt = re.search(r"<rt\b[^>]*>(.*?)</rt>", inner, flags=re.DOTALL)
-            # Strip any nested tags inside the rt text (e.g. <span>)
-            return re.sub(r"<[^>]+>", "", rt.group(1)) if rt else ""
-
-        kana = re.sub(
-            r"<ruby\b[^>]*>.*?</ruby>", _ruby_sub, text, flags=re.DOTALL
-        )
-        kana = re.sub(r"<[^>]+>", "", kana)
-        return normalize_reading(kana)
-
-    # Bracket formats:
-    #   '先[ま]ず'   -> per-kanji-run reading: bracket content REPLACES the
-    #                   kanji characters immediately before it.
-    #   '先ず[まず]' -> whole-word trailing bracket: bracket is the reading
-    #                   of the entire preceding expression.
-    if "[" in text or "［" in text:
-        # Convert fullwidth brackets for safety
-        s = text.replace("［", "[").replace("］", "]")
-
-        # Whole-word form: a single bracket covering the whole string.
-        whole = re.fullmatch(r"([^\[\]]+)\[([^\[\]]+)\]", s)
-        if whole:
-            return normalize_reading(whole.group(2))
-
-        # Per-run form: 'X[reading]' — replace each bracket with its content
-        # AND remove the kanji run it belongs to (the trailing kanji directly
-        # before the bracket, up to the last non-kanji boundary).
-        result: list = []
-        tokens = re.split(r"(\[[^\]]*\])", s)
-        for i, part in enumerate(tokens):
-            if part.startswith("[") and part.endswith("]"):
-                # The reading replaces the kanji run before it: strip all
-                # trailing CJK ideographs from the previous literal token.
-                if result:
-                    prev = result[-1]
-                    trimmed = re.sub(r"[\u4e00-\u9fff]+$", "", prev)
-                    result[-1] = trimmed
-                result.append(part[1:-1])
-            else:
-                result.append(part)
-        return normalize_reading("".join(result))
-    # Plain kana / katakana only:
-    if re.fullmatch(r"[\u3040-\u30ff\u30fc\s\-・]+", text):
-        return normalize_reading(text)
-
-    # Kanji without any readings -> nothing we can use
-    if not re.search(r"[\u3040-\u30ff]", text):
-        return ""
-
-    # Mixed text without brackets (e.g. '行く'): no reading info
-    if re.search(r"[\u4e00-\u9fff]", text):
-        return ""
-
-    return normalize_reading(text)
-
+# ---------------------------------------------------------------------------
+# Module-level convenience API
+# ---------------------------------------------------------------------------
 
 _loaded_dicts: Dict[str, SingleDictionary] = {}
 
@@ -753,38 +884,38 @@ def get_single_dictionary(path: str) -> SingleDictionary:
     return _loaded_dicts[norm]
 
 
-class DictionaryLoader:
+def install_dictionary(
+    path: str,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> int:
     """
-    Backwards-compatible wrapper managing an ordered list of dictionaries.
+    Installs (indexes) a dictionary. Thin module-level wrapper so callers
+    don't need the SingleDictionary class. See SingleDictionary.install().
     """
+    return get_single_dictionary(path).install(progress_cb, cancel_check)
 
-    def __init__(self, directory_or_paths: object):
-        self.dictionaries: List[SingleDictionary] = []
 
-        paths: List[str] = []
-        if isinstance(directory_or_paths, list):
-            paths = [str(p) for p in directory_or_paths if p]
-        elif isinstance(directory_or_paths, str) and directory_or_paths:
-            found = find_dictionary_folders(directory_or_paths)
-            paths = found if found else [directory_or_paths]
+def uninstall_dictionary(path: str) -> None:
+    """
+    Removes a dictionary's index from the SQLite database entirely.
 
-        for p in paths:
-            if os.path.exists(p):
-                self.dictionaries.append(get_single_dictionary(p))
+    Called when the user removes a dictionary from the ladder in the config
+    GUI. Without this, removed dictionaries left their indexes behind and
+    kept contributing stale definitions.
+    """
+    norm = os.path.realpath(os.path.expanduser(path))
+    conn = _get_db_connection()
+    try:
+        conn.execute("DELETE FROM entries WHERE dict_path = ?", (norm,))
+        conn.execute("DELETE FROM dictionaries WHERE path = ?", (norm,))
+        conn.commit()
+    finally:
+        conn.close()
+    # Drop the cached instance so a later re-add builds a fresh object.
+    _loaded_dicts.pop(norm, None)
 
-    def lookup_ladder(self, word: str) -> List[Tuple[SingleDictionary, List[str]]]:
-        results = []
-        for d in self.dictionaries:
-            defs = d.lookup(word)
-            if defs:
-                results.append((d, defs))
-        return results
 
-    def lookup_all(self, word: str) -> List[str]:
-        all_defs = []
-        for d in self.dictionaries:
-            all_defs.extend(d.lookup(word))
-        return all_defs
-
-    def lookup(self, word: str) -> List[str]:
-        return self.lookup_all(word)
+def is_dictionary_installed(path: str) -> bool:
+    """True when a complete index exists for the dictionary at `path`."""
+    return get_single_dictionary(path).is_indexed()

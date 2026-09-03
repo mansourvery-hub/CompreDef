@@ -15,14 +15,61 @@ Rather than relying on non-deterministic external LLMs or single-dictionary look
 3. **Maximal Definition Fallback**:
    If no dictionary yields a 100% known definition, the algorithm returns the maximal definition (the definition with the highest kanji comprehension score / least complicated) across all candidate definitions.
 
+## Install-Time Indexing (THE core performance architecture)
+
+Dictionary parsing and SQLite index building happen exactly ONCE per
+dictionary, when the user installs/replaces it in the config GUI:
+
+```
+INSTALL DICTIONARY (config GUI: Add / Scan / Reinstall)
+       ↓
+   parse once (background thread, progress %, cancellable)
+       ↓
+ build SQLite index (streamed, bounded RAM)
+       ↓
+ save index persistently (marker row written only after ALL entries)
+       ↓
+      DONE
+```
+
+Then forever afterward:
+
+```
+GENERATE DEFINITION (editor button / browser menu — explicit actions only)
+       ↓
+ SQLite lookup (pure DB query — zero dictionary-file parsing)
+       ↓
+ combine definitions (ladder walk + kanji scoring)
+       ↓
+ return result
+       ↓
+ update note (persisted BEFORE editor refresh)
+```
+
+Hard rules enforced by `tests/test_regression.py`:
+- `lookup()` NEVER calls indexing, never reads dictionary files, never
+  touches the filesystem. It is a pure `SELECT` against `dictionaries.db`
+  (~1ms; guarded by a test that makes any parse attempt raise).
+- Indexes persist across Anki/machine restarts. A fresh process sees the
+  dictionary as installed and queries it directly.
+- The `dictionaries` marker row is written ONLY after every entry has been
+  committed; partial/crashed installs leave no marker and are never trusted.
+- Re-adding an unchanged dictionary is a no-op (signature check); replacing
+  files on disk causes exactly ONE re-index when the user reinstalls.
+- Indexing failures raise `IndexingError` and are reported — no silent
+  partial indexes.
+- Generation is triggered ONLY by explicit button/menu actions. There is no
+  automatic generation on field unfocus/Tab (removed deliberately: it was
+  the source of first-use freezes and lost definitions).
+
 ## Key Modules
 
-- `__init__.py`: Entry point registering config actions and UI hooks.
-- `gui.py`: PyQt configuration dialog allowing users to map note types, target word/definition fields, order their dictionary ladder (add folders or zip archives), and configure Anki field mappings.
-- `generator.py`: Core definition generation engine implementing ladder traversal, early exit, candidate filtering, and kanji comprehension scoring. Extracts base kanji (stripping `<rt>` furigana) while preserving rich HTML with furigana for Anki insertion.
-- `parser.py`: Independent dictionary loader with per-dictionary indexing. Supports both unzipped folders and Yomitan `.zip` archives containing `term_bank_*.json` files. Renders 100% faithful Yomitan HTML with `<ruby>`, `data-sc-*` attributes, inline CSS, and `用例` blocks. Uses SQLite (`dictionaries.db`) for fast B-tree lookups (~0.08ms) with signature-based cache invalidation.
+- `__init__.py`: Entry point registering config actions and UI hooks. Does no dictionary work at startup.
+- `gui.py`: PyQt configuration dialog allowing users to map note types, target word/reading/definition fields, and order their dictionary ladder. Adding a dictionary triggers the one-time background indexing with a progress dialog; a "Reinstall / Update Index" button handles replaced dictionary files. List entries show install status (✓ entries / ⚠ not indexed).
+- `generator.py`: Core definition generation engine implementing ladder traversal, early exit, candidate filtering, and kanji comprehension scoring. Extracts base kanji (stripping `<rt>` furigana) while preserving rich HTML with furigana for Anki insertion. Pure SQLite lookups only.
+- `parser.py`: Dictionary installer + pure-SQL lookup. `SingleDictionary.install()` is the ONLY place dictionary files are parsed (streamed in bounded batches; a marker row records the source signature). `lookup()` is a pure database query. Supports unzipped folders and Yomitan `.zip` archives. Renders faithful Yomitan HTML with `<ruby>`, `data-sc-*` attributes, inline CSS, and `用例` blocks.
 - `db_utils.py`: Safe, read-only Anki collection scanner (`mw.col.db`) using compiled regular expressions for fast known-kanji extraction.
-- `editor_browser.py`: `aqt.gui_hooks` integration injecting the card editor button and browser bulk edit menu options.
+- `editor_browser.py`: `aqt.gui_hooks` integration injecting the card editor toolbar button and browser bulk-edit menu options. Generation runs via `mw.taskman.run_in_background`; the note is persisted (`update_note`) BEFORE the editor refresh so definitions never disappear; failures are logged with note id/word/traceback and reported, never swallowed.
 
 ## Data Formats
 

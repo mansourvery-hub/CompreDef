@@ -11,6 +11,7 @@ Provides a PyQt dialog allowing users to:
 import os
 from typing import Optional, Dict, Any, List
 from aqt import mw
+from aqt.utils import tooltip
 from aqt.qt import (
     QDialog,
     QVBoxLayout,
@@ -33,6 +34,10 @@ from .parser import (
     get_dictionary_title,
     find_dictionary_folders,
     is_zip_dictionary,
+    install_dictionary,
+    uninstall_dictionary,
+    IndexingError,
+    get_single_dictionary,
 )
 
 
@@ -225,6 +230,15 @@ class ConfigDialog(QDialog):
         self.remove_btn.clicked.connect(self._on_remove_dictionary)
         buttons_vbox.addWidget(self.remove_btn)
 
+        self.reindex_btn = QPushButton("Reinstall / Update Index")
+        self.reindex_btn.setToolTip(
+            "Re-parse the selected dictionary and rebuild its index.\n"
+            "Use this after replacing a dictionary's files on disk.\n"
+            "Runs in the background with progress."
+        )
+        self.reindex_btn.clicked.connect(self._on_reindex_dictionary)
+        buttons_vbox.addWidget(self.reindex_btn)
+
         buttons_vbox.addStretch()
         list_and_buttons_layout.addLayout(buttons_vbox)
 
@@ -312,7 +326,7 @@ class ConfigDialog(QDialog):
             self.definition_field_combo.setCurrentText(auto_def_field)
 
     def _refresh_item_labels(self) -> None:
-        """Updates labels: '[n] Title' and syncs checkbox state."""
+        """Updates labels: '[n] Title ✓' and syncs checkbox state."""
         role = _user_role()
         # Block signals to prevent itemChanged from triggering a loop during refresh
         self.dict_list.blockSignals(True)
@@ -320,7 +334,17 @@ class ConfigDialog(QDialog):
             item = self.dict_list.item(i)
             path = item.data(role)
             title = get_dictionary_title(path)
-            item.setText(f"[{i + 1}] {title}")
+            # Index status: dictionaries must be installed (indexed) before
+            # generation works; unindexed ones are skipped by lookups.
+            try:
+                d = get_single_dictionary(path)
+                if d.is_indexed():
+                    status = f"✓ ({d.entry_count():,} entries)"
+                else:
+                    status = "⚠ not indexed — re-add to install"
+            except Exception:
+                status = "⚠ error"
+            item.setText(f"[{i + 1}] {title} {status}")
             item.setCheckState(Qt.CheckState.Checked if path not in self.disabled_dicts else Qt.CheckState.Unchecked)
             item.setToolTip(
                 path + ("\n(disabled — skipped during generation)" if path in self.disabled_dicts else "")
@@ -365,7 +389,113 @@ class ConfigDialog(QDialog):
         item.setData(role, norm_path)
         self.dict_list.addItem(item)
         self._refresh_item_labels()
+
+        # Persist the addition NOW, BEFORE the install starts: if Anki
+        # crashes mid-install or the user closes the dialog, the new
+        # dictionary list must survive (a crash once silently reverted a
+        # completed 'remove all + re-import' to the old list).
+        self._save_config_now()
+
+        # INSTALL-TIME INDEXING: a newly added dictionary is parsed and
+        # indexed exactly once, here, as a background operation with a
+        # progress dialog. Normal lookups never parse it again (see
+        # parser.py architecture notes).
+        self._install_dictionary_in_background(norm_path)
         return True
+
+    def _install_dictionary_in_background(self, path: str) -> None:
+        """
+        Installs (indexes) one dictionary in the background with progress.
+
+        Anki stays fully responsive — indexing runs on a background thread
+        and the progress dialog shows 'Indexing <title>... N%'. When it
+        completes, the dictionary's index persists in SQLite and every
+        future lookup is a pure database query.
+        """
+        dict_obj = get_single_dictionary(path)
+
+        # Already indexed from exactly these files? Nothing to do.
+        try:
+            if dict_obj.is_indexed() and dict_obj.index_is_current():
+                return
+        except Exception:
+            pass  # fall through and (re-)install
+
+        title = dict_obj.title or os.path.basename(path)
+
+        # Simple non-blocking progress dialog the user can cancel.
+        from aqt.qt import QTimer, QDialog, QLabel, QVBoxLayout, QPushButton
+        state = {"done": 0, "total": 0, "finished": False, "error": None}
+        cancelled = {"flag": False}
+
+        progress = QDialog(self)
+        progress.setWindowTitle("CompreDef")
+        progress.setModal(True)
+        label = QLabel(f"Indexing {title}...\nPreparing...")
+        layout = QVBoxLayout()
+        layout.addWidget(label)
+        bar = QLabel("")  # textual percent; avoids QProgressBar API drift
+        layout.addWidget(bar)
+        cancel_btn = QPushButton("Cancel")
+        layout.addWidget(cancel_btn)
+        progress.setLayout(layout)
+        cancel_btn.clicked.connect(lambda: cancelled.__setitem__("flag", True))
+
+        def poll() -> None:
+            # Update from the latest shared state written by the worker.
+            done, total = state.get("done", 0), state.get("total", 0)
+            if total:
+                pct = min(100, done * 100 // total)
+                bar.setText(f"{pct}%  ({done:,} / {total:,} entries)")
+            if state.get("finished"):
+                progress.accept()
+
+        timer = QTimer(progress)
+        timer.timeout.connect(poll)
+
+        def progress_cb(done: int, total: int) -> None:
+            # Called on the worker thread: just record numbers; the Qt
+            # timer on the main thread does the actual UI update.
+            state["done"], state["total"] = done, total
+
+        def cancel_check() -> bool:
+            return cancelled["flag"]
+
+        def task() -> int:
+            return install_dictionary(path, progress_cb, cancel_check)
+
+        def on_done(future) -> None:
+            timer.stop()
+            state["finished"] = True
+            # Every branch must be exception-proof: this callback runs on
+            # the main thread and a NameError here once took Anki down and
+            # silently lost the user's unsaved config dialog state.
+            try:
+                count = future.result()
+                msg = f"CompreDef: '{title}' indexed ({count:,} entries)."
+                print(msg)
+                tooltip(msg)
+            except IndexingError as e:
+                state["error"] = str(e)
+                print(f"CompreDef: Indexing '{title}' FAILED: {e}")
+                tooltip(f"CompreDef: Indexing '{title}' failed: {e}")
+            except Exception:
+                import traceback
+                err = traceback.format_exc()
+                print(f"CompreDef: Indexing '{title}' crashed:\n{err}")
+                tooltip(f"CompreDef: Indexing '{title}' crashed — see console.")
+            finally:
+                try:
+                    progress.accept()
+                    self._refresh_item_labels()
+                except Exception:
+                    import traceback
+                    print(f"CompreDef: install-dialog cleanup error:\n{traceback.format_exc()}")
+
+        # Show dialog and start worker; dialog closes itself on completion.
+        timer.start(250)
+        mw.taskman.run_in_background(task, on_done)
+        progress.exec()
 
     def _on_add_dictionary(self) -> None:
         """Opens folder dialog to add an individual unzipped dictionary folder."""
@@ -411,11 +541,57 @@ class ConfigDialog(QDialog):
             self._refresh_item_labels()
 
     def _on_remove_dictionary(self) -> None:
-        """Removes the selected dictionary from the ladder."""
+        """
+        Removes the selected dictionary from the ladder AND deletes its
+        SQLite index, persisting the config immediately so a crash cannot
+        silently revert the removal.
+        """
         curr_row = self.dict_list.currentRow()
-        if curr_row >= 0:
-            self.dict_list.takeItem(curr_row)
+        if curr_row < 0:
+            return
+        role = _user_role()
+        item = self.dict_list.item(curr_row)
+        path = item.data(role)
+
+        removed = self.dict_list.takeItem(curr_row)
+        if removed is not None:
             self._refresh_item_labels()
+
+        # Persist the removal NOW (crash-proofing the dialog state).
+        self._save_config_now()
+
+        # Drop the index too (background: deleting hundreds of thousands of
+        # rows must never block the UI thread).
+        if path:
+            def task() -> None:
+                uninstall_dictionary(path)
+
+            def on_done(_future) -> None:
+                self._refresh_item_labels()
+
+            try:
+                mw.taskman.run_in_background(task, on_done)
+            except Exception:
+                import traceback
+                print(f"CompreDef: index removal failed:\n{traceback.format_exc()}")
+
+    def _on_reindex_dictionary(self) -> None:
+        """
+        Explicitly reinstalls (re-indexes) the selected dictionary.
+
+        This is the ONLY path (besides adding a new dictionary) that parses
+        dictionary files — replacing a dictionary's files on disk is exactly
+        the 'user explicitly installs/replaces' case from the architecture.
+        """
+        curr_row = self.dict_list.currentRow()
+        if curr_row < 0:
+            tooltip("Select a dictionary first.")
+            return
+        role = _user_role()
+        path = self.dict_list.item(curr_row).data(role)
+        if not path:
+            return
+        self._install_dictionary_in_background(path)
 
     def _load_config(self) -> None:
         """Populates form controls with current configuration values."""
@@ -485,6 +661,36 @@ class ConfigDialog(QDialog):
 
         mw.addonManager.writeConfig(self.addon_name, updated_config)
         self.accept()
+
+    def _save_config_now(self) -> None:
+        """
+        Persists the current dialog state to the config WITHOUT closing.
+
+        Called before any background install starts: if Anki crashes or the
+        user closes the dialog mid-install, their dictionary list changes
+        are already durable (a crash once silently reverted a completed
+        'remove all + re-import' to the previous dictionary list).
+        """
+        try:
+            role = _user_role()
+            ordered_dicts = [
+                self.dict_list.item(i).data(role)
+                for i in range(self.dict_list.count())
+            ]
+            mw.addonManager.writeConfig(self.addon_name, {
+                "note_type": self.note_type_combo.currentText().strip(),
+                "word_field": self.word_field_combo.currentText().strip(),
+                "reading_field": self.reading_field_combo.currentText().strip(),
+                "definition_field": self.definition_field_combo.currentText().strip(),
+                "dictionaries": ordered_dicts,
+                "disabled_dictionaries": sorted(self.disabled_dicts),
+                "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
+                "mode": "Ladder",
+            })
+            self.config = mw.addonManager.getConfig(self.addon_name) or self.config
+        except Exception:
+            import traceback
+            print(f"CompreDef: config pre-save failed:\n{traceback.format_exc()}")
 
 
 def show_config_dialog() -> None:

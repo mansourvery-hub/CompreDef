@@ -1,22 +1,36 @@
 """
-editor_browser.py - Editor toolbar button and Browser bulk definition options for CompreDef.
+editor_browser.py - Editor toolbar button and Browser bulk generation for CompreDef.
 
 Injects UI elements into Anki using `aqt.gui_hooks`:
-- Card Editor Toolbar button to generate definition for current note.
-- Browser Edit menu & context menu items to bulk generate definitions for selected notes.
-Runs all processing in background threads via `mw.taskman.run_in_background()`
-to adhere to non-blocking UI rules.
+- Card Editor toolbar button to generate a definition for the current note.
+- Browser Edit menu & context menu items to bulk generate definitions for
+  selected notes.
+
+All generation is EXPLICIT (button / menu). Automatic generation on field
+unfocus/Tab was deliberately removed: silently starting a background job
+because the user left a field was the historical source of freezes, and
+generated definitions were lost to the note-reload race. See ARCHITECTURE.md.
+
+Anki 26.x compatibility (verified against installed 26.08.1 source):
+- Two editor generations coexist: the Svelte `NewEditor` (Add window /
+  Edit Current) which has NO `.note` attribute (only `.nid`), and the
+  legacy `Editor` (Browser / legacy mode) which carries `.note`.
+- `run_in_background` executes the task then calls on_done on the MAIN
+  thread, so note edits in on_done are safe.
 """
 
+import json
 import os
-from typing import List, Dict, Any
+import traceback
+from typing import Any, Dict, List, Optional
+
 from aqt import mw, gui_hooks
-from aqt.editor import Editor
 from aqt.browser import Browser
-from aqt.qt import QMenu, QKeySequence, QObject, QEvent, Qt, QKeyEvent
+from aqt.qt import QMenu, QKeySequence
 from aqt.utils import tooltip
+
 from .generator import generate_definition
-from .parser import parse_furigana_field
+from .parser import parse_furigana_field, extract_clean_word
 from .db_utils import reset_caches
 
 
@@ -69,14 +83,54 @@ def _extract_reading_text(note, word_field: str, reading_field: str) -> str:
     return ""
 
 
-def on_editor_generate_definition(editor: Editor) -> None:
+def _get_note_type_name(note) -> str:
+    """Returns a note's notetype name via the non-deprecated API."""
+    try:
+        nt = note.note_type()  # anki 2.1.50+; 'note.model()' is deprecated
+        if nt:
+            return str(nt.get("name", ""))
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_editor_note(editor) -> Optional[Any]:
+    """
+    Returns the current Note object from either editor generation.
+
+    NewEditor (Svelte) exposes only `.nid` (no `.note`), so we fetch the
+    note from the collection. Legacy Editor carries `.note` directly.
+    """
+    note = getattr(editor, "note", None)
+    if note is not None:
+        return note
+    nid = getattr(editor, "nid", None)
+    if nid is not None and mw and mw.col:
+        try:
+            return mw.col.get_note(nid)
+        except Exception:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Single-note generation (editor toolbar button)
+# ---------------------------------------------------------------------------
+
+_generation_in_flight = set()  # note ids currently being generated
+
+
+def on_editor_generate_definition(editor) -> None:
     """
     Action callback triggered when user clicks the CompreDef editor toolbar button.
 
-    Extracts target word from the configured field and updates the definition field
-    asynchronously using `mw.taskman.run_in_background()`.
+    Extracts the target word from the configured field and updates the
+    definition field asynchronously. The heavy dictionary work is a set of
+    SQLite SELECTs against pre-built indexes (see parser.py), so this is
+    a lightweight background query — it never parses dictionary files.
     """
-    if not editor.note:
+    note = _resolve_editor_note(editor)
+    if note is None:
         tooltip("No note selected in editor.", parent=editor.parentWindow)
         return
 
@@ -89,9 +143,10 @@ def on_editor_generate_definition(editor: Editor) -> None:
     disabled_dictionaries = config.get("disabled_dictionaries", [])
     dictionary_folder = config.get("dictionary_folder", "")
 
-    # Validate note type match
-    note_model_name = editor.note.model()["name"]
-    if target_note_type and note_model_name != target_note_type:
+    # Validate note type match (both sides trimmed; empty config = all types)
+    note_model_name = _get_note_type_name(note)
+    if target_note_type and target_note_type.strip() and \
+            note_model_name != target_note_type.strip():
         tooltip(
             f"Note type '{note_model_name}' does not match configured target '{target_note_type}'.",
             parent=editor.parentWindow,
@@ -99,15 +154,19 @@ def on_editor_generate_definition(editor: Editor) -> None:
         return
 
     # Check field presence in note
-    if word_field not in editor.note:
+    if word_field not in note:
         tooltip(f"Target word field '{word_field}' not found on current note.", parent=editor.parentWindow)
         return
 
-    if def_field not in editor.note:
+    if def_field not in note:
         tooltip(f"Definition field '{def_field}' not found on current note.", parent=editor.parentWindow)
         return
 
-    word_text = editor.note[word_field].strip()
+    # Anki note fields frequently carry HTML wrappers (<div>, <span>) and
+    # furigana markup (先[ま]ず / <ruby>先<rt>ま</rt></ruby>ず). The raw
+    # string almost never equals the dictionary term, which made lookups
+    # return nothing — clean it before the SQLite lookup.
+    word_text = extract_clean_word(note[word_field])
     if not word_text:
         tooltip(f"Field '{word_field}' is empty.", parent=editor.parentWindow)
         return
@@ -120,16 +179,20 @@ def on_editor_generate_definition(editor: Editor) -> None:
         )
         return
 
-    # The first generation after startup loads/caches dictionaries; show
-    # the user what is happening so Anki never looks frozen.
+    # Single-flight guard: never stack duplicate generations for the same
+    # note (double-fired hooks previously burned 2x CPU/RAM).
+    nid_key = getattr(note, "id", None) or id(note)
+    if nid_key in _generation_in_flight:
+        return
+    _generation_in_flight.add(nid_key)
+
     tooltip("CompreDef: Generating definition...", parent=editor.parentWindow)
 
     # Resolve the word's reading (dedicated field or embedded furigana)
     # so homographs like 先ず(まず) vs 先ず(せんず) pick the right entry.
-    reading_text = _extract_reading_text(editor.note, word_field, reading_field)
+    reading_text = _extract_reading_text(note, word_field, reading_field)
 
-    # Execute generation task in background thread to prevent UI freezing
-    def task() -> str:
+    def task() -> Optional[str]:
         return generate_definition(
             word_text,
             dictionary_folder=dictionary_folder,
@@ -139,6 +202,8 @@ def on_editor_generate_definition(editor: Editor) -> None:
         )
 
     def on_done(future) -> None:
+        # Always release the in-flight lock, even on failure
+        _generation_in_flight.discard(nid_key)
         try:
             definition_result = future.result()
             if not definition_result:
@@ -148,88 +213,103 @@ def on_editor_generate_definition(editor: Editor) -> None:
                 )
                 return
 
-            editor.note[def_field] = definition_result
-            
-            # Reload note in editor preserving focus so user immediately sees updated field
-            if hasattr(editor, "load_note_keeping_focus"):
-                editor.load_note_keeping_focus()
-            else:
-                editor.loadNote()
-
+            _apply_definition_to_editor(editor, note, def_field, definition_result)
             tooltip(f"Generated definition for '{word_text}'!", parent=editor.parentWindow)
-        except Exception as exc:
-            tooltip(f"Error generating definition: {exc}", parent=editor.parentWindow)
+        except Exception:
+            # Loud, diagnosable failure — never silently swallow (the bulk
+            # path's old bare `except: continue` hid real bugs for months).
+            print(f"CompreDef: generation failed for word '{word_text}' "
+                  f"(note {nid_key}):\n{traceback.format_exc()}")
+            tooltip(
+                f"CompreDef: generation failed for '{word_text}' — "
+                f"see Anki's debug console (Ctrl+Shift+;) for details.",
+                parent=editor.parentWindow,
+            )
 
     mw.taskman.run_in_background(task, on_done)
 
 
-
-class EditorTabFilter(QObject):
+def _apply_definition_to_editor(editor, note, def_field: str, definition_html: str) -> None:
     """
-    DEPRECATED: Replaced by JS-based bridge for better reliability in WebEngine.
+    Persists the generated definition into the note and refreshes the editor.
+
+    Ordering contract (fixes the 'definition disappears' bug):
+    1. Write the field on the Note object.
+    2. Persist to the collection FIRST (update_note) for existing notes.
+    3. THEN refresh the editor UI. A reload can never discard the change
+       because it is already durably stored.
     """
-    def __init__(self, editor: Editor) -> None:
-        super().__init__()
-        self.editor = editor
+    note[def_field] = definition_html
 
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        return super().eventFilter(obj, event)
+    # Persist existing notes immediately; new (unsaved) notes in the Add
+    # window are written by Anki itself when the user confirms the add —
+    # updating them here would fail since they have no collection row yet.
+    if getattr(note, "id", 0) and mw and mw.col:
+        try:
+            mw.col.update_note(note)
+        except Exception:
+            print(f"CompreDef: update_note failed for note {note.id}:\n{traceback.format_exc()}")
+
+    # Refresh the visible editor. run_in_background's on_done runs on the
+    # main thread, so touching the webview here is thread-safe.
+    try:
+        names = list(note.keys())
+        values = [note[name] for name in names]
+        editor.web.eval(
+            f"setFields({json.dumps(names)}, {json.dumps(values)});"
+        )
+    except Exception:
+        # Legacy editor fallback (refresh keeping user focus)
+        try:
+            if hasattr(editor, "loadNoteKeepingFocus"):
+                editor.loadNoteKeepingFocus()
+            elif hasattr(editor, "loadNote"):
+                editor.loadNote()
+        except Exception:
+            print(f"CompreDef: editor refresh failed:\n{traceback.format_exc()}")
 
 
-def add_editor_button(buttons: List[str], editor: Editor) -> None:
+# ---------------------------------------------------------------------------
+# Editor toolbar button
+# ---------------------------------------------------------------------------
+
+def add_editor_button(buttons: List[str], editor) -> None:
     """
-    Hook callback to append CompreDef button to Anki's card editor toolbar.
-    Also injects JS to handle Tab-to-Generate.
+    Hook callback to append the CompreDef button to the card editor toolbar.
+
+    `editor_did_init_buttons` fires for BOTH editor generations and
+    `addButton` exists on both, so one registration covers everything.
     """
     icon_path = os.path.join(os.path.dirname(__file__), "icons", "compredef.svg")
 
-    # Add button via native Anki Editor helper
     btn = editor.addButton(
         icon=icon_path if os.path.exists(icon_path) else None,
         cmd="compredef_generate_definition",
-        func=lambda ed=editor: on_editor_generate_definition(ed),
+        func=lambda ed: on_editor_generate_definition(ed),
         tip="Generate CompreDef Definition",
         label="CD",
         id="compredef_editor_btn",
     )
     buttons.append(btn)
 
-    # Inject JS listener for Tab-to-Generate
-    if hasattr(editor, "web"):
-        # We inject the script to listen for Tab.
-        # We use a more robust approach to identify the field and send it.
-        js_code = """
-        (function() {
-            if (window.compredef_tab_listener) return;
-            window.compredef_tab_listener = true;
 
-            document.addEventListener('keydown', function(e) {
-                if (e.key === 'Tab') {
-                    const activeEl = document.activeElement;
-                    let fieldName = 'unknown';
-                    if (activeEl) {
-                        fieldName = activeEl.getAttribute('data-field-name') || 
-                                   (activeEl.id ? activeEl.id.replace('field-', '') : 'unknown');
-                    }
-                    
-                    if (typeof pycmd === 'function') {
-                        pycmd('compredef_tab_pressed:' + fieldName);
-                    }
-                }
-            }, true);
-        })();
-        """
-        editor.web.eval(js_code)
-
-
+# ---------------------------------------------------------------------------
+# Browser bulk generation (explicit menu action)
+# ---------------------------------------------------------------------------
 
 def on_bulk_generate_definitions(browser: Browser) -> None:
     """
     Action callback triggered from Browser Edit menu or Context menu.
 
-    Processes all selected notes in a background thread, updating definition fields.
+    Processes all selected notes in a background thread, updating definition
+    fields. Failures are logged with note id, word and traceback, reported
+    to the user in the summary, and never abort the remaining notes.
     """
-    nids = browser.selectedNotes()
+    # selected_notes() is the modern name; selectedNotes() the legacy one
+    if hasattr(browser, "selected_notes"):
+        nids = list(browser.selected_notes())
+    else:
+        nids = list(browser.selectedNotes())
     if not nids:
         tooltip("No notes selected.", parent=browser)
         return
@@ -251,28 +331,38 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
         )
         return
 
-    # First generation after startup loads/caches dictionaries; show the
-    # user what is happening so Anki never looks frozen.
     tooltip(
         f"CompreDef: Generating definitions for {len(nids)} note(s)...",
         parent=browser,
     )
 
-    def task() -> tuple[int, int]:
-        """Background task running across all selected note IDs. Returns (updated_count, skipped_count)."""
+    def task() -> tuple:
+        """
+        Background task across all selected note IDs.
+
+        Returns (updated_count, skipped_count, failures) where failures is a
+        list of (note_id, word, error_message) for the user-facing summary.
+        """
         updated_count = 0
         skipped_count = 0
+        failures: List[tuple] = []
+
         for nid in nids:
+            word_text = ""
             try:
                 note = mw.col.get_note(nid)
+
                 # Check note type match
-                if target_note_type and note.model()["name"] != target_note_type:
-                    continue
+                if target_note_type and target_note_type.strip():
+                    if _get_note_type_name(note) != target_note_type.strip():
+                        continue
 
                 if word_field not in note or def_field not in note:
                     continue
 
-                word_text = note[word_field].strip()
+                # Strip HTML wrappers and furigana markup so the dictionary
+                # term matches (same fix as the editor button path).
+                word_text = extract_clean_word(note[word_field])
                 if not word_text:
                     continue
 
@@ -282,7 +372,8 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                     note, word_field, reading_field
                 )
 
-                # Generate definition for note using the Dictionary Ladder
+                # Generate definition using the Dictionary Ladder (pure
+                # SQLite lookups — no indexing ever happens here).
                 definition_result = generate_definition(
                     word_text,
                     dictionary_folder=dictionary_folder,
@@ -294,36 +385,46 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                     skipped_count += 1
                     continue
 
+                # Persist BEFORE any UI refresh, so the definition survives.
                 note[def_field] = definition_result
                 mw.col.update_note(note)
                 updated_count += 1
             except Exception:
-                # Avoid crashing the loop on an individual note failure
+                # Log loudly and keep going: one bad note must not kill the
+                # batch, but the failure must be visible and diagnosable.
+                err = traceback.format_exc()
+                print(f"CompreDef: bulk generation FAILED for note {nid} "
+                      f"(word '{word_text}'):\n{err}")
+                failures.append((nid, word_text, err.splitlines()[-1] if err else "unknown error"))
                 continue
 
         # Note fields were modified, so the memoized known-kanji/vocab
         # sets are stale; force a rescan on next use.
         reset_caches()
 
-        return updated_count, skipped_count
+        return updated_count, skipped_count, failures
 
     def on_done(future) -> None:
         try:
-            updated_count, skipped_count = future.result()
+            updated_count, skipped_count, failures = future.result()
             # Refresh browser view to reflect updated note fields
-            browser.search()
-            if skipped_count > 0:
-                tooltip(
-                    f"CompreDef: Generated definitions for {updated_count} note(s) ({skipped_count} skipped - no definition found).",
-                    parent=browser,
-                )
-            else:
-                tooltip(
-                    f"CompreDef: Successfully generated definitions for {updated_count} note(s).",
-                    parent=browser,
-                )
-        except Exception as exc:
-            tooltip(f"Error during bulk definition generation: {exc}", parent=browser)
+            if hasattr(browser, "search"):
+                browser.search()
+
+            parts = [f"generated: {updated_count}"]
+            if skipped_count:
+                parts.append(f"no definition found: {skipped_count}")
+            if failures:
+                parts.append(f"FAILED: {len(failures)} (see console for details)")
+                for nid, word, err in failures[:5]:  # console gets full tracebacks
+                    print(f"CompreDef: note {nid} word '{word}': {err}")
+            tooltip(
+                f"CompreDef: {', '.join(parts)}",
+                parent=browser,
+            )
+        except Exception:
+            print(f"CompreDef: bulk generation crashed:\n{traceback.format_exc()}")
+            tooltip(f"CompreDef: bulk generation crashed — see console.", parent=browser)
 
     mw.taskman.run_in_background(task, on_done)
 
@@ -352,106 +453,14 @@ def setup_browser_context_menu(browser: Browser, menu: QMenu) -> None:
     action.triggered.connect(lambda _, b=browser: on_bulk_generate_definitions(b))
 
 
-def on_field_unfocus(changed: bool, note: Any, current_field_index: int) -> bool:
-    """
-    Hook callback triggered when a field in the editor loses focus.
-    If the Word field was unfocused and the Definition field is empty,
-    it triggers automatic definition generation.
-    """
-    if not note:
-        return changed
-
-    config = _get_addon_config()
-    word_field = config.get("word_field", "")
-    def_field = config.get("definition_field", "")
-
-    # Resolve the name of the field that was just unfocused
-    try:
-        fields = mw.col.models.field_names(note.model())
-        if current_field_index < 0 or current_field_index >= len(fields):
-            return changed
-        unfocused_field = fields[current_field_index]
-    except Exception:
-        return changed
-
-    if unfocused_field == word_field:
-        # Only generate if definition is empty
-        if def_field in note and not note[def_field].strip():
-            # Try to find the active editor instance
-            editor = None
-            # 1. Try to find an active Editor window
-            for window in mw.app.topLevelWidgets():
-                if hasattr(window, "editor") and window.editor:
-                    editor = window.editor
-                    break
-            
-            if not editor:
-                return changed
-            
-            on_editor_generate_definition(editor)
-    
-    return changed
-
 def setup_editor_browser_hooks() -> None:
-    """Registers editor toolbar and browser menu hooks with Anki."""
+    """
+    Registers editor toolbar and browser menu hooks with Anki.
+
+    Deliberately does NOT register any automatic generation on field
+    unfocus or Tab (editor_did_unfocus_field / JS key listeners): explicit
+    button/menu actions only, per the stability-first architecture.
+    """
     gui_hooks.editor_did_init_buttons.append(add_editor_button)
     gui_hooks.browser_menus_did_init.append(setup_browser_menu)
     gui_hooks.browser_will_show_context_menu.append(setup_browser_context_menu)
-    
-    # Use the native unfocus hook for Tab-to-Generate behavior
-    gui_hooks.editor_did_unfocus_field.append(on_field_unfocus)
-
-def _patch_webview_bridge(editor: Editor) -> None:
-    """
-    Intercepts bridge commands to handle 'compredef_tab_pressed'
-    without needing a separate setBridgeCmd method.
-    """
-    original_on_bridge_cmd = editor.web.onBridgeCmd
-    
-    def wrapped_on_bridge_cmd(cmd: str) -> Any:
-        if cmd.startswith("compredef_tab_pressed"):
-            # Extract field name from "compredef_tab_pressed:fieldName"
-            field_from_js = "unknown"
-            if ":" in cmd:
-                field_from_js = cmd.split(":", 1)[1]
-
-            config = _get_addon_config()
-            word_field = config.get("word_field", "")
-            def_field = config.get("definition_field", "")
-            
-            # Check 1: Use Anki's reported current field
-            current_field = getattr(editor.web, "currentField", None)
-            
-            # Check 2: Use the field reported by the JS DOM check
-            # (Fallback in case currentField is not updated yet)
-            is_word_field = (current_field == word_field) or (field_from_js == word_field)
-            
-            if is_word_field:
-                note = getattr(editor, "note", None)
-                if note and def_field in note and not note[def_field].strip():
-                    on_editor_generate_definition(editor)
-                    return "generated"
-            return "ignored"
-        return original_on_bridge_cmd(cmd)
-    
-    editor.web.onBridgeCmd = wrapped_on_bridge_cmd
-
-def _handle_tab_generate_bridge(editor: Editor, data: Dict[str, Any]) -> str:
-    """
-    JS-Bridge handler for Tab-to-Generate.
-    Checks if current field is the Word field and Definition is empty.
-    """
-    config = _get_addon_config()
-    word_field = config.get("word_field", "")
-    def_field = config.get("definition_field", "")
-    
-    current_field = data.get("field", "")
-    
-    # We check if the field reported by JS matches our configured word field
-    # and if the definition field is empty.
-    if current_field == word_field:
-        note = getattr(editor, "note", None)
-        if note and def_field in note and not note[def_field].strip():
-            on_editor_generate_definition(editor)
-            return "generated"
-    return "ignored"

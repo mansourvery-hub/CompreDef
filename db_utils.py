@@ -7,9 +7,9 @@ native `mw.col.db` wrapper instead of direct SQL access (per AGENTS.md
 rule 2: never open collection.anki2 with an external sqlite3 connection).
 
 Performance notes:
-- `SELECT DISTINCT` on the flds text blob forces SQLite to hash/compare
-  every huge field blob, which pegs the CPU on large collections. We
-  instead select note ids (cheap integers) and dedupe in Python.
+- A notes×cards JOIN returns each note's full field blob once per mature
+  card (3-card notes = 3x memory/scan). We instead select flds once per
+  note via a sub-select on the note ids.
 - Kanji extraction uses a compiled regex instead of a per-character
   Python loop (orders of magnitude faster on megabytes of text).
 - Results are memoized; call `reset_caches()` after bulk note edits.
@@ -17,7 +17,7 @@ Performance notes:
 
 import re
 from aqt import mw
-from typing import Set, Tuple
+from typing import Set
 
 # Matches a single kanji character in the CJK Unified Ideographs block
 # (U+4E00-U+9FFF). Compiled once at import time for speed.
@@ -44,20 +44,22 @@ def _fetch_learned_note_fields() -> list:
     and vocabulary the user has genuinely retained long-term are counted
     as known in the matrix.
 
-    Selects note ids + flds and relies on the JOIN to provide only notes
-    with mature cards.
+    Uses a sub-select on note ids instead of a JOIN so each note's field
+    blob is returned exactly ONCE — a JOIN with cards duplicates the
+    whole (potentially huge) flds blob once per mature card, multiplying
+    memory usage and scan time for multi-card notes.
     """
     try:
         if not mw or not mw.col:
             return []
 
-        # Kanji Grid-style query: join notes with their cards and keep only
-        # material on mature cards (interval >= 21 days for long-term retention).
+        # Kanji Grid-style: keep only notes that own at least one mature
+        # card (interval >= 21 days for long-term retention), without
+        # duplicating the notes.flds blob per matching card.
         query = """
-        SELECT notes.id, notes.flds
+        SELECT notes.flds
         FROM notes
-        JOIN cards ON notes.id = cards.nid
-        WHERE cards.ivl >= 21
+        WHERE notes.id IN (SELECT cards.nid FROM cards WHERE cards.ivl >= 21)
         """
         return mw.col.db.all(query) or []
     except Exception as e:
@@ -79,11 +81,12 @@ def _build_caches() -> None:
     known_words: Set[str] = set()
 
     for row in _fetch_learned_note_fields():
-        if not row or len(row) < 2:
+        if not row:
             continue
 
-        _, field_blob = row
-        if not field_blob:
+        # Query now returns flds directly (single-column rows)
+        field_blob = row[0] if isinstance(row, (list, tuple)) else row
+        if not field_blob or not isinstance(field_blob, str):
             continue
 
         # Kanji extraction via compiled regex (fast C-level scan)
