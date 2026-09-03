@@ -18,6 +18,7 @@ import re
 import html
 import hashlib
 import sqlite3
+import threading
 import zipfile
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -28,6 +29,13 @@ from typing import Dict, List, Optional, Tuple, Any
 # '先ず' kept returning 121 chars of plain text instead of ~7000 chars of
 # rich Yomitan HTML after the renderer was rewritten).
 RENDERER_VERSION = "yomitan_html_v1"
+
+# How many rendered definitions to hold in memory before flushing to SQLite.
+# Bounded RAM: giant dictionaries (大辞泉: 632,876 entries ≈ 1.3 GB of HTML)
+# must NEVER be accumulated in a single Python list — that exhausts memory,
+# drives the system into swap thrash, and freezes Anki at 100% CPU on what
+# should be a microsecond lookup of a nonsense word (bug: 駿ってさ crash).
+_INDEX_BATCH_SIZE = 5000
 
 
 def _style_to_css(style: dict) -> str:
@@ -197,7 +205,15 @@ def _get_db_path() -> str:
 
 
 def _get_db_connection() -> sqlite3.Connection:
-    """Creates a configured SQLite connection for dictionary queries."""
+    """
+    Creates a configured SQLite connection for dictionary queries.
+
+    The connection must ALWAYS be closed by the caller (use
+    `_get_db_connection()` inside try/finally or a closing wrapper).
+    The old code used `with conn:` which only commits the transaction —
+    it does NOT close the connection, leaking one open handle per call
+    until the process exits.
+    """
     conn = sqlite3.connect(_get_db_path(), timeout=30.0)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
@@ -205,9 +221,25 @@ def _get_db_connection() -> sqlite3.Connection:
     return conn
 
 
+def _db_query(sql: str, params: tuple = ()) -> list:
+    """
+    Runs a read-only query and GUARANTEES the connection is closed.
+
+    Every short-lived lookup must go through here so connection handles
+    never leak — hundreds of lookups during bulk generation previously
+    left hundreds of open SQLite handles behind.
+    """
+    conn = _get_db_connection()
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
 def _init_db_tables() -> None:
     """Initializes tables and indexes in the dictionary database."""
-    with _get_db_connection() as conn:
+    conn = _get_db_connection()
+    try:
         conn.execute("""
         CREATE TABLE IF NOT EXISTS dictionaries (
             path TEXT PRIMARY KEY,
@@ -227,6 +259,9 @@ def _init_db_tables() -> None:
         CREATE INDEX IF NOT EXISTS idx_entries_lookup
         ON entries(dict_path, term)
         """)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 _init_db_tables()
@@ -243,12 +278,11 @@ def get_dictionary_title(path: str) -> str:
 
     # 1. Try SQLite metadata
     try:
-        with _get_db_connection() as conn:
-            row = conn.execute(
-                "SELECT title FROM dictionaries WHERE path = ?", (norm_path,)
-            ).fetchone()
-            if row and row[0]:
-                return row[0]
+        rows = _db_query(
+            "SELECT title FROM dictionaries WHERE path = ?", (norm_path,)
+        )
+        if rows and rows[0][0]:
+            return rows[0][0]
     except Exception:
         pass
 
@@ -329,6 +363,11 @@ class SingleDictionary:
     indexed in SQLite.
     """
 
+    # Serializes re-indexing: Anki's background threads can call lookup()
+    # on the same dictionary concurrently; without the lock, two threads
+    # would each build giant in-flight batches and double the RAM blow-up.
+    _index_lock = threading.Lock()
+
     def __init__(self, path: str):
         self.path = os.path.realpath(os.path.expanduser(path))
         self.is_zip = is_zip_dictionary(self.path)
@@ -371,92 +410,141 @@ class SingleDictionary:
     def ensure_indexed(self) -> None:
         """
         Verifies that the dictionary is indexed in SQLite and up to date.
-        Parses Yomitan term banks (from zip or folder), renders to HTML,
-        and saves to SQLite.
+
+        MEMORY-SAFE BY DESIGN: rendered HTML is streamed to SQLite in
+        bounded batches of _INDEX_BATCH_SIZE rows. Never accumulates the
+        whole dictionary in RAM — 大辞泉 alone renders to ~1.3 GB of HTML,
+        which previously exhausted memory and froze Anki at 100% CPU
+        (even for a nonsense-word lookup like 駿ってさ).
         """
         if not os.path.exists(self.path):
             return
 
         current_sig = self._compute_signature()
 
-        with _get_db_connection() as conn:
-            row = conn.execute(
-                "SELECT signature FROM dictionaries WHERE path = ?", (self.path,)
-            ).fetchone()
-            if row and row[0] == current_sig:
+        rows = _db_query(
+            "SELECT signature FROM dictionaries WHERE path = ?", (self.path,)
+        )
+        if rows and rows[0][0] == current_sig:
+            return  # already indexed and fresh — instant path
+
+        # Re-index under the class-wide lock so concurrent lookups wait
+        # instead of duplicating a giant re-index in parallel threads.
+        with SingleDictionary._index_lock:
+            # Re-check inside the lock: another thread may have finished
+            # the exact re-index we were about to start.
+            rows = _db_query(
+                "SELECT signature FROM dictionaries WHERE path = ?",
+                (self.path,),
+            )
+            if rows and rows[0][0] == current_sig:
                 return
 
-        print(f"CompreDef: Indexing '{self.title}' into SQLite with rich Yomitan HTML...")
-        entries_batch: List[Tuple[str, str, str]] = []
-
-        if self.is_zip:
+            print(
+                f"CompreDef: Indexing '{self.title}' into SQLite "
+                f"with rich Yomitan HTML (streamed, bounded RAM)..."
+            )
             try:
-                with zipfile.ZipFile(self.path, "r") as z:
-                    bank_names = sorted([
-                        n for n in z.namelist()
-                        if "term_bank" in n and n.endswith(".json")
-                    ])
-                    for b_name in bank_names:
-                        try:
-                            entries = json.loads(z.read(b_name).decode("utf-8"))
-                        except Exception as e:
-                            print(f"CompreDef: Failed to read {b_name} in zip: {e}")
-                            continue
-
-                        for entry in entries:
-                            if not isinstance(entry, list) or len(entry) < 6:
-                                continue
-                            word = entry[0]
-                            if not word or not isinstance(word, str):
-                                continue
-                            for def_block in entry[5]:
-                                html_def = render_yomitan_definition_html(def_block)
-                                if html_def:
-                                    entries_batch.append((self.path, word, html_def))
+                self._reindex_streaming(current_sig)
             except Exception as e:
-                print(f"CompreDef: Error opening zip {self.path}: {e}")
+                print(f"CompreDef: Indexing failed for '{self.title}': {e}")
                 return
 
-        elif os.path.isdir(self.path):
-            try:
-                bank_files = sorted([
-                    f for f in os.listdir(self.path)
-                    if f.startswith("term_bank") and f.endswith(".json")
-                ])
-                for b_name in bank_files:
-                    b_path = os.path.join(self.path, b_name)
-                    try:
-                        with open(b_path, "r", encoding="utf-8") as f:
-                            entries = json.load(f)
-                    except Exception as e:
-                        print(f"CompreDef: Failed to read {b_name}: {e}")
-                        continue
+    def _reindex_streaming(self, current_sig: str) -> None:
+        """
+        Streams term banks through the renderer into SQLite in batches.
 
-                    for entry in entries:
-                        if not isinstance(entry, list) or len(entry) < 6:
-                            continue
-                        word = entry[0]
-                        if not word or not isinstance(word, str):
-                            continue
-                        for def_block in entry[5]:
-                            html_def = render_yomitan_definition_html(def_block)
-                            if html_def:
-                                entries_batch.append((self.path, word, html_def))
-            except Exception as e:
-                print(f"CompreDef: Error reading folder {self.path}: {e}")
-                return
-
-        with _get_db_connection() as conn:
+        Peak memory stays at roughly one batch of rendered HTML
+        (~a few MB) regardless of dictionary size. Term banks are loaded
+        ONE AT A TIME and dropped after rendering, and each batch is
+        committed immediately.
+        """
+        conn = _get_db_connection()
+        try:
+            # Start a clean slate for this dictionary (stale rows from a
+            # previous renderer version must not survive).
             conn.execute("DELETE FROM entries WHERE dict_path = ?", (self.path,))
             conn.execute("DELETE FROM dictionaries WHERE path = ?", (self.path,))
-            conn.executemany("INSERT INTO entries VALUES (?, ?, ?)", entries_batch)
-            conn.execute(
-                "INSERT INTO dictionaries VALUES (?, ?, ?, ?)",
-                (self.path, self.title, current_sig, len(entries_batch)),
-            )
             conn.commit()
 
-        print(f"CompreDef: Finished indexing '{self.title}' ({len(entries_batch)} entries)")
+            total = 0
+            batch: List[Tuple[str, str, str]] = []
+
+            def flush() -> None:
+                """Writes and clears the in-memory batch; commits instantly."""
+                nonlocal total
+                if batch:
+                    conn.executemany(
+                        "INSERT INTO entries VALUES (?, ?, ?)", batch
+                    )
+                    conn.commit()
+                    total += len(batch)
+                    batch.clear()
+
+            # Iterator over every term bank (zip or folder), loaded lazily
+            # so only one bank's JSON is ever alive at a time.
+            for entries in self._iter_term_banks():
+                for entry in entries:
+                    if not isinstance(entry, list) or len(entry) < 6:
+                        continue
+                    word = entry[0]
+                    if not word or not isinstance(word, str):
+                        continue
+                    for def_block in entry[5]:
+                        html_def = render_yomitan_definition_html(def_block)
+                        if html_def:
+                            batch.append((self.path, word, html_def))
+                    # Bounded RAM: flush long before the batch can grow to
+                    # hundreds of megabytes of rendered HTML strings.
+                    if len(batch) >= _INDEX_BATCH_SIZE:
+                        flush()
+                # The parsed bank JSON becomes garbage here; the next bank
+                # loads fresh — at no point do two banks coexist in RAM.
+
+            flush()  # commit the final partial batch
+
+            conn.execute(
+                "INSERT INTO dictionaries VALUES (?, ?, ?, ?)",
+                (self.path, self.title, current_sig, total),
+            )
+            conn.commit()
+            print(f"CompreDef: Finished indexing '{self.title}' ({total} entries)")
+        finally:
+            conn.close()
+
+    def _iter_term_banks(self):
+        """
+        Yields one parsed term bank (a list of entries) at a time.
+
+        Works identically for .zip archives and unzipped folders so the
+        streaming indexer never needs to care about the source format.
+        Corrupt banks are skipped with a log line instead of aborting the
+        whole re-index.
+        """
+        if self.is_zip:
+            with zipfile.ZipFile(self.path, "r") as z:
+                bank_names = sorted([
+                    n for n in z.namelist()
+                    if "term_bank" in n and n.endswith(".json")
+                ])
+                for b_name in bank_names:
+                    try:
+                        yield json.loads(z.read(b_name).decode("utf-8"))
+                    except Exception as e:
+                        print(f"CompreDef: Failed to read {b_name} in zip: {e}")
+        elif os.path.isdir(self.path):
+            bank_files = sorted([
+                f for f in os.listdir(self.path)
+                if f.startswith("term_bank") and f.endswith(".json")
+            ])
+            for b_name in bank_files:
+                try:
+                    with open(
+                        os.path.join(self.path, b_name), "r", encoding="utf-8"
+                    ) as f:
+                        yield json.load(f)
+                except Exception as e:
+                    print(f"CompreDef: Failed to read {b_name}: {e}")
 
     def lookup(self, word: str) -> List[str]:
         """
@@ -464,12 +552,11 @@ class SingleDictionary:
         Returns rich Yomitan HTML definitions list in microseconds.
         """
         self.ensure_indexed()
-        with _get_db_connection() as conn:
-            cursor = conn.execute(
-                "SELECT definition FROM entries WHERE dict_path = ? AND term = ?",
-                (self.path, word),
-            )
-            return [row[0] for row in cursor.fetchall()]
+        rows = _db_query(
+            "SELECT definition FROM entries WHERE dict_path = ? AND term = ?",
+            (self.path, word),
+        )
+        return [row[0] for row in rows]
 
 
 _loaded_dicts: Dict[str, SingleDictionary] = {}

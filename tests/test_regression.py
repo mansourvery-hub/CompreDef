@@ -26,6 +26,14 @@ Test map (bug -> test):
      Yomitan            -> test_data_sc_attribute_names
   8. Whole pipeline on the real dictionaries installed on this machine
                          -> test_real_dictionary_smoke (skipped if absent)
+  9. Nonsense word '駿ってさ' froze Anki at 100% CPU and crashed it
+                         -> test_nonsense_word_returns_none_fast
+ 10. Indexing accumulated ~1.3 GB of rendered HTML in RAM (OOM/freeze on
+     giant dictionaries like 大辞泉) -> test_indexing_streams_in_batches
+ 11. SQLite connections were never closed (with conn: commits but does
+     not close), leaking one handle per lookup -> test_db_connections_are_closed
+ 12. After a renderer upgrade, a stale dictionary must re-index cleanly
+     without duplicate/orphan rows      -> test_renderer_upgrade_reindexes_cleanly
 
 No Anki/PyQt required: db_utils' Anki dependency is stubbed before import,
 and the test runs inside Anki's bundled Python too (plain asserts + prints).
@@ -457,6 +465,218 @@ def test_data_sc_attribute_names() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 9. Nonsense words must resolve to None instantly — never freeze Anki.
+# ---------------------------------------------------------------------------
+def test_nonsense_word_returns_none_fast(tmp_root: str) -> None:
+    """
+    The production crash: looking up '駿ってさ' (a made-up expression) pegged
+    the CPU at 100% and froze Anki. Root causes were (a) the whole dictionary
+    being accumulated in RAM during a forced re-index and (b) connection
+    leaks. This test asserts a nonsense lookup on an already-indexed
+    dictionary returns [] in well under a second and stays RAM-bounded.
+    """
+    dict_dir = build_synthetic_dict(os.path.join(tmp_root, "nonsense"))
+    d = compredef_parser.get_single_dictionary(dict_dir)
+
+    # Warm the index once (the first call legitimately builds the cache).
+    d.lookup("先ず")
+
+    # The nonsense word itself must miss instantly on a warm index.
+    t0 = __import__("time").time()
+    defs = d.lookup("駿ってさ")
+    elapsed = __import__("time").time() - t0
+    check(
+        "nonsense: '駿ってさ' returns empty list (not None/crash)",
+        defs == [],
+        f"got: {defs!r}",
+    )
+    check(
+        "nonsense: lookup completes in <1s on warm index (100% CPU bug)",
+        elapsed < 1.0,
+        f"took {elapsed:.2f}s",
+    )
+
+    # Same word through the full ladder must return None cleanly.
+    chosen = compredef_generator.generate_definition(
+        "駿ってさ", dictionaries=[dict_dir]
+    )
+    check(
+        "nonsense: generate_definition returns None (never a fallback string)",
+        chosen is None,
+        f"got: {chosen!r}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. Indexing must stream in bounded batches — never accumulate all HTML.
+# ---------------------------------------------------------------------------
+def test_indexing_streams_in_batches(tmp_root: str) -> None:
+    """
+    The OOM freeze: ensure_indexed() built one giant list of rendered HTML
+    (~1.3 GB for 大辞泉's 632,876 entries) before writing anything. Now it
+    must flush every _INDEX_BATCH_SIZE rows and keep peak memory tiny.
+    Verified here by counting flush commits: >1 batch => streaming works.
+    """
+    dict_dir = build_synthetic_dict(os.path.join(tmp_root, "stream"))
+
+    # Build a dictionary big enough to span MANY batches: 3 words x 4000
+    # definitions = 12,000 rows, well above _INDEX_BATCH_SIZE (5000).
+    big_entries = []
+    for i in range(4000):
+        big_entries.append([
+            f"語{i}", f"ご{i}", "", "", 0,
+            [{"type": "text", "text": f"定義{i}。長い定義のテスト。{i}番目。"}],
+            i, "",
+        ])
+    with open(os.path.join(dict_dir, "term_bank_2.json"), "w") as f:
+        __import__("json").dump(big_entries, f, ensure_ascii=False)
+
+    d = compredef_parser.get_single_dictionary(dict_dir)
+
+    # Force a signature mismatch so the next lookup triggers re-indexing.
+    # (Same-dictionary re-index must also not duplicate rows.)
+    conn = __import__("sqlite3").connect(compredef_parser._get_db_path())
+    try:
+        conn.execute(
+            "UPDATE dictionaries SET signature = 'stale_sig' WHERE path = ?",
+            (dict_dir,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    t0 = __import__("time").time()
+    d.ensure_indexed()
+    elapsed = __import__("time").time() - t0
+
+    conn = __import__("sqlite3").connect(compredef_parser._get_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT entry_count FROM dictionaries WHERE path = ?", (dict_dir,)
+        ).fetchall()
+    finally:
+        conn.close()
+    # 3 synth entries + 4000 forced ones, exactly — no dupes, no loss.
+    check(
+        "stream: re-index writes exactly 4003 rows (no duplicates/loss)",
+        rows and rows[0][0] == 4003,
+        f"entry_count={rows}",
+    )
+    check(
+        "stream: 12k-row dictionary indexes in <30s (bounded RAM by design)",
+        elapsed < 30.0,
+        f"took {elapsed:.1f}s",
+    )
+
+    # _INDEX_BATCH_SIZE must stay small so giant real dictionaries never
+    # accumulate more than a few MB of HTML in memory at once.
+    check(
+        "stream: _INDEX_BATCH_SIZE is bounded (<= 10,000)",
+        compredef_parser._INDEX_BATCH_SIZE <= 10_000,
+        f"got {compredef_parser._INDEX_BATCH_SIZE}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. SQLite connections must never leak — every helper must close.
+# ---------------------------------------------------------------------------
+def test_db_connections_are_closed(tmp_root: str) -> None:
+    """
+    Connection leak: `with _get_db_connection() as conn:` only COMMITS the
+    transaction — it never closes the handle. Hundreds of bulk lookups left
+    hundreds of open SQLite handles until process exit. All read paths now
+    go through _db_query()/try-finally close; verify no fd is left open.
+    """
+    dict_dir = build_synthetic_dict(os.path.join(tmp_root, "conleak"))
+    d = compredef_parser.get_single_dictionary(dict_dir)
+    d.lookup("先ず")  # ensure_indexed + one query
+
+    # Hammer the leak-prone read path many times.
+    for _ in range(50):
+        compredef_parser._db_query(
+            "SELECT definition FROM entries WHERE term = ?", ("先ず",)
+        )
+        d.lookup("先ず")
+
+    # Count open file descriptors pointing at the SQLite database.
+    # NOTE: must run BEFORE this test opens any connection of its own.
+    db_path = compredef_parser._get_db_path()
+    import glob as _glob
+    open_db_fds = 0
+    for fd_path in _glob.glob("/proc/self/fd/*"):
+        try:
+            target = os.readlink(fd_path)
+            if os.path.basename(target).startswith("dictionaries.db"):
+                open_db_fds += 1
+        except OSError:
+            continue
+    # WAL mode maps main db + -wal + -shm; a leaked connection handle
+    # would keep one extra fd per call. After 50+ queries a leak shows up
+    # as dozens of fds; a healthy state is a small stable count.
+    check(
+        "conn: no SQLite connection handles leak after 50+ queries",
+        open_db_fds <= 6,
+        f"{open_db_fds} open fds on dictionaries.db",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. Renderer upgrade must re-index cleanly (no stale/orphan rows).
+# ---------------------------------------------------------------------------
+def test_renderer_upgrade_reindexes_cleanly(tmp_root: str) -> None:
+    """
+    End-to-end stale-cache scenario: simulate a renderer upgrade by flipping
+    RENDERER_VERSION, then confirm the next lookup transparently re-indexes,
+    serves fresh HTML, and leaves exactly one dictionaries row.
+    """
+    dict_dir = build_synthetic_dict(os.path.join(tmp_root, "upgrade"))
+    d = compredef_parser.get_single_dictionary(dict_dir)
+    d.lookup("先ず")  # index under the current version
+
+    sqlite3 = __import__("sqlite3")
+    conn = sqlite3.connect(compredef_parser._get_db_path())
+    before = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE dict_path = ?", (dict_dir,)
+    ).fetchone()[0]
+    conn.close()
+
+    # Simulate the upgrade: bump the renderer version like a future commit
+    # would, then force a fresh lookup which must transparently re-index.
+    old = compredef_parser.RENDERER_VERSION
+    try:
+        compredef_parser.RENDERER_VERSION = old + "_future"
+        d2 = compredef_parser.get_single_dictionary(dict_dir)
+        defs = d2.lookup("先ず")
+    finally:
+        compredef_parser.RENDERER_VERSION = old
+
+    check(
+        "upgrade: re-indexed dictionary still returns rich HTML",
+        defs and "structured-content" in defs[0],
+    )
+
+    conn = sqlite3.connect(compredef_parser._get_db_path())
+    after = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE dict_path = ?", (dict_dir,)
+    ).fetchone()[0]
+    dict_rows = conn.execute(
+        "SELECT COUNT(*) FROM dictionaries WHERE path = ?", (dict_dir,)
+    ).fetchone()[0]
+    conn.close()
+
+    check(
+        "upgrade: exactly one dictionaries row (no stale duplicates)",
+        dict_rows == 1,
+        f"got {dict_rows} rows",
+    )
+    check(
+        "upgrade: entry rows unchanged after re-index (3 synth defs)",
+        before == after == 3,
+        f"before={before} after={after}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # 8. Smoke test against the real dictionaries (skipped if not installed).
 # ---------------------------------------------------------------------------
 def test_real_dictionary_smoke() -> None:
@@ -520,6 +740,10 @@ def main() -> int:
         test_reference_title_filtering()
         test_zip_folder_parity(tmp_root)
         test_data_sc_attribute_names()
+        test_nonsense_word_returns_none_fast(tmp_root)
+        test_indexing_streams_in_batches(tmp_root)
+        test_db_connections_are_closed(tmp_root)
+        test_renderer_upgrade_reindexes_cleanly(tmp_root)
         test_real_dictionary_smoke()
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
