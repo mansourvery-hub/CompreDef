@@ -273,15 +273,15 @@ class ConfigDialog(QDialog):
         """Dynamically populates and auto-matches field dropdowns."""
         fields = self._get_field_names(note_type_name)
 
-        prev_word_field = self.word_field_combo.currentText()
-        prev_reading_field = self.reading_field_combo.currentText()
-        prev_def_field = self.definition_field_combo.currentText()
+        # Store previous selections
+        prev_word = self.word_field_combo.currentText()
+        prev_reading = self.reading_field_combo.currentText()
+        prev_def = self.definition_field_combo.currentText()
 
+        # Update dropdown items
         self.word_field_combo.clear()
         self.word_field_combo.addItems(fields)
 
-        # Reading field gets a leading '(none)' entry so users can opt out;
-        # blank readings simply fall back to reading-agnostic lookup.
         self.reading_field_combo.blockSignals(True)
         self.reading_field_combo.clear()
         self.reading_field_combo.addItem("")
@@ -291,39 +291,21 @@ class ConfigDialog(QDialog):
         self.definition_field_combo.clear()
         self.definition_field_combo.addItems(fields)
 
-        auto_word_field = None
-        auto_reading_field = None
-        auto_def_field = None
+        # Compute best matches for new fields
+        auto_word = _find_best_field_match(fields, _TARGET_WORD_KEYWORDS)
+        
+        # Prefer dedicated reading/furigana field, else word field itself
+        auto_reading = _find_best_field_match(fields, _READING_FIELD_KEYWORDS) or \
+                       (auto_word if auto_word else "")
 
-        if not prev_word_field:
-            auto_word_field = _find_best_field_match(fields, _TARGET_WORD_KEYWORDS, fallback=None)
+        # Definition usually not the word field
+        remaining_fields = [f for f in fields if f != auto_word]
+        auto_def = _find_best_field_match(remaining_fields, _DEFINITION_KEYWORDS)
 
-        if not prev_reading_field:
-            # Prefer a dedicated reading/furigana field, else fall back to
-            # the word field itself (Expression often embeds 先[ま]ず markup).
-            auto_reading_field = (
-                _find_best_field_match(fields, _READING_FIELD_KEYWORDS, fallback=None)
-                or (auto_word_field if auto_word_field else None)
-            )
-
-        if not prev_def_field:
-            remaining_fields = [f for f in fields if f != auto_word_field]
-            auto_def_field = _find_best_field_match(remaining_fields, _DEFINITION_KEYWORDS, fallback=None)
-
-        if prev_word_field in fields:
-            self.word_field_combo.setCurrentText(prev_word_field)
-        elif auto_word_field:
-            self.word_field_combo.setCurrentText(auto_word_field)
-
-        if prev_reading_field in fields or prev_reading_field == "":
-            self.reading_field_combo.setCurrentText(prev_reading_field)
-        elif auto_reading_field:
-            self.reading_field_combo.setCurrentText(auto_reading_field)
-
-        if prev_def_field in fields:
-            self.definition_field_combo.setCurrentText(prev_def_field)
-        elif auto_def_field:
-            self.definition_field_combo.setCurrentText(auto_def_field)
+        # Restore previous or set auto-match
+        self.word_field_combo.setCurrentText(prev_word if prev_word in fields else (auto_word or ""))
+        self.reading_field_combo.setCurrentText(prev_reading if prev_reading in fields else (auto_reading or ""))
+        self.definition_field_combo.setCurrentText(prev_def if prev_def in fields else (auto_def or ""))
 
     def _refresh_item_labels(self) -> None:
         """Updates labels: '[n] Title ✓' and syncs checkbox state."""
