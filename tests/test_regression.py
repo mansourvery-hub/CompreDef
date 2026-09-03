@@ -1057,6 +1057,203 @@ def test_disabled_dictionaries_skipped(tmp_root: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tab-to-Generate decision logic (restored feature — see editor_browser.py).
+# ---------------------------------------------------------------------------
+
+def test_tab_generate_decisions() -> None:
+    """
+    Exercises the pure decision core of Tab-to-Generate:
+
+    _should_auto_generate(note, unfocused_field, config) must fire ONLY when
+    the blurred field is the configured word field AND the definition field
+    is empty AND the feature is enabled. This matrix guards the historical
+    accidents: overwriting existing definitions, firing on the wrong field,
+    and firing after the user disabled the feature.
+    """
+    # Importing editor_browser needs more of aqt than the minimal stub
+    # provides (gui_hooks, browser, qt, utils) — extend the stub in place.
+    aqt_dir = os.path.join(FAKE_STUB_DIR, "aqt")
+    with open(os.path.join(aqt_dir, "browser.py"), "w") as f:
+        f.write("class Browser:  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "qt.py"), "w") as f:
+        f.write(
+            "class QMenu:  # stub\n    pass\n"
+            "class QKeySequence:  # stub\n    pass\n"
+        )
+    with open(os.path.join(aqt_dir, "utils.py"), "w") as f:
+        f.write("def tooltip(*args, **kwargs):  # stub\n    pass\n")
+    hooks_src = (
+        "class _Hook:  # stub: append-only registry like the real one\n"
+        "    def __init__(self): self._hooks = []\n"
+        "    def append(self, fn): self._hooks.append(fn)\n"
+        "    def __call__(self, *a, **kw):\n"
+        "        for fn in self._hooks:\n"
+        "            r = fn(*a, **kw)\n"
+        "            if r is not None and a and isinstance(a[0], bool):\n"
+        "                a = (r,) + a[1:]\n"
+        "        return a[0] if a else None\n"
+        "editor_did_init_buttons = _Hook()\n"
+        "browser_menus_did_init = _Hook()\n"
+        "browser_will_show_context_menu = _Hook()\n"
+        "editor_did_load_note = _Hook()\n"
+        "editor_did_unfocus_field = _Hook()\n"
+        "editor_did_init = _Hook()\n"
+    )
+    with open(os.path.join(aqt_dir, "gui_hooks.py"), "w") as f:
+        f.write(hooks_src)
+
+    # editor_browser uses package-relative imports (`from .generator import
+    # ...`) because it ships inside the add-on package. Importing the
+    # add-on's real `__init__.py` here would register hooks against the
+    # stub and pull in gui.py (needs real Qt) — so we synthesize a package
+    # whose __init__ is empty and whose members alias the top-level modules
+    # already imported above (parser, generator, db_utils).
+    import importlib
+    import types
+    pkg_name = "compredef_addon"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [REPO_ROOT]  # resolve .editor_browser etc. from repo
+        sys.modules[pkg_name] = pkg
+    else:
+        pkg = sys.modules[pkg_name]
+
+    # The relative imports must resolve to the ALREADY-imported (and fully
+    # initialized) top-level modules — re-importing them under new names
+    # would duplicate module state (separate SQLite handles, caches).
+    sys.modules[f"{pkg_name}.generator"] = compredef_generator
+    sys.modules[f"{pkg_name}.parser"] = compredef_parser
+    if "db_utils" in sys.modules:
+        sys.modules[f"{pkg_name}.db_utils"] = sys.modules["db_utils"]
+    else:
+        sys.modules[f"{pkg_name}.db_utils"] = importlib.import_module("db_utils")
+
+    eb = importlib.import_module(f"{pkg_name}.editor_browser")
+
+    class FakeNote:
+        """Mimics anki.notes.Note field access for the decision core."""
+
+        def __init__(self, fields: dict, nid: int = 123):
+            self._fields = fields
+            self.id = nid
+
+        def __contains__(self, name):
+            return name in self._fields
+
+        def __getitem__(self, name):
+            return self._fields[name]
+
+        def keys(self):
+            return list(self._fields)
+
+    base_config = {
+        "word_field": "Expression",
+        "definition_field": "Definition",
+        "tab_generate": True,
+    }
+
+    # 1. Happy path: leaving the word field with an empty definition fires.
+    note = FakeNote({"Expression": "試験", "Definition": ""})
+    check(
+        "tab: word-field unfocus + empty def generates",
+        eb._should_auto_generate(note, "Expression", base_config),
+    )
+
+    # 2. Existing definitions are NEVER overwritten.
+    note_filled = FakeNote({"Expression": "試験", "Definition": "さき。"})
+    check(
+        "tab: non-empty def never auto-overwritten",
+        not eb._should_auto_generate(note_filled, "Expression", base_config),
+    )
+
+    # 3. Whitespace-only definitions count as empty (historical leak).
+    note_ws = FakeNote({"Expression": "試験", "Definition": "  \n"})
+    check(
+        "tab: whitespace-only def counts as empty",
+        eb._should_auto_generate(note_ws, "Expression", base_config),
+    )
+
+    # 4. Blurring a NON-word field must not fire.
+    check(
+        "tab: non-word-field unfocus does nothing",
+        not eb._should_auto_generate(note, "Definition", base_config),
+    )
+
+    # 5. Feature disabled in config → never fires (opt-out respected).
+    check(
+        "tab: tab_generate=false disables the feature",
+        not eb._should_auto_generate(note, "Expression", {**base_config, "tab_generate": False}),
+    )
+
+    # 6. Missing config key defaults ON (historical behaviour).
+    legacy_config = {"word_field": "Expression", "definition_field": "Definition"}
+    check(
+        "tab: missing key defaults to enabled",
+        eb._should_auto_generate(note, "Expression", legacy_config),
+    )
+
+    # 7. Degenerate config: word == definition field → never fires.
+    check(
+        "tab: identical word/def fields never auto-generate",
+        not eb._should_auto_generate(note, "Expression", {
+            "word_field": "Expression", "definition_field": "Expression",
+        }),
+    )
+
+    # 8. Definition field absent from the note → never fires.
+    check(
+        "tab: missing def field on note never fires",
+        not eb._should_auto_generate(FakeNote({"Expression": "試験"}),
+                                    "Expression", base_config),
+    )
+
+    # 9. The unfocus hook returns `changed` UNTOUCHED (the lost-definition
+    #    race: a truthy return makes the legacy editor reload the note).
+    #    Patch mw/note so the hook takes the earliest early-exit path.
+    real_mw = eb.mw
+    try:
+        eb.mw = None
+        before = object()
+        check(
+            "tab: hook returns changed untouched",
+            eb.on_field_unfocus(before, None, 0) is before,
+        )
+    finally:
+        eb.mw = real_mw
+
+    # 10. Hook wiring: setup_editor_browser_hooks registers the unfocus
+    #     hook (a regression here silently disables the whole feature).
+    eb.setup_editor_browser_hooks()
+    from aqt import gui_hooks as gh
+    check(
+        "tab: unfocus hook registered with gui_hooks",
+        any(getattr(h, "_hooks", None) and eb.on_field_unfocus in h._hooks
+            for h in (gh.editor_did_unfocus_field,)),
+    )
+    check(
+        "tab: editor registry hook registered",
+        eb._register_editor in gh.editor_did_load_note._hooks,
+    )
+
+    # 11. Editor<->note matching: identity first (unsaved Add notes share
+    #     id 0 — an id-only match across two Add windows is a bug).
+    e1 = type("E", (), {"note": FakeNote({"Expression": "x"}, nid=0), "nid": None})()
+    e2 = type("E", (), {"note": FakeNote({"Expression": "y"}, nid=0), "nid": None})()
+    eb._live_editors.clear()
+    eb._live_editors.extend([e1, e2])
+    check(
+        "tab: matching by note identity, not shared id 0",
+        eb._find_editor_for_note(e2.note) is e2,
+    )
+
+    # 12. Field-ordinal resolution: correct name, out-of-range safe.
+    check("tab: field ordinal resolves name",
+          eb._field_name_at(note, 0) == "Expression")
+    check("tab: out-of-range ordinal returns ''",
+          eb._field_name_at(note, 99) == "")
+
+
+# ---------------------------------------------------------------------------
 # Real-dictionary smoke test (skipped if not installed).
 # ---------------------------------------------------------------------------
 
@@ -1244,6 +1441,7 @@ def main() -> int:
         test_reading_disambiguates_homographs(tmp_root)
         test_parse_furigana_field_formats()
         test_disabled_dictionaries_skipped(tmp_root)
+        test_tab_generate_decisions()
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.
