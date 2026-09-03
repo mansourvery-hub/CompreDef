@@ -15,6 +15,7 @@ Implements the Dictionary Ladder with Kanji Matrix Scoring:
   while returning the rich, fully styled Yomitan HTML for insertion into Anki.
 """
 
+import os
 import re
 import html
 from typing import List, Optional, Union, Set
@@ -24,6 +25,7 @@ try:
     from .parser import (
         get_single_dictionary,
         find_dictionary_folders,
+        normalize_reading,
         SingleDictionary,
     )
 except ImportError:
@@ -31,6 +33,7 @@ except ImportError:
     from parser import (
         get_single_dictionary,
         find_dictionary_folders,
+        normalize_reading,
         SingleDictionary,
     )
 
@@ -95,6 +98,8 @@ def generate_definition(
     mode: str = "",
     dictionary_folder: str = "",
     dictionaries: Optional[List[str]] = None,
+    reading: str = "",
+    disabled_dictionaries: Optional[List[str]] = None,
 ) -> Optional[str]:
     """
     Generates a definition for `target_word` following the Dictionary Ladder algorithm.
@@ -104,6 +109,12 @@ def generate_definition(
         mode: Kept for backwards compatibility (ignored, LLM removed).
         dictionary_folder: Fallback single folder or zip path.
         dictionaries: Ordered list of dictionary directory/zip paths from user config.
+        reading: Normalized hiragana reading of the word (e.g. 'まず' for
+            先ず). When supplied, only definitions whose dictionary reading
+            matches are considered, so homographs like 先ず(まず 'first') vs
+            先ず(せんず 'precede') resolve correctly. Empty = no filter.
+        disabled_dictionaries: Paths the user unchecked in the config GUI.
+            They stay in the config (order preserved) but are skipped.
 
     Returns:
         The chosen rich Yomitan HTML definition string, or None if not found.
@@ -117,8 +128,23 @@ def generate_definition(
     if not ladder_paths and dictionary_folder:
         ladder_paths = find_dictionary_folders(dictionary_folder)
 
+    # Skip dictionaries the user disabled (unchecked) in the config GUI.
+    if disabled_dictionaries:
+        disabled = {os.path.realpath(os.path.expanduser(str(p))) for p in disabled_dictionaries}
+        ladder_paths = [
+            p for p in ladder_paths
+            if os.path.realpath(os.path.expanduser(p)) not in disabled
+        ]
+
     if not ladder_paths:
         return None
+
+    # Normalize the reading once for every dictionary lookup below.
+    norm_reading = normalize_reading(reading) if reading else ""
+    if norm_reading:
+        print(f"CompreDef: Using reading filter '{norm_reading}' for word '{target_word}'")
+    else:
+        print(f"CompreDef: No reading filter for word '{target_word}' (reading-agnostic lookup)")
 
     known_kanji = get_known_kanji_set()
 
@@ -128,7 +154,7 @@ def generate_definition(
     # Step through each dictionary rung in configured order
     for dict_path in ladder_paths:
         dict_obj: SingleDictionary = get_single_dictionary(dict_path)
-        raw_defs: List[str] = dict_obj.lookup(target_word)
+        raw_defs: List[str] = dict_obj.lookup(target_word, norm_reading)
 
         # Filter out reference titles
         valid_defs = [d for d in raw_defs if not _is_reference_title(d)]

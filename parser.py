@@ -28,7 +28,9 @@ from typing import Dict, List, Optional, Tuple, Any
 # silently serving old plain-text definitions forever (the exact bug where
 # '先ず' kept returning 121 chars of plain text instead of ~7000 chars of
 # rich Yomitan HTML after the renderer was rewritten).
-RENDERER_VERSION = "yomitan_html_v1"
+# v2: adds the `reading` column so lookups can disambiguate 先ず(まず) from
+# 先ず(せんず) — the term alone matched BOTH readings' definitions.
+RENDERER_VERSION = "yomitan_html_v2_reading"
 
 # How many rendered definitions to hold in memory before flushing to SQLite.
 # Bounded RAM: giant dictionaries (大辞泉: 632,876 entries ≈ 1.3 GB of HTML)
@@ -259,6 +261,26 @@ def _init_db_tables() -> None:
         CREATE INDEX IF NOT EXISTS idx_entries_lookup
         ON entries(dict_path, term)
         """)
+
+        # MIGRATION v2: older caches lacked the `reading` column, so
+        # 先ず matched definitions for BOTH readings まず and せんず.
+        # Add the column if missing; the RENDERER_VERSION bump in the
+        # signature will then force a full re-index that fills it in.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+        if "reading" not in cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN reading TEXT DEFAULT ''")
+            conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_reading
+            ON entries(dict_path, term, reading)
+            """)
+            conn.commit()
+        elif "reading" in cols:
+            # Index may be missing if migration was interrupted; recreate.
+            conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_reading
+            ON entries(dict_path, term, reading)
+            """)
+
         conn.commit()
     finally:
         conn.close()
@@ -475,7 +497,9 @@ class SingleDictionary:
                 nonlocal total
                 if batch:
                     conn.executemany(
-                        "INSERT INTO entries VALUES (?, ?, ?)", batch
+                        "INSERT INTO entries (dict_path, term, definition, reading) "
+                        "VALUES (?, ?, ?, ?)",
+                        batch,
                     )
                     conn.commit()
                     total += len(batch)
@@ -490,10 +514,13 @@ class SingleDictionary:
                     word = entry[0]
                     if not word or not isinstance(word, str):
                         continue
+                    # entry[1] is the Yomitan reading (e.g. まず for 先ず);
+                    # stored so lookups can disambiguate homographs.
+                    reading = entry[1] if isinstance(entry[1], str) else ""
                     for def_block in entry[5]:
                         html_def = render_yomitan_definition_html(def_block)
                         if html_def:
-                            batch.append((self.path, word, html_def))
+                            batch.append((self.path, word, html_def, normalize_reading(reading)))
                     # Bounded RAM: flush long before the batch can grow to
                     # hundreds of megabytes of rendered HTML strings.
                     if len(batch) >= _INDEX_BATCH_SIZE:
@@ -546,17 +573,170 @@ class SingleDictionary:
                 except Exception as e:
                     print(f"CompreDef: Failed to read {b_name}: {e}")
 
-    def lookup(self, word: str) -> List[str]:
+    def lookup(self, word: str, reading: str = "") -> List[str]:
         """
         Performs an instant B-tree lookup for `word` in this dictionary.
-        Returns rich Yomitan HTML definitions list in microseconds.
+
+        When `reading` is supplied (hiragana OR katakana — normalized
+        internally, e.g. 'マズ' == 'まず'), only entries whose stored
+        reading matches are returned. This fixes the homograph bug: 先ず
+        exists as BOTH まず (adverb 'first') and せんず (literary 'to
+        precede'); without the reading filter the generator could pick
+        the wrong one's definition.
         """
         self.ensure_indexed()
+
+        if reading:
+            # Normalize here (not only in the generator) so every caller —
+            # tests, bulk generation, direct API use — gets the same
+            # katakana-tolerant behavior. The suite caught this: passing
+            # マズ directly to lookup() previously compared raw katakana
+            # against the stored hiragana and matched nothing.
+            norm = normalize_reading(reading)
+            # Prefer reading-exact matches; fall back to entries with no
+            # stored reading (older rows / reading-less sources) so we never
+            # regress to zero results for reading-less dictionaries.
+            rows = _db_query(
+                "SELECT definition FROM entries "
+                "WHERE dict_path = ? AND term = ? AND reading = ?",
+                (self.path, word, norm),
+            )
+            if rows:
+                return [row[0] for row in rows]
+            # No reading match: fall back to reading-agnostic lookup rather
+            # than returning nothing (the dictionary may not carry readings
+            # for this entry, e.g. proper nouns).
+            rows = _db_query(
+                "SELECT definition FROM entries "
+                "WHERE dict_path = ? AND term = ? AND reading = ''",
+                (self.path, word),
+            )
+            return [row[0] for row in rows]
+
         rows = _db_query(
             "SELECT definition FROM entries WHERE dict_path = ? AND term = ?",
             (self.path, word),
         )
         return [row[0] for row in rows]
+
+
+# Katakana -> hiragana offset: katakana block starts at U+30A1 (ァ),
+# hiragana at U+3041 (ぁ). Shifting by 0x60 converts readings like
+# マズ to まず so user-supplied readings can match dictionary readings
+# regardless of script.
+_KATAKANA_TO_HIRAGANA_OFFSET = 0x60
+
+# Matches furigana markup in note fields. Supported formats:
+#   先[ま]ず          <- Anki Japanese note types (bracket after the kanji run)
+#   先ず[まず]        <- trailing bracket covering the whole word
+#   <ruby>先<rt>ま</rt></ruby>ず  <- HTML ruby (from Yomitan paste)
+#   せん-ず / せんず    <- plain kana with or without hyphen/dot separators
+_FURIGANA_BASE_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]+")
+
+
+def normalize_reading(reading: str) -> str:
+    """
+    Normalizes a reading to plain hiragana for robust comparison.
+
+    Katakana -> hiragana, lowercase ASCII preserved, all whitespace and
+    separator characters (・, ・, -, ., _) removed so せん-ず == せんず.
+    """
+    if not reading:
+        return ""
+    out = []
+    for ch in reading:
+        code = ord(ch)
+        # Full-width katakana (with/without voiced marks) -> hiragana
+        if 0x30A1 <= code <= 0x30F6 or 0x30FD <= code <= 0x30FC:
+            out.append(chr(code - _KATAKANA_TO_HIRAGANA_OFFSET))
+        else:
+            out.append(ch)
+    joined = "".join(out)
+    # Strip separators that dictionaries insert inconsistently
+    return re.sub(r"[\s\-・.。_ー()()「」【】]", "", joined)
+
+
+def parse_furigana_field(field_text: str) -> str:
+    """
+    Extracts the pure kana reading from a note field that may contain
+    furigana markup.
+
+    Handles:
+    - '先[ま]ず'        -> 'まず'      (base chars with bracket readings)
+    - '先ず[まず]'      -> 'まず'      (whole-word trailing bracket)
+    - '<ruby>先<rt>ま</rt></ruby>ず' -> 'まず'  (HTML ruby)
+    - 'マズ'            -> 'まず'      (plain katakana, normalized)
+    - 'せんず'           -> 'せんず'    (already plain)
+    - '先ず'            -> ''          (no readings available)
+
+    Returns the normalized hiragana reading, or '' when the field holds
+    no kana reading information at all.
+    """
+    if not field_text:
+        return ""
+
+    text = field_text.strip()
+
+    # HTML ruby: each <ruby>BASE<rt>READING</rt></ruby> chunk is replaced by
+    # its rt reading, so the final string is pure kana (e.g.
+    # <ruby>先<rt>ま</rt></ruby>ず -> まず).
+    if "<ruby" in text or "<rt" in text:
+        def _ruby_sub(match: re.Match) -> str:
+            inner = match.group(0)
+            rt = re.search(r"<rt\b[^>]*>(.*?)</rt>", inner, flags=re.DOTALL)
+            # Strip any nested tags inside the rt text (e.g. <span>)
+            return re.sub(r"<[^>]+>", "", rt.group(1)) if rt else ""
+
+        kana = re.sub(
+            r"<ruby\b[^>]*>.*?</ruby>", _ruby_sub, text, flags=re.DOTALL
+        )
+        kana = re.sub(r"<[^>]+>", "", kana)
+        return normalize_reading(kana)
+
+    # Bracket formats:
+    #   '先[ま]ず'   -> per-kanji-run reading: bracket content REPLACES the
+    #                   kanji characters immediately before it.
+    #   '先ず[まず]' -> whole-word trailing bracket: bracket is the reading
+    #                   of the entire preceding expression.
+    if "[" in text or "［" in text:
+        # Convert fullwidth brackets for safety
+        s = text.replace("［", "[").replace("］", "]")
+
+        # Whole-word form: a single bracket covering the whole string.
+        whole = re.fullmatch(r"([^\[\]]+)\[([^\[\]]+)\]", s)
+        if whole:
+            return normalize_reading(whole.group(2))
+
+        # Per-run form: 'X[reading]' — replace each bracket with its content
+        # AND remove the kanji run it belongs to (the trailing kanji directly
+        # before the bracket, up to the last non-kanji boundary).
+        result: list = []
+        tokens = re.split(r"(\[[^\]]*\])", s)
+        for i, part in enumerate(tokens):
+            if part.startswith("[") and part.endswith("]"):
+                # The reading replaces the kanji run before it: strip all
+                # trailing CJK ideographs from the previous literal token.
+                if result:
+                    prev = result[-1]
+                    trimmed = re.sub(r"[\u4e00-\u9fff]+$", "", prev)
+                    result[-1] = trimmed
+                result.append(part[1:-1])
+            else:
+                result.append(part)
+        return normalize_reading("".join(result))
+    # Plain kana / katakana only:
+    if re.fullmatch(r"[\u3040-\u30ff\u30fc\s\-・]+", text):
+        return normalize_reading(text)
+
+    # Kanji without any readings -> nothing we can use
+    if not re.search(r"[\u3040-\u30ff]", text):
+        return ""
+
+    # Mixed text without brackets (e.g. '行く'): no reading info
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return ""
+
+    return normalize_reading(text)
 
 
 _loaded_dicts: Dict[str, SingleDictionary] = {}

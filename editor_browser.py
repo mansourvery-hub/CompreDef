@@ -13,9 +13,10 @@ from typing import List, Dict, Any
 from aqt import mw, gui_hooks
 from aqt.editor import Editor
 from aqt.browser import Browser
-from aqt.qt import QMenu, QKeySequence
+from aqt.qt import QMenu, QKeySequence, QObject, QEvent, Qt, QKeyEvent
 from aqt.utils import tooltip
 from .generator import generate_definition
+from .parser import parse_furigana_field
 from .db_utils import reset_caches
 
 
@@ -44,6 +45,30 @@ def _get_addon_config() -> Dict[str, Any]:
     return mw.addonManager.getConfig(addon_name) or {}
 
 
+def _extract_reading_text(note, word_field: str, reading_field: str) -> str:
+    """
+    Extracts the word's kana reading from the note for homograph resolution.
+
+    Priority: a dedicated reading/furigana field if configured, else the
+    word field itself (Expression fields often embed furigana markup like
+    '先[ま]ず'). Returns '' when neither carries usable reading info —
+    the generator then falls back to reading-agnostic lookup.
+    """
+    # Dedicated reading field first (explicit user configuration wins)
+    if reading_field and reading_field in note:
+        parsed = parse_furigana_field(note[reading_field])
+        if parsed:
+            return parsed
+
+    # Fall back to the word field (may embed 先[ま]ず / ruby markup)
+    if word_field and word_field in note:
+        parsed = parse_furigana_field(note[word_field])
+        if parsed:
+            return parsed
+
+    return ""
+
+
 def on_editor_generate_definition(editor: Editor) -> None:
     """
     Action callback triggered when user clicks the CompreDef editor toolbar button.
@@ -58,8 +83,10 @@ def on_editor_generate_definition(editor: Editor) -> None:
     config = _get_addon_config()
     target_note_type = config.get("note_type", "")
     word_field = config.get("word_field", "")
+    reading_field = config.get("reading_field", "")
     def_field = config.get("definition_field", "")
     dictionaries = config.get("dictionaries", [])
+    disabled_dictionaries = config.get("disabled_dictionaries", [])
     dictionary_folder = config.get("dictionary_folder", "")
 
     # Validate note type match
@@ -97,12 +124,18 @@ def on_editor_generate_definition(editor: Editor) -> None:
     # the user what is happening so Anki never looks frozen.
     tooltip("CompreDef: Generating definition...", parent=editor.parentWindow)
 
+    # Resolve the word's reading (dedicated field or embedded furigana)
+    # so homographs like 先ず(まず) vs 先ず(せんず) pick the right entry.
+    reading_text = _extract_reading_text(editor.note, word_field, reading_field)
+
     # Execute generation task in background thread to prevent UI freezing
     def task() -> str:
         return generate_definition(
             word_text,
             dictionary_folder=dictionary_folder,
             dictionaries=dictionaries,
+            reading=reading_text,
+            disabled_dictionaries=disabled_dictionaries,
         )
 
     def on_done(future) -> None:
@@ -131,11 +164,22 @@ def on_editor_generate_definition(editor: Editor) -> None:
 
 
 
+class EditorTabFilter(QObject):
+    """
+    DEPRECATED: Replaced by JS-based bridge for better reliability in WebEngine.
+    """
+    def __init__(self, editor: Editor) -> None:
+        super().__init__()
+        self.editor = editor
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        return super().eventFilter(obj, event)
+
+
 def add_editor_button(buttons: List[str], editor: Editor) -> None:
     """
     Hook callback to append CompreDef button to Anki's card editor toolbar.
-
-    Target hook: `gui_hooks.editor_did_init_buttons`.
+    Also injects JS to handle Tab-to-Generate.
     """
     icon_path = os.path.join(os.path.dirname(__file__), "icons", "compredef.svg")
 
@@ -149,6 +193,34 @@ def add_editor_button(buttons: List[str], editor: Editor) -> None:
         id="compredef_editor_btn",
     )
     buttons.append(btn)
+
+    # Inject JS listener for Tab-to-Generate
+    if hasattr(editor, "web"):
+        # We inject the script to listen for Tab.
+        # We use a more robust approach to identify the field and send it.
+        js_code = """
+        (function() {
+            if (window.compredef_tab_listener) return;
+            window.compredef_tab_listener = true;
+
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Tab') {
+                    const activeEl = document.activeElement;
+                    let fieldName = 'unknown';
+                    if (activeEl) {
+                        fieldName = activeEl.getAttribute('data-field-name') || 
+                                   (activeEl.id ? activeEl.id.replace('field-', '') : 'unknown');
+                    }
+                    
+                    if (typeof pycmd === 'function') {
+                        pycmd('compredef_tab_pressed:' + fieldName);
+                    }
+                }
+            }, true);
+        })();
+        """
+        editor.web.eval(js_code)
+
 
 
 def on_bulk_generate_definitions(browser: Browser) -> None:
@@ -165,8 +237,10 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
     config = _get_addon_config()
     target_note_type = config.get("note_type", "")
     word_field = config.get("word_field", "")
+    reading_field = config.get("reading_field", "")
     def_field = config.get("definition_field", "")
     dictionaries = config.get("dictionaries", [])
+    disabled_dictionaries = config.get("disabled_dictionaries", [])
     dictionary_folder = config.get("dictionary_folder", "")
 
     # Early validation: without any dictionary configured nothing can be generated
@@ -202,11 +276,19 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                 if not word_text:
                     continue
 
+                # Per-note reading resolution (dedicated field or embedded
+                # furigana) so homographs resolve correctly in bulk too.
+                reading_text = _extract_reading_text(
+                    note, word_field, reading_field
+                )
+
                 # Generate definition for note using the Dictionary Ladder
                 definition_result = generate_definition(
                     word_text,
                     dictionary_folder=dictionary_folder,
                     dictionaries=dictionaries,
+                    reading=reading_text,
+                    disabled_dictionaries=disabled_dictionaries,
                 )
                 if not definition_result:
                     skipped_count += 1
@@ -270,8 +352,106 @@ def setup_browser_context_menu(browser: Browser, menu: QMenu) -> None:
     action.triggered.connect(lambda _, b=browser: on_bulk_generate_definitions(b))
 
 
+def on_field_unfocus(changed: bool, note: Any, current_field_index: int) -> bool:
+    """
+    Hook callback triggered when a field in the editor loses focus.
+    If the Word field was unfocused and the Definition field is empty,
+    it triggers automatic definition generation.
+    """
+    if not note:
+        return changed
+
+    config = _get_addon_config()
+    word_field = config.get("word_field", "")
+    def_field = config.get("definition_field", "")
+
+    # Resolve the name of the field that was just unfocused
+    try:
+        fields = mw.col.models.field_names(note.model())
+        if current_field_index < 0 or current_field_index >= len(fields):
+            return changed
+        unfocused_field = fields[current_field_index]
+    except Exception:
+        return changed
+
+    if unfocused_field == word_field:
+        # Only generate if definition is empty
+        if def_field in note and not note[def_field].strip():
+            # Try to find the active editor instance
+            editor = None
+            # 1. Try to find an active Editor window
+            for window in mw.app.topLevelWidgets():
+                if hasattr(window, "editor") and window.editor:
+                    editor = window.editor
+                    break
+            
+            if not editor:
+                return changed
+            
+            on_editor_generate_definition(editor)
+    
+    return changed
+
 def setup_editor_browser_hooks() -> None:
     """Registers editor toolbar and browser menu hooks with Anki."""
     gui_hooks.editor_did_init_buttons.append(add_editor_button)
     gui_hooks.browser_menus_did_init.append(setup_browser_menu)
     gui_hooks.browser_will_show_context_menu.append(setup_browser_context_menu)
+    
+    # Use the native unfocus hook for Tab-to-Generate behavior
+    gui_hooks.editor_did_unfocus_field.append(on_field_unfocus)
+
+def _patch_webview_bridge(editor: Editor) -> None:
+    """
+    Intercepts bridge commands to handle 'compredef_tab_pressed'
+    without needing a separate setBridgeCmd method.
+    """
+    original_on_bridge_cmd = editor.web.onBridgeCmd
+    
+    def wrapped_on_bridge_cmd(cmd: str) -> Any:
+        if cmd.startswith("compredef_tab_pressed"):
+            # Extract field name from "compredef_tab_pressed:fieldName"
+            field_from_js = "unknown"
+            if ":" in cmd:
+                field_from_js = cmd.split(":", 1)[1]
+
+            config = _get_addon_config()
+            word_field = config.get("word_field", "")
+            def_field = config.get("definition_field", "")
+            
+            # Check 1: Use Anki's reported current field
+            current_field = getattr(editor.web, "currentField", None)
+            
+            # Check 2: Use the field reported by the JS DOM check
+            # (Fallback in case currentField is not updated yet)
+            is_word_field = (current_field == word_field) or (field_from_js == word_field)
+            
+            if is_word_field:
+                note = getattr(editor, "note", None)
+                if note and def_field in note and not note[def_field].strip():
+                    on_editor_generate_definition(editor)
+                    return "generated"
+            return "ignored"
+        return original_on_bridge_cmd(cmd)
+    
+    editor.web.onBridgeCmd = wrapped_on_bridge_cmd
+
+def _handle_tab_generate_bridge(editor: Editor, data: Dict[str, Any]) -> str:
+    """
+    JS-Bridge handler for Tab-to-Generate.
+    Checks if current field is the Word field and Definition is empty.
+    """
+    config = _get_addon_config()
+    word_field = config.get("word_field", "")
+    def_field = config.get("definition_field", "")
+    
+    current_field = data.get("field", "")
+    
+    # We check if the field reported by JS matches our configured word field
+    # and if the definition field is empty.
+    if current_field == word_field:
+        note = getattr(editor, "note", None)
+        if note and def_field in note and not note[def_field].strip():
+            on_editor_generate_definition(editor)
+            return "generated"
+    return "ignored"

@@ -57,6 +57,18 @@ _TARGET_WORD_KEYWORDS = [
     "hiragana", "romaji", "katakana", "jp", "japanese", "ja"
 ]
 
+# Fields that may carry the word's kana reading (furigana markup or plain
+# kana). The engine parses these to disambiguate homographs like
+# 先ず(まず) vs 先ず(せんず).
+_READING_FIELD_KEYWORDS = [
+    "furigana", "reading", "kana", "hiragana", "katakana",
+    "readingfield", "pronunciation", "yomi", "読み",
+]
+
+# Fields that are the word itself with readings embedded (e.g. 先[ま]ず
+# inside the Expression field) also count as a reading source.
+_READING_KEYWORDS_SECONDARY = ["expression", "word", "front"]
+
 _DEFINITION_KEYWORDS = [
     "definition", "meaning", "glossary", "translation",
     "translation_", "explanation", "sense", "desc"
@@ -109,6 +121,10 @@ class ConfigDialog(QDialog):
         self.addon_name = _get_addon_name()
         self.config: Dict[str, Any] = mw.addonManager.getConfig(self.addon_name) or {}
 
+        # Paths the user unchecked: kept in config (order preserved) but
+        # skipped during generation. Stored as a set for O(1) toggling.
+        self.disabled_dicts: set = set()
+
         self._init_ui()
         self._load_config()
 
@@ -130,6 +146,14 @@ class ConfigDialog(QDialog):
 
         self.word_field_combo = QComboBox()
         mapping_layout.addRow("Target Word Field:", self.word_field_combo)
+
+        self.reading_field_combo = QComboBox()
+        self.reading_field_combo.setToolTip(
+            "Optional. Field containing the word's reading (plain kana or furigana\n"
+            "markup like 先[ま]ず). Used to pick the correct definition for words\n"
+            "with multiple readings (e.g. 先ず read まず vs せんず)."
+        )
+        mapping_layout.addRow("Reading Field (optional):", self.reading_field_combo)
 
         self.definition_field_combo = QComboBox()
         mapping_layout.addRow("Definition Field:", self.definition_field_combo)
@@ -159,6 +183,8 @@ class ConfigDialog(QDialog):
 
         self.dict_list = QListWidget()
         self.dict_list.setDragDropMode(_internal_move_mode())
+        # Track checkbox changes to update disabled_dicts
+        self.dict_list.itemChanged.connect(self._on_item_changed)
         self.dict_list.model().rowsMoved.connect(lambda *_: self._refresh_item_labels())
         list_and_buttons_layout.addWidget(self.dict_list)
 
@@ -234,19 +260,37 @@ class ConfigDialog(QDialog):
         fields = self._get_field_names(note_type_name)
 
         prev_word_field = self.word_field_combo.currentText()
+        prev_reading_field = self.reading_field_combo.currentText()
         prev_def_field = self.definition_field_combo.currentText()
 
         self.word_field_combo.clear()
         self.word_field_combo.addItems(fields)
 
+        # Reading field gets a leading '(none)' entry so users can opt out;
+        # blank readings simply fall back to reading-agnostic lookup.
+        self.reading_field_combo.blockSignals(True)
+        self.reading_field_combo.clear()
+        self.reading_field_combo.addItem("")
+        self.reading_field_combo.addItems(fields)
+        self.reading_field_combo.blockSignals(False)
+
         self.definition_field_combo.clear()
         self.definition_field_combo.addItems(fields)
 
         auto_word_field = None
+        auto_reading_field = None
         auto_def_field = None
 
         if not prev_word_field:
             auto_word_field = _find_best_field_match(fields, _TARGET_WORD_KEYWORDS, fallback=None)
+
+        if not prev_reading_field:
+            # Prefer a dedicated reading/furigana field, else fall back to
+            # the word field itself (Expression often embeds 先[ま]ず markup).
+            auto_reading_field = (
+                _find_best_field_match(fields, _READING_FIELD_KEYWORDS, fallback=None)
+                or (auto_word_field if auto_word_field else None)
+            )
 
         if not prev_def_field:
             remaining_fields = [f for f in fields if f != auto_word_field]
@@ -257,20 +301,46 @@ class ConfigDialog(QDialog):
         elif auto_word_field:
             self.word_field_combo.setCurrentText(auto_word_field)
 
+        if prev_reading_field in fields or prev_reading_field == "":
+            self.reading_field_combo.setCurrentText(prev_reading_field)
+        elif auto_reading_field:
+            self.reading_field_combo.setCurrentText(auto_reading_field)
+
         if prev_def_field in fields:
             self.definition_field_combo.setCurrentText(prev_def_field)
         elif auto_def_field:
             self.definition_field_combo.setCurrentText(auto_def_field)
 
     def _refresh_item_labels(self) -> None:
-        """Updates numeric step prefixes (e.g. '[1] ...') on each item in the list."""
+        """Updates labels: '[n] Title' and syncs checkbox state."""
         role = _user_role()
+        # Block signals to prevent itemChanged from triggering a loop during refresh
+        self.dict_list.blockSignals(True)
         for i in range(self.dict_list.count()):
             item = self.dict_list.item(i)
             path = item.data(role)
             title = get_dictionary_title(path)
             item.setText(f"[{i + 1}] {title}")
-            item.setToolTip(path)
+            item.setCheckState(Qt.CheckState.Checked if path not in self.disabled_dicts else Qt.CheckState.Unchecked)
+            item.setToolTip(
+                path + ("\n(disabled — skipped during generation)" if path in self.disabled_dicts else "")
+            )
+        self.dict_list.blockSignals(False)
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        """Handles checkbox toggles to update disabled_dicts set."""
+        role = _user_role()
+        path = item.data(role)
+        if not path:
+            return
+        if item.checkState() == Qt.CheckState.Checked:
+            self.disabled_dicts.discard(path)
+        else:
+            self.disabled_dicts.add(path)
+
+    def _on_toggle_dictionary(self) -> None:
+        """Deprecated: handled by checkboxes now."""
+        pass
 
     def _add_dict_path(self, path: str) -> bool:
         """Adds a dictionary path (zip or folder) to the ladder list if not already present."""
@@ -367,6 +437,10 @@ class ConfigDialog(QDialog):
         if saved_word_field and self.word_field_combo.findText(saved_word_field) != -1:
             self.word_field_combo.setCurrentText(saved_word_field)
 
+        saved_reading_field = self.config.get("reading_field", "")
+        if saved_reading_field and self.reading_field_combo.findText(saved_reading_field) != -1:
+            self.reading_field_combo.setCurrentText(saved_reading_field)
+
         saved_def_field = self.config.get("definition_field", "")
         if saved_def_field and self.definition_field_combo.findText(saved_def_field) != -1:
             self.definition_field_combo.setCurrentText(saved_def_field)
@@ -376,6 +450,13 @@ class ConfigDialog(QDialog):
         if not saved_dicts and self.config.get("dictionary_folder"):
             # Auto-detect from legacy single folder path
             saved_dicts = find_dictionary_folders(self.config["dictionary_folder"])
+
+        # Restore disabled set (paths normalized the same way as _add_dict_path)
+        self.disabled_dicts = {
+            os.path.realpath(os.path.expanduser(str(p)))
+            for p in self.config.get("disabled_dictionaries", [])
+            if p
+        }
 
         for d_path in saved_dicts:
             self._add_dict_path(d_path)
@@ -391,8 +472,12 @@ class ConfigDialog(QDialog):
         updated_config = {
             "note_type": self.note_type_combo.currentText().strip(),
             "word_field": self.word_field_combo.currentText().strip(),
+            "reading_field": self.reading_field_combo.currentText().strip(),
             "definition_field": self.definition_field_combo.currentText().strip(),
             "dictionaries": ordered_dicts,
+            # Disabled paths: kept in `dictionaries` for order preservation,
+            # listed here so generation skips them.
+            "disabled_dictionaries": sorted(self.disabled_dicts),
             # Backwards compatibility
             "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
             "mode": "Ladder",

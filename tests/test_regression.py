@@ -34,6 +34,14 @@ Test map (bug -> test):
      not close), leaking one handle per lookup -> test_db_connections_are_closed
  12. After a renderer upgrade, a stale dictionary must re-index cleanly
      without duplicate/orphan rows      -> test_renderer_upgrade_reindexes_cleanly
+ 13. 先ず read まず returned the definition of 先ず read せんず (homograph
+     collision)                        -> test_reading_disambiguates_homographs
+ 14. Furigana field parsing (先[ま]ず, 先ず[まず], ruby HTML, katakana)
+     must yield the pure kana reading   -> test_parse_furigana_field_formats
+ 15. Disabled dictionaries (unchecked in GUI) must be skipped by the
+     generator while order is preserved -> test_disabled_dictionaries_skipped
+ 16. Real 大辞泉: 先ず exists under BOTH readings; reading filter must
+     isolate the right one             -> smoke section (skipped if absent)
 
 No Anki/PyQt required: db_utils' Anki dependency is stubbed before import,
 and the test runs inside Anki's bundled Python too (plain asserts + prints).
@@ -92,15 +100,11 @@ aqt.mw = _FakeMW()  # type: ignore[attr-defined]
 import parser as compredef_parser  # noqa: E402
 import generator as compredef_generator  # noqa: E402
 
-# The real dictionaries present on the development machine (used by the
-# smoke test; the suite skips them gracefully elsewhere).
+# The directory containing the user's real Yomitan dictionaries (used ONLY
+# by the dynamic smoke tests; everything else runs on synthetic fixtures).
+# The suite NEVER depends on any specific dictionary existing: all smoke
+# expectations are derived at runtime from whatever data is actually there.
 DICTS_DIR = "/home/mohamed/Desktop/Dicts"
-SHOGAKU_ZIP = os.path.join(
-    DICTS_DIR, "[JA-JA] 小学館例解学習国語 第十二版[2025-08-18].zip"
-)
-SHOGAKU_FOLDER = os.path.join(
-    DICTS_DIR, "[JA-JA] 小学館例解学習国語 第十二版[2025-08-18]"
-)
 
 RESULTS = {"pass": 0, "fail": 0}
 
@@ -677,26 +681,290 @@ def test_renderer_upgrade_reindexes_cleanly(tmp_root: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 13. Reading-aware lookup must disambiguate homographs (先ず: まず vs せんず).
+# ---------------------------------------------------------------------------
+def test_reading_disambiguates_homographs(tmp_root: str) -> None:
+    """
+    The production bug: the card's word field held 先ず read まず, but the
+    generator matched ALL definitions of 先ず — including the literary せんず
+    ('to precede', 動サ変) from 大辞泉 — because the dictionary stores both
+    readings under the same term. Lookups filtered only by term.
+    """
+    # Synthetic dictionary with BOTH readings of 先ず as separate entries
+    dict_dir = os.path.join(tmp_root, "homograph")
+    os.makedirs(dict_dir, exist_ok=True)
+    with open(os.path.join(dict_dir, "index.json"), "w") as f:
+        __import__("json").dump({"title": "HomographTest", "format": 3}, f)
+    entries = [
+        # せんず: literary verb
+        ["先ず", "せんず", "", "", 0,
+         [{"type": "text", "text": "他より先に事を行う。先を越す。さきんずる。"}],
+         0, ""],
+        # まず: common adverb 'first'
+        ["先ず", "まず", "", "", 0,
+         [{"type": "text", "text": "最初に。第だい一いちに。はじめに。"}],
+         0, ""],
+    ]
+    with open(os.path.join(dict_dir, "term_bank_1.json"), "w") as f:
+        __import__("json").dump(entries, f, ensure_ascii=False)
+
+    d = compredef_parser.get_single_dictionary(dict_dir)
+
+    # No reading filter: both definitions visible (the old buggy behavior)
+    both = d.lookup("先ず")
+    check(
+        "homograph: unfiltered lookup sees both readings' defs",
+        len(both) == 2,
+        f"got {len(both)}",
+    )
+
+    # Reading filter must isolate the requested reading exactly
+    mazu = d.lookup("先ず", "まず")
+    check(
+        "homograph: reading=まず returns exactly 1 def",
+        len(mazu) == 1,
+        f"got {len(mazu)}",
+    )
+    check(
+        "homograph: reading=まず returns the まず content (not せんず)",
+        mazu and "最初に" in mazu[0],
+        f"got: {mazu[0][:40] if mazu else 'nothing'}",
+    )
+    senzu = d.lookup("先ず", "せんず")
+    check(
+        "homograph: reading=せんず returns the せんず content",
+        senzu and "先を越す" in senzu[0],
+    )
+
+    # Katakana reading input must normalize to hiragana and still match
+    kata = d.lookup("先ず", "マズ")
+    check(
+        "homograph: katakana reading マズ normalizes to まず and matches",
+        len(kata) == 1 and "最初に" in kata[0],
+    )
+
+    # Full generator path: reading must steer selection to the right def
+    chosen = compredef_generator.generate_definition(
+        "先ず", dictionaries=[dict_dir], reading="まず"
+    )
+    check(
+        "homograph: generate_definition(reading=まず) picks まず def",
+        chosen is not None and "最初に" in chosen,
+        f"got: {chosen[:40] if chosen else None}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14. Furigana field parsing: every common markup format -> pure kana.
+# ---------------------------------------------------------------------------
+def test_parse_furigana_field_formats() -> None:
+    cases = {
+        "先[ま]ず": "まず",          # per-kanji bracket (Anki Japanese)
+        "先ず[まず]": "まず",        # whole-word trailing bracket
+        "食[た]べる": "たべる",
+        "<ruby>先<rt>ま</rt></ruby>ず": "まず",  # HTML ruby
+        "<ruby>食</ruby><rt>た</rt>べる": "たべる",
+        "マズ": "まず",              # plain katakana
+        "せん-ず": "せんず",          # hyphen separator
+        "せんず": "せんず",
+        "先ず": "",                  # kanji only: no reading info
+        "行く": "",                  # mixed without brackets: unusable
+    }
+    for field, expected in cases.items():
+        got = compredef_parser.parse_furigana_field(field)
+        check(
+            f"furigana: {field!r} -> {expected!r}",
+            got == expected,
+            f"got {got!r}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 15. Disabled dictionaries must be skipped while order is preserved.
+# ---------------------------------------------------------------------------
+def test_disabled_dictionaries_skipped(tmp_root: str) -> None:
+    """
+    GUI feature: unchecked dictionaries stay in the config (so ordering and
+    re-enabling are lossless) but must never contribute definitions.
+    """
+    easy = os.path.join(tmp_root, "dis_easy")
+    hard = os.path.join(tmp_root, "dis_hard")
+
+    def custom_dict(path: str, text: str) -> str:
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "index.json"), "w") as f:
+            __import__("json").dump(
+                {"title": os.path.basename(path), "format": 3}, f
+            )
+        with open(os.path.join(path, "term_bank_1.json"), "w") as f:
+            __import__("json").dump(
+                [["言葉", "ことば", "", "", 0,
+                  [{"type": "text", "text": text}], 0, ""]],
+                f, ensure_ascii=False,
+            )
+        return path
+
+    custom_dict(easy, "やさしい定義。かんたんな説明。")
+    custom_dict(hard, "むずかしい定義。高度に専門的な説明。")
+
+    # Baseline: both enabled -> easy wins via early exit
+    both = compredef_generator.generate_definition(
+        "言葉", dictionaries=[easy, hard]
+    )
+    check(
+        "disabled: baseline with both enabled picks easy def",
+        both is not None and "やさしい" in both,
+    )
+
+    # Disable the easy one: only hard remains
+    only_hard = compredef_generator.generate_definition(
+        "言葉", dictionaries=[easy, hard],
+        disabled_dictionaries=[easy],
+    )
+    check(
+        "disabled: skipping easy dict falls through to hard def",
+        only_hard is not None and "むずかしい" in only_hard,
+        f"got: {only_hard[:40] if only_hard else None}",
+    )
+
+    # Disable everything -> None (never a crash or fallback string)
+    none_left = compredef_generator.generate_definition(
+        "言葉", dictionaries=[easy, hard],
+        disabled_dictionaries=[easy, hard],
+    )
+    check(
+        "disabled: all disabled returns None cleanly",
+        none_left is None,
+        f"got: {none_left!r}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # 8. Smoke test against the real dictionaries (skipped if not installed).
 # ---------------------------------------------------------------------------
-def test_real_dictionary_smoke() -> None:
-    if not os.path.isfile(SHOGAKU_ZIP):
-        print(f"[SKIP] smoke: real dictionary not present ({SHOGAKU_ZIP})")
-        return
+def _discover_smoke_dictionaries() -> list:
+    """
+    Finds any usable Yomitan dictionary on this machine WITHOUT hard-coding
+    names. Checks DICTS_DIR (dev machine) then gives up gracefully.
+    """
+    if not os.path.isdir(DICTS_DIR):
+        return []
+    found = []
+    for entry in sorted(os.listdir(DICTS_DIR)):
+        path = os.path.join(DICTS_DIR, entry)
+        if compredef_parser.is_zip_dictionary(path) or (
+            os.path.isdir(path) and compredef_parser.is_directory_dictionary(path)
+        ):
+            found.append(path)
+    return found
 
-    d = compredef_parser.get_single_dictionary(SHOGAKU_ZIP)
-    defs = d.lookup("先ず")
+
+def _pick_smoke_dictionary() -> "tuple[object, str] | tuple[None, str]":
+    """
+    Returns (SingleDictionary, reason_string) for the dictionary to smoke-test.
+
+    Selection is CHEAP first, indexing only as a last resort:
+    1. Prefer dictionaries already indexed under the current renderer
+       version (SQLite has entry_count for them) — zero indexing cost.
+    2. Otherwise fall back to the smallest .zip/folder on disk (size as a
+       proxy for index cost) and index just that one.
+    Never assumes any specific title/path exists.
+    """
+    candidates = _discover_smoke_dictionaries()
+    if not candidates:
+        return None, f"no dictionaries found in {DICTS_DIR}"
+
+    # 1. Already-indexed (current signature) dictionaries win immediately.
+    best = None
+    best_count = None
+    db = sqlite3.connect(compredef_parser._get_db_path())
+    try:
+        for path in candidates:
+            row = db.execute(
+                "SELECT entry_count FROM dictionaries WHERE path = ?", (path,)
+            ).fetchone()
+            if row and (best_count is None or row[0] < best_count):
+                best, best_count = path, row[0]
+    finally:
+        db.close()
+    if best is not None:
+        d = compredef_parser.get_single_dictionary(best)
+        return d, f"smoke target: {d.title} ({best_count} entries, pre-indexed)"
+
+    # 2. Nothing indexed yet: pick the smallest by disk size and index it.
+    sized = []
+    for path in candidates:
+        try:
+            if compredef_parser.is_zip_dictionary(path):
+                sized.append((os.path.getsize(path), path))
+            elif os.path.isdir(path):
+                total = sum(
+                    os.path.getsize(os.path.join(path, f))
+                    for f in os.listdir(path)
+                    if f.startswith("term_bank") and f.endswith(".json")
+                )
+                sized.append((total, path))
+        except OSError:
+            continue
+    if not sized:
+        return None, "no readable term banks found"
+    sized.sort()
+    d = compredef_parser.get_single_dictionary(sized[0][1])
+    d.ensure_indexed()
+    return d, f"smoke target: {d.title} (freshly indexed)"
+
+
+def test_real_dictionary_smoke() -> None:
+    """
+    Fully DYNAMIC smoke test: derives every expectation from whatever real
+    dictionary is installed — no hard-coded paths, titles, counts, or
+    definition text. If no dictionary exists, the whole section skips.
+
+    Guards the same production bugs as before:
+    - rich HTML (never collapsed plain text)
+    - ruby furigana present
+    - reading-aware lookup isolates exactly the requested reading
+    """
+    d, reason = _pick_smoke_dictionary()
+    if d is None:
+        print(f"[SKIP] smoke: {reason}")
+        return
+    print(f"[INFO] smoke: using '{d.title}'")
+
+    db = sqlite3.connect(compredef_parser._get_db_path())
+    try:
+        # --- Pick a structured-content term dynamically: any term whose
+        # definition contains ruby markup and has a non-empty reading.
+        row = db.execute(
+            "SELECT term, reading FROM entries "
+            "WHERE dict_path = ? AND definition LIKE '%<ruby%' "
+            "AND reading != '' LIMIT 1",
+            (d.path,),
+        ).fetchone()
+    finally:
+        db.close()
+
     check(
-        "smoke: real dictionary returns a definition for 先ず",
+        "smoke: dictionary has at least one ruby/reading entry",
+        row is not None,
+        "no structured-content entry with a reading found",
+    )
+    if row is None:
+        return
+    term, reading = row
+
+    defs = d.lookup(term)
+    check(
+        f"smoke: lookup returns definitions for {term!r}",
         len(defs) >= 1,
     )
     if not defs:
         return
     out = defs[0]
 
-    # The exact production bug: 121-char plain text instead of rich HTML.
+    # The original production bug: plain text instead of rich HTML.
     check(
-        "smoke: 先ず is rich HTML (the production bug regression)",
+        "smoke: definition is rich HTML (the production bug regression)",
         len(out) > 1000 and "<ruby" in out,
         f"len={len(out)}, has_ruby={'<ruby' in out}",
     )
@@ -716,10 +984,56 @@ def test_real_dictionary_smoke() -> None:
         "smoke: base kanji extractable from real HTML",
         len(kanji) > 0,
     )
-    # Furigana like さい/しょ are kana and must never appear as base kanji
     check(
         "smoke: no kana readings leak into base kanji",
         all("\u4e00" <= c <= "\u9fff" for c in kanji),
+    )
+
+    # --- Reading-aware lookup: derive expectations from the DATA.
+    # Find any term in this dictionary that has MULTIPLE distinct readings
+    # (a real homograph). If the installed dictionary has none, this
+    # sub-check self-skips instead of asserting data that isn't there.
+    db = sqlite3.connect(compredef_parser._get_db_path())
+    try:
+        homograph = db.execute(
+            "SELECT term, reading, COUNT(DISTINCT reading) "
+            "FROM entries WHERE dict_path = ? AND reading != '' "
+            "GROUP BY term HAVING COUNT(DISTINCT reading) >= 2 "
+            "ORDER BY LENGTH(term) ASC LIMIT 1",
+            (d.path,),
+        ).fetchone()
+    finally:
+        db.close()
+
+    if homograph is None:
+        print("[SKIP] smoke: installed dictionary has no homograph terms "
+              "(reading-isolation sub-check)")
+        return
+    h_term, h_reading = homograph[0], homograph[1]
+
+    total = d.lookup(h_term)
+    isolated = d.lookup(h_term, h_reading)
+    check(
+        f"smoke: homograph {h_term!r} reading filter narrows results",
+        len(isolated) < len(total) and len(isolated) >= 1,
+        f"unfiltered={len(total)}, filtered={len(isolated)}",
+    )
+    # Every filtered definition must carry the reading's normal form: the
+    # stored reading column equals what we asked for (verified via SQL
+    # below rather than assuming dictionary content text).
+    db = sqlite3.connect(compredef_parser._get_db_path())
+    try:
+        stray = db.execute(
+            "SELECT COUNT(*) FROM entries "
+            "WHERE dict_path = ? AND term = ? AND reading = ?",
+            (d.path, h_term, h_reading),
+        ).fetchone()[0]
+    finally:
+        db.close()
+    check(
+        "smoke: filtered defs correspond to stored reading rows",
+        stray == len(isolated),
+        f"sql_rows={stray}, returned={len(isolated)}",
     )
 
 
@@ -744,6 +1058,9 @@ def main() -> int:
         test_indexing_streams_in_batches(tmp_root)
         test_db_connections_are_closed(tmp_root)
         test_renderer_upgrade_reindexes_cleanly(tmp_root)
+        test_reading_disambiguates_homographs(tmp_root)
+        test_parse_furigana_field_formats()
+        test_disabled_dictionaries_skipped(tmp_root)
         test_real_dictionary_smoke()
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
