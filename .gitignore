@@ -1,12 +1,16 @@
 __pycache__/
 
 *.zip
+*.ankiaddon
+dist/
 
 *.db
 
 .env
 
-# Ignore all JSON except the add-on's own config.json
+# Ignore all JSON except the add-on's own config.json and manifest.json
 *.json
 !config.json
+!manifest.json
 user_files/
+
