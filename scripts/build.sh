@@ -62,7 +62,11 @@ with zipfile.ZipFile('$ANKIADDON_OUT', 'r') as z:
     assert 'config.json' in names, 'Missing config.json'
     with z.open('manifest.json') as f:
         m = json.load(f)
-        assert m.get('package') == 'CompreDef', 'Invalid package name'
+        # Package MUST be the AnkiWeb ID: Anki installs the folder under
+        # that name, and only a numeric folder name enables the native
+        # 'View Add-on Page' button in the Add-ons manager.
+        assert m.get('package') == '1619602654', \
+            'Invalid package name: ' + repr(m.get('package'))
         assert m.get('name') == 'CompreDef', 'Invalid name'
 print('Package verification PASSED (Size: ' + str(os.path.getsize('$ANKIADDON_OUT')) + ' bytes)')
 "

@@ -40,7 +40,7 @@ try:
         data = json.load(f)
 except Exception:
     data = {}
-data['package'] = 'CompreDef'
+data['package'] = '1619602654'  # AnkiWeb ID: enables 'View Add-on Page' + correct install folder
 data['name'] = 'CompreDef'
 data['human_version'] = '$NUMERIC_VER'
 with open(manifest_path, 'w', encoding='utf-8') as f:
