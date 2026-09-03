@@ -57,13 +57,18 @@ CompreDef eliminates the circular lookup trap of Japanese monolingual dictionari
 ---
 
 ## Testing
-
+ 
 A fundamental regression suite guards the project's historical bugs. Run it before every commit:
-
+ 
 ```bash
 python3 tests/test_regression.py
 ```
-
+ 
+Alternatively, use the CI script to test, commit, and push in one go:
+```bash
+./scripts/ci.sh
+```
+ 
 It verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder exits early on the simplest comprehensible dictionary, cross-reference titles lose to real definitions, and `.zip` archives produce byte-identical output to their unzipped folders. No Anki/PyQt needed — the Anki API is stubbed automatically; real-dictionary smoke tests self-skip if the dictionaries are absent.
 
 ---
@@ -90,7 +95,8 @@ CompreDef/
 ---
 
 ## Development & Safety Rules
-
+ 
+- **CI/CD**: Use `./scripts/ci.sh` for testing and pushing, and `./scripts/release.sh` for tagged releases.
 - **Native DB Access Only**: Never open `collection.anki2` with raw sqlite3. CompreDef strictly uses `mw.col.db` to prevent database locks.
 - **Non-Blocking Concurrency**: All dictionary parsing and scoring operations execute in background threads using `mw.taskman.run_in_background()`.
 - **PyQt Compatibility**: Imports use `aqt.qt` for multi-version Qt compatibility.

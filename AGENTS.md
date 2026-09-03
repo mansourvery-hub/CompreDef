@@ -25,6 +25,8 @@
 ## 6. Regression Test Mandate
 - **BEFORE committing and pushing**, run the fundamental regression suite and ensure it is fully green:
   `python3 tests/test_regression.py`
+- Alternatively, run the CI script to test, commit, and push in one go:
+  `./scripts/ci.sh`
 - The suite guards the project's historical bugs (plain-text definitions replacing rich Yomitan HTML, furigana polluting kanji scores, ladder ordering, reference-title filtering, ZIP/folder parity, stale SQLite caches). Exit code 0 = safe to commit; any FAIL = fix the regression first.
 - It runs on both system Python and Anki's bundled Python (no Anki/PyQt required — `aqt` is stubbed automatically). Real-dictionary smoke tests self-skip when the dictionaries are absent.
 - If you intentionally change rendering behavior, bump `RENDERER_VERSION` in `parser.py` so users' SQLite caches invalidate cleanly, and update the affected test expectations in the same commit.
