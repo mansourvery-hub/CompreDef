@@ -40,51 +40,34 @@ except ImportError:
 # Matches kanji in CJK Unified Ideographs block
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
 
-# Regular expressions to strip ruby readings and tags for accurate kanji scoring
-_RT_RE = re.compile(r'<rt\b[^>]*>.*?</rt>', flags=re.DOTALL | re.IGNORECASE)
-_RP_RE = re.compile(r'<rp\b[^>]*>.*?</rp>', flags=re.DOTALL | re.IGNORECASE)
-_TAG_RE = re.compile(r'<[^>]+>')
+# Note: Ruby stripping regexes moved to parser.py for indexing support.
 
-
-def _extract_base_text(html_or_text: str) -> str:
-    """
-    Extracts visible base text from HTML, stripping ruby furigana (<rt> tags).
-    """
-    if not html_or_text:
-        return ""
-    # Strip furigana reading tags
-    no_rt = _RT_RE.sub("", html_or_text)
-    no_rp = _RP_RE.sub("", no_rt)
-    # Strip remaining HTML tags
-    plain = _TAG_RE.sub("", no_rp)
-    return html.unescape(plain).strip()
 
 
 def _is_reference_title(html_or_text: str) -> bool:
     """
     Detects entries that are just cross-reference titles (e.g. "会社更生法")
     rather than actual definitions.
-
-    Heuristic: visible text under 10 chars with no sentence punctuation
-    (。、) is almost always a "see also" headword, not a definition.
     """
+    # We now pass HTML to this function; extract base text for checking.
+    from .parser import _extract_base_text
     clean_text = _extract_base_text(html_or_text)
     if len(clean_text) >= 10:
         return False
     return not any(p in clean_text for p in ("。", "、", "：", "，"))
 
 
-def _calculate_kanji_score(html_or_text: str, known_kanji: Set[str]) -> float:
+
+def _calculate_kanji_score(base_text: str, known_kanji: Set[str]) -> float:
     """
     Calculates kanji comprehension score: known base kanji / total base kanji.
 
-    Accurately ignores <rt> furigana readings so only the base kanji the user
-    is expected to know are counted.
-
-    A definition with no kanji at all (kana only) returns 1.0 (fully comprehensible).
+    Takes pre-stripped base text to avoid expensive HTML parsing during
+    Dictionary Ladder walks.
     """
-    clean_text = _extract_base_text(html_or_text)
-    kanji_in_text = _KANJI_RE.findall(clean_text)
+    if not base_text:
+        return 1.0
+    kanji_in_text = _KANJI_RE.findall(base_text)
 
     if not kanji_in_text:
         return 1.0
@@ -154,15 +137,16 @@ def generate_definition(
     # Step through each dictionary rung in configured order
     for dict_path in ladder_paths:
         dict_obj: SingleDictionary = get_single_dictionary(dict_path)
-        raw_defs: List[str] = dict_obj.lookup(target_word, norm_reading)
+        # raw_defs now returns list of (html_definition, base_text)
+        raw_defs: List[Tuple[str, str]] = dict_obj.lookup(target_word, norm_reading)
 
         # Filter out reference titles
-        valid_defs = [d for d in raw_defs if not _is_reference_title(d)]
+        valid_defs = [d for d in raw_defs if not _is_reference_title(d[0])]
         if not valid_defs:
             continue
 
-        for definition in valid_defs:
-            score = _calculate_kanji_score(definition, known_kanji)
+        for html_def, base_text in valid_defs:
+            score = _calculate_kanji_score(base_text, known_kanji)
 
             # EARLY EXIT: If 100% of kanji in this definition are known (on mature cards),
             # select it immediately and stop searching further dictionaries.
@@ -172,12 +156,12 @@ def generate_definition(
                     f"CompreDef: Early exit at '{dict_obj.title}' "
                     f"(100% mature kanji match) for '{target_word}'"
                 )
-                return definition
+                return html_def
 
             # Keep track of the maximal definition (highest score / least unknown kanji)
             if score > best_score:
                 best_score = score
-                best_definition = definition
+                best_definition = html_def
 
     # If no definition had 100% known kanji, return the maximal (least complicated) definition
     if best_definition:

@@ -44,11 +44,8 @@ def _fetch_learned_note_fields() -> list:
     and vocabulary the user has genuinely retained long-term are counted
     as known in the matrix.
 
-    Selects note ids + flds without DISTINCT on the text blob (see
-    performance notes above) and dedupes by note id in Python.
-
-    Wrapped in try/except so a database hiccup never crashes Anki
-    (AGENTS.md rule 3.4: robust error handling around DB access).
+    Selects note ids + flds and relies on the JOIN to provide only notes
+    with mature cards.
     """
     try:
         if not mw or not mw.col:
@@ -57,7 +54,7 @@ def _fetch_learned_note_fields() -> list:
         # Kanji Grid-style query: join notes with their cards and keep only
         # material on mature cards (interval >= 21 days for long-term retention).
         query = """
-        SELECT DISTINCT notes.id, notes.flds
+        SELECT notes.id, notes.flds
         FROM notes
         JOIN cards ON notes.id = cards.nid
         WHERE cards.ivl >= 21
@@ -80,16 +77,14 @@ def _build_caches() -> None:
 
     known_kanji: Set[str] = set()
     known_words: Set[str] = set()
-    seen_note_ids: set = set()
 
     for row in _fetch_learned_note_fields():
         if not row or len(row) < 2:
             continue
 
-        note_id, field_blob = row[0], row[1]
-        if note_id in seen_note_ids or not field_blob:
+        _, field_blob = row
+        if not field_blob:
             continue
-        seen_note_ids.add(note_id)
 
         # Kanji extraction via compiled regex (fast C-level scan)
         known_kanji.update(_KANJI_RE.findall(field_blob))

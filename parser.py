@@ -30,7 +30,9 @@ from typing import Dict, List, Optional, Tuple, Any
 # rich Yomitan HTML after the renderer was rewritten).
 # v2: adds the `reading` column so lookups can disambiguate 先ず(まず) from
 # 先ず(せんず) — the term alone matched BOTH readings' definitions.
-RENDERER_VERSION = "yomitan_html_v2_reading"
+# v3: adds `base_text` column to store pre-stripped plain text for fast kanji
+# scoring, avoiding repetitive HTML parsing during Dictionary Ladder walks.
+RENDERER_VERSION = "yomitan_html_v3_basetext"
 
 # How many rendered definitions to hold in memory before flushing to SQLite.
 # Bounded RAM: giant dictionaries (大辞泉: 632,876 entries ≈ 1.3 GB of HTML)
@@ -38,6 +40,20 @@ RENDERER_VERSION = "yomitan_html_v2_reading"
 # drives the system into swap thrash, and freezes Anki at 100% CPU on what
 # should be a microsecond lookup of a nonsense word (bug: 駿ってさ crash).
 _INDEX_BATCH_SIZE = 5000
+
+def _extract_base_text(html_or_text: str) -> str:
+    """
+    Extracts visible base text from HTML, stripping ruby furigana (<rt> tags).
+    Now centrally located in parser.py to be used during indexing.
+    """
+    if not html_or_text:
+        return ""
+    # Strip furigana reading tags
+    no_rt = _RT_RE.sub("", html_or_text)
+    no_rp = _RP_RE.sub("", no_rt)
+    # Strip remaining HTML tags
+    plain = _TAG_RE.sub("", no_rp)
+    return html.unescape(plain).strip()
 
 
 def _style_to_css(style: dict) -> str:
@@ -262,24 +278,25 @@ def _init_db_tables() -> None:
         ON entries(dict_path, term)
         """)
 
-        # MIGRATION v2: older caches lacked the `reading` column, so
-        # 先ず matched definitions for BOTH readings まず and せんず.
-        # Add the column if missing; the RENDERER_VERSION bump in the
-        # signature will then force a full re-index that fills it in.
+        # MIGRATIONS
         cols = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+        
+        # v2 Migration: reading column
         if "reading" not in cols:
             conn.execute("ALTER TABLE entries ADD COLUMN reading TEXT DEFAULT ''")
             conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_entries_reading
             ON entries(dict_path, term, reading)
             """)
-            conn.commit()
         elif "reading" in cols:
-            # Index may be missing if migration was interrupted; recreate.
             conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_entries_reading
             ON entries(dict_path, term, reading)
             """)
+            
+        # v3 Migration: base_text column for fast scoring
+        if "base_text" not in cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN base_text TEXT DEFAULT ''")
 
         conn.commit()
     finally:
@@ -490,15 +507,15 @@ class SingleDictionary:
             conn.commit()
 
             total = 0
-            batch: List[Tuple[str, str, str]] = []
+            batch: List[Tuple[str, str, str, str, str]] = []
 
             def flush() -> None:
                 """Writes and clears the in-memory batch; commits instantly."""
                 nonlocal total
                 if batch:
                     conn.executemany(
-                        "INSERT INTO entries (dict_path, term, definition, reading) "
-                        "VALUES (?, ?, ?, ?)",
+                        "INSERT INTO entries (dict_path, term, definition, reading, base_text) "
+                        "VALUES (?, ?, ?, ?, ?)",
                         batch,
                     )
                     conn.commit()
@@ -520,7 +537,9 @@ class SingleDictionary:
                     for def_block in entry[5]:
                         html_def = render_yomitan_definition_html(def_block)
                         if html_def:
-                            batch.append((self.path, word, html_def, normalize_reading(reading)))
+                            # Pre-calculate base text for fast scoring during lookups
+                            base_text = _extract_base_text(html_def)
+                            batch.append((self.path, word, html_def, normalize_reading(reading), base_text))
                     # Bounded RAM: flush long before the batch can grow to
                     # hundreds of megabytes of rendered HTML strings.
                     if len(batch) >= _INDEX_BATCH_SIZE:
@@ -573,51 +592,35 @@ class SingleDictionary:
                 except Exception as e:
                     print(f"CompreDef: Failed to read {b_name}: {e}")
 
-    def lookup(self, word: str, reading: str = "") -> List[str]:
+    def lookup(self, word: str, reading: str = "") -> List[Tuple[str, str]]:
         """
         Performs an instant B-tree lookup for `word` in this dictionary.
 
-        When `reading` is supplied (hiragana OR katakana — normalized
-        internally, e.g. 'マズ' == 'まず'), only entries whose stored
-        reading matches are returned. This fixes the homograph bug: 先ず
-        exists as BOTH まず (adverb 'first') and せんず (literary 'to
-        precede'); without the reading filter the generator could pick
-        the wrong one's definition.
+        Returns a list of (html_definition, base_text) tuples.
         """
         self.ensure_indexed()
 
         if reading:
-            # Normalize here (not only in the generator) so every caller —
-            # tests, bulk generation, direct API use — gets the same
-            # katakana-tolerant behavior. The suite caught this: passing
-            # マズ directly to lookup() previously compared raw katakana
-            # against the stored hiragana and matched nothing.
             norm = normalize_reading(reading)
-            # Prefer reading-exact matches; fall back to entries with no
-            # stored reading (older rows / reading-less sources) so we never
-            # regress to zero results for reading-less dictionaries.
             rows = _db_query(
-                "SELECT definition FROM entries "
+                "SELECT definition, base_text FROM entries "
                 "WHERE dict_path = ? AND term = ? AND reading = ?",
                 (self.path, word, norm),
             )
             if rows:
-                return [row[0] for row in rows]
-            # No reading match: fall back to reading-agnostic lookup rather
-            # than returning nothing (the dictionary may not carry readings
-            # for this entry, e.g. proper nouns).
+                return rows
             rows = _db_query(
-                "SELECT definition FROM entries "
+                "SELECT definition, base_text FROM entries "
                 "WHERE dict_path = ? AND term = ? AND reading = ''",
                 (self.path, word),
             )
-            return [row[0] for row in rows]
+            return rows
 
         rows = _db_query(
-            "SELECT definition FROM entries WHERE dict_path = ? AND term = ?",
+            "SELECT definition, base_text FROM entries WHERE dict_path = ? AND term = ?",
             (self.path, word),
         )
-        return [row[0] for row in rows]
+        return rows
 
 
 # Katakana -> hiragana offset: katakana block starts at U+30A1 (ァ),
