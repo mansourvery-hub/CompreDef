@@ -1,7 +1,20 @@
 import os
-from provider import LocalSQLiteProvider
-from anki import get_known_kanji_set
-from engine import DefinitionGenerator
+
+# Sibling imports must resolve in BOTH contexts:
+# - inside Anki the add-on loads as package "1619602654" whose folder is
+#   NOT on sys.path (absolute sibling imports crash with
+#   ModuleNotFoundError: No module named 'provider');
+# - in the regression suite modules are top-level with the repo root on
+#   sys.path (relative imports fail there).
+# __package__ is truthy only in the packaged (Anki) context.
+if __package__:
+    from .provider import LocalSQLiteProvider
+    from .anki import get_known_kanji_set
+    from .engine import DefinitionGenerator
+else:
+    from provider import LocalSQLiteProvider
+    from anki import get_known_kanji_set
+    from engine import DefinitionGenerator
 
 # Singletons for the application lifecycle
 _provider = None

@@ -1,9 +1,18 @@
 import os
 from typing import List, Optional, Set
-from provider import DictionaryProvider
-from scoring import calculate_kanji_score, is_reference_title
-from utils import extract_clean_word
-from models import DictionaryEntry
+
+# Dual-context sibling imports (relative inside Anki's package load,
+# absolute in the top-level test harness — see core.py for why).
+if __package__:
+    from .provider import DictionaryProvider
+    from .scoring import calculate_kanji_score, is_reference_title
+    from .utils import extract_clean_word
+    from .models import DictionaryEntry
+else:
+    from provider import DictionaryProvider
+    from scoring import calculate_kanji_score, is_reference_title
+    from utils import extract_clean_word
+    from models import DictionaryEntry
 
 class DefinitionGenerator:
     """

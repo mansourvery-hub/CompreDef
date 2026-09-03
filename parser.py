@@ -2,15 +2,32 @@
 parser.py - Compatibility layer for legacy tests and imports.
 Redirects to provider.py, renderer.py and utils.py.
 """
-from provider import LocalSQLiteProvider, IndexingError
-from renderer import render_structured_content_node, render_yomitan_definition_html
-from utils import (
-    is_zip_dictionary, 
-    is_directory_dictionary, 
-    extract_clean_word,
-    find_dictionary_folders
-)
-from core import get_provider
+# Dual-context sibling imports (relative inside Anki's package load,
+# absolute in the top-level test harness — see core.py for why).
+if __package__:
+    from .provider import LocalSQLiteProvider, IndexingError
+    from .renderer import render_structured_content_node, render_yomitan_definition_html
+    from .utils import (
+        is_zip_dictionary,
+        is_directory_dictionary,
+        extract_clean_word,
+        extract_base_text,
+        parse_furigana_field,
+        find_dictionary_folders,
+    )
+    from .core import get_provider
+else:
+    from provider import LocalSQLiteProvider, IndexingError
+    from renderer import render_structured_content_node, render_yomitan_definition_html
+    from utils import (
+        is_zip_dictionary,
+        is_directory_dictionary,
+        extract_clean_word,
+        extract_base_text,
+        parse_furigana_field,
+        find_dictionary_folders,
+    )
+    from core import get_provider
 
 RENDERER_VERSION = LocalSQLiteProvider.RENDERER_VERSION
 
@@ -59,8 +76,7 @@ def is_dictionary_installed(path):
 
 # Re-export for tests
 _loaded_dicts = {} # Added for legacy test compatibility
-_extract_base_text = __import__("utils").extract_base_text
-_INDEX_BATCH_SIZE = __import__("provider").LocalSQLiteProvider._INDEX_BATCH_SIZE
-parse_furigana_field = __import__("utils").parse_furigana_field
+_extract_base_text = extract_base_text
+_INDEX_BATCH_SIZE = LocalSQLiteProvider._INDEX_BATCH_SIZE
 # Note: if tests use 'import parser', they get this module.
 # If they use 'from parser import ...', they get these functions.

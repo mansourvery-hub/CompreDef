@@ -1,7 +1,14 @@
 import re
 from typing import Set
-from utils import extract_base_text
-from models import ScoringResult
+
+# Dual-context sibling imports (relative inside Anki's package load,
+# absolute in the top-level test harness — see core.py for why).
+if __package__:
+    from .utils import extract_base_text
+    from .models import ScoringResult
+else:
+    from utils import extract_base_text
+    from models import ScoringResult
 
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
 

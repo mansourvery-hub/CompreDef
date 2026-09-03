@@ -12,12 +12,22 @@ This module is kept so any lingering ``import db_utils`` keeps working;
 every name is re-exported from ``anki``. Do not add new logic here.
 """
 
-from anki import (
-    get_known_kanji_set,
-    get_known_vocabulary_set,
-    reset_caches,
-    init_caches_async,
-)
+# Dual-context sibling imports (relative inside Anki's package load,
+# absolute in the top-level test harness — see core.py for why).
+if __package__:
+    from .anki import (
+        get_known_kanji_set,
+        get_known_vocabulary_set,
+        reset_caches,
+        init_caches_async,
+    )
+else:
+    from anki import (
+        get_known_kanji_set,
+        get_known_vocabulary_set,
+        reset_caches,
+        init_caches_async,
+    )
 
 __all__ = [
     "get_known_kanji_set",

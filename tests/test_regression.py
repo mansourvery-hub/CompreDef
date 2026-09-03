@@ -1485,6 +1485,89 @@ def test_real_dictionary_smoke() -> None:
 # Main entry point.
 # ---------------------------------------------------------------------------
 
+def test_package_relative_imports() -> None:
+    """
+    Simulates how Anki loads the add-on: as a PACKAGE whose folder is NOT
+    on sys.path, so absolute sibling imports MUST fail while relative ones
+    succeed. An import hook blocks top-level imports of our own module
+    names (exactly what Anki's loader does implicitly) and every non-Qt
+    module is then imported through the synthetic package. Guards the
+    production crash:
+        ModuleNotFoundError: No module named 'provider'
+    (gui.py and editor_browser.py are excluded here only because they need
+    real Qt; editor_browser's relative chain is already covered by
+    test_tab_generate_decisions below).
+    """
+    import importlib
+    import importlib.abc
+    import types
+
+    siblings = {"anki", "core", "engine", "provider", "renderer", "models",
+                "scoring", "utils", "parser", "generator", "db_utils"}
+
+    class _BlockSiblingImports(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path, target=None):
+            if "." not in name and name in siblings:
+                raise ModuleNotFoundError(
+                    f"No module named '{name}' (Anki simulation: "
+                    "sibling dir not on sys.path)"
+                )
+            return None
+
+    pkg_name = "compredef_addon"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [REPO_ROOT]
+        sys.modules[pkg_name] = pkg
+
+    # Save global import state: top-level siblings are evicted so the
+    # blocker is airtight (otherwise sys.modules would satisfy absolute
+    # imports and the simulation would prove nothing).
+    saved_modules = {}
+    for key in list(sys.modules):
+        if key in siblings or key.startswith(pkg_name + "."):
+            saved_modules[key] = sys.modules.pop(key)
+    saved_meta = list(sys.meta_path)
+    sys.meta_path.insert(0, _BlockSiblingImports())
+    try:
+        expected = {
+            "anki": ["get_known_kanji_set", "get_known_vocabulary_set",
+                     "init_caches_async", "reset_caches"],
+            "core": ["get_provider", "get_generator"],
+            "engine": ["DefinitionGenerator"],
+            "provider": ["LocalSQLiteProvider", "IndexingError"],
+            "renderer": ["render_yomitan_definition_html",
+                         "render_structured_content_node"],
+            "models": ["DictionaryEntry", "RENDERER_VERSION"],
+            "scoring": ["calculate_kanji_score", "is_reference_title"],
+            "utils": ["extract_clean_word", "extract_base_text",
+                      "parse_furigana_field", "resolve_ladder_paths"],
+            "parser": ["get_single_dictionary", "RENDERER_VERSION",
+                       "parse_furigana_field"],
+            "generator": ["generate_definition"],
+            "db_utils": ["get_known_kanji_set", "reset_caches"],
+        }
+        for mod_name, attrs in expected.items():
+            try:
+                mod = importlib.import_module(f"{pkg_name}.{mod_name}")
+            except ImportError as e:
+                check(
+                    f"pkg-import: {mod_name} imports in package context",
+                    False, str(e),
+                )
+                continue
+            for attr in attrs:
+                check(
+                    f"pkg-import: {mod_name}.{attr} resolves in package context",
+                    hasattr(mod, attr),
+                )
+    finally:
+        sys.meta_path[:] = saved_meta
+        for key in [k for k in sys.modules
+                    if k in siblings or k.startswith(pkg_name + ".")]:
+            del sys.modules[key]
+        sys.modules.update(saved_modules)
+
 def test_kanji_extraction_correctness(tmp_root: str) -> None:
     """
     Known kanji must come ONLY from the configured Expression (word) field
@@ -1601,6 +1684,7 @@ def main() -> int:
         test_parse_furigana_field_formats()
         test_disabled_dictionaries_skipped(tmp_root)
         test_kanji_extraction_correctness(tmp_root)
+        test_package_relative_imports()
         test_tab_generate_decisions()
         test_real_dictionary_smoke()
     finally:
