@@ -34,3 +34,4 @@
 ## 7. Git Remote & Repository Sync Mandate
 - **ALWAYS** push all committed changes to the official GitHub remote (`https://github.com/mansourvery-hub/CompreDef`) as the final step of your work session:
   `git push origin master` (or `git push origin main`).
+- **AnkiWeb**: Official AnkiWeb Add-on Page: [https://ankiweb.net/shared/info/1619602654](https://ankiweb.net/shared/info/1619602654). Releases are automatically uploaded via GitHub Actions.

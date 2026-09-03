@@ -1,7 +1,9 @@
 # CompreDef
-
+ 
 Anki add-on for automatically generating Japanese vocabulary definitions strictly tailored to your known vocabulary and kanji levels.
-
+ 
+**[Download from AnkiWeb](https://ankiweb.net/shared/info/1619602654)**
+ 
 ## Core Concept: The Dictionary Ladder
 
 CompreDef eliminates the circular lookup trap of Japanese monolingual dictionaries by searching your dictionaries in an **ordered ladder** from simplest to most advanced:
@@ -97,6 +99,7 @@ CompreDef/
 ## Development & Safety Rules
  
 - **CI/CD**: Use `./scripts/ci.sh` for testing and pushing, and `./scripts/release.sh` for tagged releases.
+- **AnkiWeb Publishing**: Upon creating a GitHub Release, the `danny900714/upload-anki-addon` action automatically updates the [AnkiWeb listing (1619602654)](https://ankiweb.net/shared/info/1619602654). Ensure `ANKI_WEB_USERNAME` and `ANKI_WEB_PASSWORD` secrets are configured in the repository.
 - **Native DB Access Only**: Never open `collection.anki2` with raw sqlite3. CompreDef strictly uses `mw.col.db` to prevent database locks.
 - **Non-Blocking Concurrency**: All dictionary parsing and scoring operations execute in background threads using `mw.taskman.run_in_background()`.
 - **PyQt Compatibility**: Imports use `aqt.qt` for multi-version Qt compatibility.

@@ -1,0 +1,24 @@
+name: Upload to AnkiWeb
+on:
+  release:
+    types: [published]
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download release asset
+        uses: robinraju/release-downloader@v1.11
+        with:
+          fileName: "CompreDef.ankiaddon"
+          latest: true
+
+      - name: Upload to AnkiWeb
+        uses: danny900714/upload-anki-addon@master
+        with:
+          anki_user: ${{ secrets.ANKI_WEB_USERNAME }}
+          anki_password: ${{ secrets.ANKI_WEB_PASSWORD }}
+          addon_id: "1619602654"
+          addon_package: "CompreDef.ankiaddon"
