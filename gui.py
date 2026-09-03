@@ -39,6 +39,7 @@ from .utils import (
     is_zip_dictionary,
 )
 from .provider import IndexingError
+from .parser import get_single_dictionary
 
 
 # Cross-version PyQt5/PyQt6 enum helpers

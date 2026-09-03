@@ -1485,6 +1485,57 @@ def test_real_dictionary_smoke() -> None:
 # Main entry point.
 # ---------------------------------------------------------------------------
 
+def test_no_undefined_names_in_shipped_modules() -> None:
+    """
+    Static guard for modules that cannot be imported in this suite
+    (gui.py needs real Qt): every bare name a shipped module loads must
+    be defined, imported, or a builtin. Guards the production crash:
+        NameError: name 'get_single_dictionary' is not defined
+    (gui.py called it without importing it — invisible to every other
+    test because the module never imports without Qt).
+    """
+    import ast
+    import builtins
+    import glob as _glob
+    allowed = set(dir(builtins)) | {"__name__", "__package__"}
+    for path in sorted(_glob.glob(os.path.join(REPO_ROOT, "*.py"))):
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        defined, loaded = set(), set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    defined.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    defined.add(a.asname or a.name)
+            elif isinstance(node,
+                           (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                defined.add(getattr(node, "name", None))
+                for arg in list(node.args.args) + list(node.args.kwonlyargs):
+                    defined.add(arg.arg)
+                if node.args.vararg:
+                    defined.add(node.args.vararg.arg)
+                if node.args.kwarg:
+                    defined.add(node.args.kwarg.arg)
+            elif isinstance(node, ast.ClassDef):
+                defined.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                defined.add(node.id)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                loaded.add(node.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+        defined.discard(None)
+        missing = sorted(
+            n for n in loaded - defined - allowed if not n.startswith("_")
+        )
+        check(
+            f"static-names: {os.path.basename(path)} "
+            "has no undefined names",
+            not missing,
+            ", ".join(missing),
+        )
+
 def test_package_relative_imports() -> None:
     """
     Simulates how Anki loads the add-on: as a PACKAGE whose folder is NOT
@@ -1685,6 +1736,7 @@ def main() -> int:
         test_disabled_dictionaries_skipped(tmp_root)
         test_kanji_extraction_correctness(tmp_root)
         test_package_relative_imports()
+        test_no_undefined_names_in_shipped_modules()
         test_tab_generate_decisions()
         test_real_dictionary_smoke()
     finally:
