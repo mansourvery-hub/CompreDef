@@ -19,6 +19,7 @@ from aqt.qt import (
     QFormLayout,
     QComboBox,
     QPushButton,
+    QCheckBox,
     QFileDialog,
     QDialogButtonBox,
     QWidget,
@@ -244,6 +245,29 @@ class ConfigDialog(QDialog):
 
         ladder_layout.addLayout(list_and_buttons_layout)
         main_layout.addWidget(ladder_group)
+
+        # -------------------------------------------------------------
+        # Generation Group (Tab-to-Generate toggle)
+        # -------------------------------------------------------------
+        generation_group = QGroupBox("Generation")
+        generation_layout = QVBoxLayout()
+        generation_group.setLayout(generation_layout)
+
+        # Tab-to-Generate: auto-fill the definition when the word field is
+        # unfocused with an empty definition (restored feature — see
+        # editor_browser.py for the stability contract).
+        self.tab_generate_check = QCheckBox(
+            "Tab-to-Generate: fill empty definition when leaving the word field "
+            "(Tab / clicking away)"
+        )
+        self.tab_generate_check.setToolTip(
+            "When enabled, unfocusing the word field automatically generates a "
+            "definition\nif (and only if) the definition field is empty. Existing "
+            "definitions are never\noverwritten — use the CD toolbar button for that."
+        )
+        generation_layout.addWidget(self.tab_generate_check)
+
+        main_layout.addWidget(generation_group)
 
         # -------------------------------------------------------------
         # OK / Cancel Dialog Buttons
@@ -619,6 +643,11 @@ class ConfigDialog(QDialog):
         for d_path in saved_dicts:
             self._add_dict_path(d_path)
 
+        # Tab-to-Generate: default ON (historical behaviour of the feature
+        # when it worked); the config key only exists once the user has
+        # saved the dialog at least once.
+        self.tab_generate_check.setChecked(bool(self.config.get("tab_generate", True)))
+
     def _save_and_accept(self) -> None:
         """Saves settings to Anki config and closes dialog."""
         role = _user_role()
@@ -636,6 +665,8 @@ class ConfigDialog(QDialog):
             # Disabled paths: kept in `dictionaries` for order preservation,
             # listed here so generation skips them.
             "disabled_dictionaries": sorted(self.disabled_dicts),
+            # Tab-to-Generate (auto-fill on word-field unfocus)
+            "tab_generate": self.tab_generate_check.isChecked(),
             # Backwards compatibility
             "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
             "mode": "Ladder",
@@ -666,6 +697,7 @@ class ConfigDialog(QDialog):
                 "definition_field": self.definition_field_combo.currentText().strip(),
                 "dictionaries": ordered_dicts,
                 "disabled_dictionaries": sorted(self.disabled_dicts),
+                "tab_generate": self.tab_generate_check.isChecked(),
                 "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
                 "mode": "Ladder",
             })

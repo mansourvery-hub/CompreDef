@@ -58,9 +58,12 @@ Hard rules enforced by `tests/test_regression.py`:
   files on disk causes exactly ONE re-index when the user reinstalls.
 - Indexing failures raise `IndexingError` and are reported — no silent
   partial indexes.
-- Generation is triggered ONLY by explicit button/menu actions. There is no
-  automatic generation on field unfocus/Tab (removed deliberately: it was
-  the source of first-use freezes and lost definitions).
+- Generation is triggered by explicit button/menu actions, plus opt-out
+  Tab-to-Generate (auto-fill on word-field unfocus, empty definitions
+  only). The old freeze/lost-definition failure modes are structurally
+  fixed: generation is pure SQLite lookup, the unfocus hook returns
+  `changed` untouched (no editor-reload race), and persistence happens
+  BEFORE any editor refresh. See `editor_browser.py`.
 
 ## Key Modules
 
@@ -69,7 +72,7 @@ Hard rules enforced by `tests/test_regression.py`:
 - `generator.py`: Core definition generation engine implementing ladder traversal, early exit, candidate filtering, and kanji comprehension scoring. Extracts base kanji (stripping `<rt>` furigana) while preserving rich HTML with furigana for Anki insertion. Pure SQLite lookups only.
 - `parser.py`: Dictionary installer + pure-SQL lookup. `SingleDictionary.install()` is the ONLY place dictionary files are parsed (streamed in bounded batches; a marker row records the source signature). `lookup()` is a pure database query. Supports unzipped folders and Yomitan `.zip` archives. Renders faithful Yomitan HTML with `<ruby>`, `data-sc-*` attributes, inline CSS, and `用例` blocks.
 - `db_utils.py`: Safe, read-only Anki collection scanner (`mw.col.db`) using compiled regular expressions for fast known-kanji extraction.
-- `editor_browser.py`: `aqt.gui_hooks` integration injecting the card editor toolbar button and browser bulk-edit menu options. Generation runs via `mw.taskman.run_in_background`; the note is persisted (`update_note`) BEFORE the editor refresh so definitions never disappear; failures are logged with note id/word/traceback and reported, never swallowed.
+- `editor_browser.py`: `aqt.gui_hooks` integration injecting the card editor toolbar button, browser bulk-edit menu options, and Tab-to-Generate (word-field unfocus auto-fills empty definitions; opt-out via `tab_generate` in config). Generation runs via `mw.taskman.run_in_background`; the note is persisted (`update_note`) BEFORE the editor refresh so definitions never disappear; failures are logged with note id/word/traceback and reported, never swallowed.
 
 ## Data Formats
 

@@ -1,20 +1,37 @@
 """
-editor_browser.py - Editor toolbar button and Browser bulk generation for CompreDef.
+editor_browser.py - Editor toolbar button, Tab-to-Generate and Browser bulk
+generation for CompreDef.
 
 Injects UI elements into Anki using `aqt.gui_hooks`:
 - Card Editor toolbar button to generate a definition for the current note.
+- Tab-to-Generate: leaving the configured word field (Tab / clicking away)
+  auto-fills the definition field when it is empty.
 - Browser Edit menu & context menu items to bulk generate definitions for
   selected notes.
 
-All generation is EXPLICIT (button / menu). Automatic generation on field
-unfocus/Tab was deliberately removed: silently starting a background job
-because the user left a field was the historical source of freezes, and
-generated definitions were lost to the note-reload race. See ARCHITECTURE.md.
+Tab-to-Generate stability contract (this feature was removed in a1a92a3
+after it froze Anki and lost definitions; it is back ONLY because every
+historical failure mode is now structurally fixed):
+1. Generation itself is pure SQLite lookups (install-time indexing, see
+   parser.py) — the old first-use freeze came from parsing dictionary
+   files inside the unfocus path, which can never happen anymore.
+2. The hook returns `changed` UNTOUCHED so it never triggers the legacy
+   editor's "reload after filter" race (the old lost-definition bug).
+   Persistence is done by the generation path itself, which updates the
+   note BEFORE refreshing the editor (see _apply_definition_to_editor).
+3. Single-flight guard: rapid Tab-Tab-Tab never stacks duplicate jobs.
+4. Opt-out via config ("tab_generate": false) for users who prefer
+   explicit-only workflows.
 
 Anki 26.x compatibility (verified against installed 26.08.1 source):
 - Two editor generations coexist: the Svelte `NewEditor` (Add window /
-  Edit Current) which has NO `.note` attribute (only `.nid`), and the
-  legacy `Editor` (Browser / legacy mode) which carries `.note`.
+  Edit Current) which has NO `.note` attribute (only `.nid`) and fires no
+  unfocus hook, and the legacy `Editor` (Browser / legacy mode) which
+  carries `.note` and fires `editor_did_unfocus_field` on blur. Tab-to-
+  Generate uses the unfocus hook, so it is active wherever that hook
+  fires (the legacy editor; on this user's Anki the Svelte experiment is
+  disabled so ALL editors are legacy). No JS injection, no bridge
+  monkeypatching — those were the fragile parts of the old approach.
 - `run_in_background` executes the task then calls on_done on the MAIN
   thread, so note edits in on_done are safe.
 """
@@ -270,6 +287,168 @@ def _apply_definition_to_editor(editor, note, def_field: str, definition_html: s
 
 
 # ---------------------------------------------------------------------------
+# Tab-to-Generate (automatic generation on word-field unfocus)
+# ---------------------------------------------------------------------------
+
+# Live editor registry: the unfocus hook gives us (note, field index) but NOT
+# the editor instance, and the old implementation guessed it by walking
+# topLevelWidgets() — which could grab the WRONG editor when several windows
+# are open. Instead we track editors as they load notes via
+# editor_did_load_note (fires for both editor generations) and match them to
+# blurred notes in the unfocus hook (identity first, then note id).
+_live_editors: List[Any] = []
+
+
+def _register_editor(editor) -> None:
+    """
+    Hook callback for `editor_did_load_note`: keeps a weak registry of live
+    editors so Tab-to-Generate can map a blurred note back to its editor.
+
+    Anki does not fire a symmetric 'editor closed' hook, so the registry is
+    pruned lazily: destroyed Qt objects are filtered out on each load
+    (via `sip.isdeleted`, imported inside a try/except because the test
+    stub has no Qt bindings).
+    """
+    # Import locally: tests stub aqt, where the Qt/sip bindings may be absent.
+    try:
+        from aqt.qt import sip  # type: ignore[attr-defined]
+
+        def _gone(obj) -> bool:
+            return sip.isdeleted(obj)
+
+        alive = [e for e in _live_editors if not _gone(e)]
+        if _live_editors and len(alive) != len(_live_editors):
+            _live_editors[:] = alive
+    except Exception:
+        # No sip available (test stub): keep everything; the registry is
+        # only a lookup aid, never a correctness requirement.
+        pass
+    if editor not in _live_editors:
+        _live_editors.append(editor)
+
+
+def _find_editor_for_note(note) -> Optional[Any]:
+    """
+    Returns a live editor currently editing `note`, if any.
+
+    Identity match first: the legacy editor keeps the SAME Note object the
+    blur hook hands us, so object identity is exact — vital in the Add
+    window where unsaved notes all share id 0 and an id-only match could
+    pick a different open Add window. The id fallback covers any editor
+    generation that resolves notes through the collection.
+    """
+    # Pass 1: exact object identity (legacy editors).
+    for editor in reversed(_live_editors):  # most recently loaded wins
+        if getattr(editor, "note", None) is note:
+            return editor
+    # Pass 2: match by note id (collection-resolved notes, same id).
+    target_nid = getattr(note, "id", None)
+    if not target_nid:  # 0/None = unsaved note; identity pass already failed
+        return None
+    for editor in reversed(_live_editors):
+        candidate = _resolve_editor_note(editor)
+        if candidate is not None and getattr(candidate, "id", None) == target_nid:
+            return editor
+    return None
+
+
+def _tab_generate_enabled(config: Dict[str, Any]) -> bool:
+    """
+    Resolves whether Tab-to-Generate is active for this config.
+
+    Defaults to ON (this was the feature's historical behaviour when it
+    worked); explicitly set to False to disable. Kept as a separate pure
+    function so the regression suite can exercise the decision matrix.
+    """
+    return bool(config.get("tab_generate", True))
+
+
+def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any]) -> bool:
+    """
+    Pure decision function for Tab-to-Generate — returns True when leaving
+    `unfocused_field` on `note` should kick off automatic generation.
+
+    Conditions (all must hold):
+    - The feature is enabled in config.
+    - The unfocused field IS the configured word field.
+    - The definition field exists and is empty (never overwrite existing
+      content — explicit regeneration stays available via the toolbar
+      button).
+    """
+    if not _tab_generate_enabled(config):
+        return False
+
+    word_field = config.get("word_field", "")
+    def_field = config.get("definition_field", "")
+
+    if not word_field or not def_field or word_field == def_field:
+        return False
+    if unfocused_field != word_field:
+        return False
+    if def_field not in note:
+        return False
+
+    # Only auto-fill EMPTY definition fields. .strip() on the raw field
+    # covers whitespace-only content; HTML emptiness (e.g. a lone <br>) is
+    # handled by extract_clean_word downstream during generation itself.
+    return not note[def_field].strip()
+
+
+def on_field_unfocus(changed: bool, note, current_field_index: int) -> bool:
+    """
+    Hook callback for `editor_did_unfocus_field` — the Tab-to-Generate seam.
+
+    Fired by the legacy editor when a field loses focus (Tab, click-away,
+    window switch). If the blurred field is the configured word field and
+    the definition field is empty, generation starts in the background.
+
+    CRITICAL: returns `changed` UNTOUCHED. The legacy editor reloads the
+    note when any filter returns True, which raced with our background
+    write and deleted freshly generated definitions (historical bug).
+    Returning the input unchanged leaves the reload decision to Anki;
+    our own persistence path (update_note BEFORE editor refresh) is what
+    makes the definition survive.
+    """
+    try:
+        if not mw or not note:
+            return changed
+
+        config = _get_addon_config()
+        if not _should_auto_generate(note, _field_name_at(note, current_field_index), config):
+            return changed
+
+        editor = _find_editor_for_note(note)
+        if editor is None:
+            # No live editor for this note (e.g. programmatic blur) —
+            # do nothing rather than guess at a window like the old code.
+            return changed
+
+        # Reuse the exact same generation path as the toolbar button
+        # (validation, single-flight guard, background thread, safe
+        # persistence) so Tab and button can never diverge in behaviour.
+        on_editor_generate_definition(editor)
+    except Exception:
+        # A hook failure must never break editing; log loudly and move on.
+        print(f"CompreDef: Tab-to-Generate unfocus hook failed:\n{traceback.format_exc()}")
+    return changed
+
+
+def _field_name_at(note, index: int) -> str:
+    """
+    Resolves the field name for a field ordinal via the non-deprecated
+    note API. Returns '' for out-of-range indices (hook can fire during
+    notetype switches with a stale index).
+    """
+    try:
+        names = list(note.keys())
+        if 0 <= index < len(names):
+            return names[index]
+    except Exception:
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Editor toolbar button
 # ---------------------------------------------------------------------------
 
@@ -457,10 +636,16 @@ def setup_editor_browser_hooks() -> None:
     """
     Registers editor toolbar and browser menu hooks with Anki.
 
-    Deliberately does NOT register any automatic generation on field
-    unfocus or Tab (editor_did_unfocus_field / JS key listeners): explicit
-    button/menu actions only, per the stability-first architecture.
+    Tab-to-Generate is registered via `editor_did_unfocus_field` + the
+    `editor_did_load_note` registry. There is deliberately NO JS key
+    listener and NO webview bridge monkeypatching: the old Tab feature
+    relied on both, they never fired on the Svelte editor, and the
+    unfocus hook already covers every Tab/click-away path natively.
     """
     gui_hooks.editor_did_init_buttons.append(add_editor_button)
     gui_hooks.browser_menus_did_init.append(setup_browser_menu)
     gui_hooks.browser_will_show_context_menu.append(setup_browser_context_menu)
+    # Tab-to-Generate: map blurred notes back to their editor, and react
+    # to word-field unfocus (returns `changed` untouched — see on_field_unfocus).
+    gui_hooks.editor_did_load_note.append(_register_editor)
+    gui_hooks.editor_did_unfocus_field.append(on_field_unfocus)

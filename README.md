@@ -36,11 +36,8 @@ CompreDef eliminates the circular lookup trap of Japanese monolingual dictionari
 
 ## Installation
 
-1. Clone or download this repository into your Anki add-ons directory:
-   ```bash
-   ln -sfn /path/to/CompreDef ~/.local/share/Anki2/addons21/CompreDef
-   ```
-2. Restart Anki.
+1. Download or build `CompreDef.ankiaddon` (see **Testing & Local Installation** below).
+2. In Anki: **Tools → Add-ons → Install from file...** → select it → restart Anki.
 3. Configure your Note Type and Dictionaries under **Tools → Add-ons → CompreDef → Config**.
 
 ---
@@ -58,20 +55,38 @@ CompreDef eliminates the circular lookup trap of Japanese monolingual dictionari
 
 ---
 
-## Testing
- 
-A fundamental regression suite guards the project's historical bugs. Run it before every commit:
- 
+## Testing & Local Installation
+
+Run the regression suite (no Anki/PyQt needed — the Anki API is stubbed automatically; real-dictionary smoke tests self-skip if the dictionaries are absent):
+
 ```bash
 python3 tests/test_regression.py
 ```
- 
-Alternatively, use the CI script to test, commit, and push in one go:
+
+Build the installable package to test the current code in Anki:
+
+```bash
+./scripts/build.sh        # → dist/CompreDef.ankiaddon
+```
+
+Then install it: **Anki → Tools → Add-ons → Install from file...** → select `dist/CompreDef.ankiaddon` → restart Anki.
+
+Prefer a live checkout while developing? Symlink the repo instead of installing the package:
+
+```bash
+ln -sfn /path/to/CompreDef ~/.local/share/Anki2/addons21/CompreDef
+```
+
+For test + commit + push in one go:
 ```bash
 ./scripts/ci.sh
 ```
+For a full release (tests, package, tag, GitHub Release with the `.ankiaddon`):
+```bash
+./scripts/release.sh [vX.Y.Z]
+```
  
-It verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder exits early on the simplest comprehensible dictionary, cross-reference titles lose to real definitions, and `.zip` archives produce byte-identical output to their unzipped folders. No Anki/PyQt needed — the Anki API is stubbed automatically; real-dictionary smoke tests self-skip if the dictionaries are absent.
+The regression suite verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder exits early on the simplest comprehensible dictionary, cross-reference titles lose to real definitions, `.zip` archives produce byte-identical output to their unzipped folders, and Tab-to-Generate never overwrites an existing definition.
 
 ---
 

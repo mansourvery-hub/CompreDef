@@ -3,5 +3,6 @@
     "word_field": "Expression",
     "definition_field": "Definition",
     "dictionaries": [],
-    "dictionary_folder": ""
+    "dictionary_folder": "",
+    "tab_generate": true
 }
