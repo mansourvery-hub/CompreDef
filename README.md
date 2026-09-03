@@ -56,6 +56,18 @@ CompreDef eliminates the circular lookup trap of Japanese monolingual dictionari
 
 ---
 
+## Testing
+
+A fundamental regression suite guards the project's historical bugs. Run it before every commit:
+
+```bash
+python3 tests/test_regression.py
+```
+
+It verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder exits early on the simplest comprehensible dictionary, cross-reference titles lose to real definitions, and `.zip` archives produce byte-identical output to their unzipped folders. No Anki/PyQt needed — the Anki API is stubbed automatically; real-dictionary smoke tests self-skip if the dictionaries are absent.
+
+---
+
 ## Architecture & Code Structure
 
 ```
@@ -64,8 +76,10 @@ CompreDef/
 ├── gui.py              # Configuration dialog with Ladder ordering
 ├── generator.py        # Ladder early-exit & kanji matrix scoring engine
 ├── parser.py           # SingleDictionary loader, Yomitan parser, ZIP support, SQLite caching
-├── db_utils.py         # Native Anki database queries (interval > 0 kanji scan)
+├── db_utils.py         # Native Anki database queries (interval >= 21 kanji scan)
 ├── editor_browser.py   # Editor toolbar button and browser bulk menu hooks
+├── tests/
+│   └── test_regression.py  # Fundamental regression suite (run before committing)
 ├── icons/              # UI toolbar icons (compredef.svg)
 ├── config.json         # Default configuration settings
 ├── WIKI.md             # In-depth algorithm & architecture wiki

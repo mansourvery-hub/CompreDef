@@ -124,3 +124,21 @@ CompreDef renders 100% faithful Yomitan structured-content:
 In strict accordance with Anki development standards:
 - **No Direct SQLite Connections**: External sqlite3 connections to `collection.anki2` can cause database corruption and SQLite locks. CompreDef exclusively accesses the database through Anki's native Python wrapper: `mw.col.db.all()`.
 - **Non-Blocking Background Threads**: All dictionary searches, scoring calculations, and database scans execute asynchronously using `mw.taskman.run_in_background()` with a completion callback to the main thread.
+
+---
+
+## 4. Regression Testing Mandate
+
+The fundamental regression suite lives at `tests/test_regression.py` and **must be run green before every commit** (`python3 tests/test_regression.py`). Each test maps to a real historical bug:
+
+| Historical bug | Guarding test |
+|---|---|
+| Plain-text definitions (121 chars) served instead of rich Yomitan HTML (~7000 chars) | `test_structured_content_html_fidelity` + real-dictionary `先ず` smoke test |
+| Renderer upgraded but SQLite cache kept serving stale plain text forever | `test_renderer_version_invalidates_cache` (verifies `RENDERER_VERSION` is embedded in signatures) |
+| Furigana `<rt>` readings polluted the kanji comprehension score | `test_scoring_ignores_furigana` |
+| Ladder fell through to an advanced dictionary despite a simpler comprehensible definition | `test_ladder_early_exit_order` |
+| Cross-reference titles ("see also") won over real definitions | `test_reference_title_filtering` |
+| ZIP archive and unzipped folder produced different output | `test_zip_folder_parity` |
+| `data-sc-*` attributes drifted from Yomitan's DOM naming (breaking the user's CSS compactor) | `test_data_sc_attribute_names` |
+
+The suite stubs `aqt` so it runs on both system Python and Anki's bundled Python without Anki installed. Smoke tests against the real installed dictionaries self-skip when those dictionaries are absent.

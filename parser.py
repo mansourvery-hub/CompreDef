@@ -21,6 +21,14 @@ import sqlite3
 import zipfile
 from typing import Dict, List, Optional, Tuple, Any
 
+# Bump this whenever the HTML rendering output format changes in ANY way.
+# It is embedded into every dictionary's cache signature so that upgrading
+# the renderer automatically invalidates stale SQLite entries instead of
+# silently serving old plain-text definitions forever (the exact bug where
+# '先ず' kept returning 121 chars of plain text instead of ~7000 chars of
+# rich Yomitan HTML after the renderer was rewritten).
+RENDERER_VERSION = "yomitan_html_v1"
+
 
 def _style_to_css(style: dict) -> str:
     """
@@ -327,16 +335,25 @@ class SingleDictionary:
         self.title = get_dictionary_title(self.path)
 
     def _compute_signature(self) -> str:
-        """Computes a checksum signature of the dictionary files."""
+        """
+        Computes a checksum signature of the dictionary files.
+
+        IMPORTANT: the renderer version is part of the signature. Signatures
+        based purely on file mtime/size cannot detect a rendering-logic
+        upgrade, which once left plain-text entries cached in SQLite while
+        the code had moved on to rich HTML rendering.
+        """
+        # ZIP archives: mtime+size of the archive file itself
         if self.is_zip:
             try:
                 st = os.stat(self.path)
-                return f"zip:{st.st_mtime_ns}:{st.st_size}"
+                return f"zip:{RENDERER_VERSION}:{st.st_mtime_ns}:{st.st_size}"
             except Exception:
-                return "zip_error"
+                return f"zip_error:{RENDERER_VERSION}"
 
+        # Unzipped folders: mtime+size of every term bank file
         if os.path.isdir(self.path):
-            parts = []
+            parts = [RENDERER_VERSION]
             try:
                 bank_files = [
                     f for f in os.listdir(self.path)
@@ -349,7 +366,7 @@ class SingleDictionary:
                 pass
             return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
 
-        return "unknown"
+        return f"unknown:{RENDERER_VERSION}"
 
     def ensure_indexed(self) -> None:
         """
