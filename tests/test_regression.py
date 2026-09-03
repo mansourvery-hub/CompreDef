@@ -107,12 +107,13 @@ aqt.mw = _FakeMW()  # type: ignore[attr-defined]
 # Modules under test (imports must come AFTER the stub is in place)
 import parser as compredef_parser  # noqa: E402
 import generator as compredef_generator  # noqa: E402
+import provider  # noqa: E402
 
 # The directory containing the user's real Yomitan dictionaries (used ONLY
 # by the dynamic smoke tests; everything else runs on synthetic fixtures).
 DICTS_DIR = "/home/mohamed/Desktop/Dicts"
 
-RESULTS = {"pass": 0, "fail": 0}
+RESULTS = {"pass": 0, "fail": 0, "failed_names": []}
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -122,6 +123,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"[PASS] {name}")
     else:
         RESULTS["fail"] += 1
+        RESULTS["failed_names"].append(name)
         print(f"[FAIL] {name}" + (f" -- {detail}" if detail else ""))
 
 
@@ -667,9 +669,9 @@ def test_renderer_version_invalidates_cache(tmp_root: str) -> None:
     d1 = compredef_parser.get_single_dictionary(dict_dir)
     sig1 = d1._compute_signature()
 
-    old = compredef_parser.RENDERER_VERSION
+    old = provider.LocalSQLiteProvider.RENDERER_VERSION
     try:
-        compredef_parser.RENDERER_VERSION = old + "_bumped"
+        provider.LocalSQLiteProvider.RENDERER_VERSION = old + "_bumped"
         sig2 = d1._compute_signature()
         check(
             "cache: signature changes when renderer version changes",
@@ -677,7 +679,7 @@ def test_renderer_version_invalidates_cache(tmp_root: str) -> None:
             "same signature despite version bump -> stale caches forever",
         )
     finally:
-        compredef_parser.RENDERER_VERSION = old
+        provider.LocalSQLiteProvider.RENDERER_VERSION = old
 
     zip_path = build_synthetic_dict(
         os.path.join(tmp_root, "cache_inv_zip"), as_zip=True
@@ -1500,6 +1502,10 @@ def main() -> int:
     print("=" * 70)
     print(f"RESULT: {RESULTS['pass']}/{RESULTS['pass'] + RESULTS['fail']} "
           f"passed, {RESULTS['fail']} failed")
+    if RESULTS["failed_names"]:
+        print("\nFAILED TESTS:")
+        for name in RESULTS["failed_names"]:
+            print(f"  - {name}")
     print("=" * 70)
     return 0 if RESULTS["fail"] == 0 else 1
 

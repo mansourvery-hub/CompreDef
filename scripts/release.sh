@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 # CompreDef Release Script — ONE command, full pipeline:
 #
@@ -15,6 +16,9 @@ set -e
 #   4. test the change
 # No manual .ankiaddon install is needed once the addon is installed
 # from AnkiWeb (id 1619602654) — updates flow through automatically.
+
+# Name the failing step/command instead of dying with a generic message.
+trap 'echo ""; echo "!!! release.sh FAILED at step in progress: $BASH_COMMAND (line $LINENO)"' ERR
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -64,7 +68,10 @@ echo "=== [2/5] Building .ankiaddon (tests + package + verify) ==="
 ANKIADDON_OUT="dist/CompreDef.ankiaddon"
 
 echo "=== [3/5] Committing changes & pushing to GitHub ==="
-git add VERSION manifest.json .gitignore scripts/
+# Stage EVERYTHING (source, tests, docs, meta). A hardcoded subset went
+# stale after the module refactor — new files (provider.py, renderer.py,
+# ...) were never staged, the commit found nothing, and the pipeline died.
+git add -A
 if git diff-index --quiet HEAD --; then
     echo "Working tree clean, no new commit needed."
 else

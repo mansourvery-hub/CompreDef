@@ -46,9 +46,9 @@ from aqt.browser import Browser
 from aqt.qt import QMenu, QKeySequence
 from aqt.utils import tooltip
 
-from .generator import generate_definition
-from .parser import parse_furigana_field, extract_clean_word
-from .db_utils import reset_caches
+from .core import get_generator
+from .utils import parse_furigana_field, extract_clean_word, resolve_ladder_paths
+from .anki import reset_caches
 
 
 def _get_addon_name() -> str:
@@ -210,12 +210,10 @@ def on_editor_generate_definition(editor) -> None:
     reading_text = _extract_reading_text(note, word_field, reading_field)
 
     def task() -> Optional[str]:
-        return generate_definition(
+        return get_generator().generate(
             word_text,
-            dictionary_folder=dictionary_folder,
-            dictionaries=dictionaries,
+            ladder_paths=resolve_ladder_paths(dictionaries, dictionary_folder, disabled_dictionaries),
             reading=reading_text,
-            disabled_dictionaries=disabled_dictionaries,
         )
 
     def on_done(future) -> None:
@@ -553,12 +551,10 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
 
                 # Generate definition using the Dictionary Ladder (pure
                 # SQLite lookups — no indexing ever happens here).
-                definition_result = generate_definition(
+                definition_result = get_generator().generate(
                     word_text,
-                    dictionary_folder=dictionary_folder,
-                    dictionaries=dictionaries,
+                    ladder_paths=resolve_ladder_paths(dictionaries, dictionary_folder, disabled_dictionaries),
                     reading=reading_text,
-                    disabled_dictionaries=disabled_dictionaries,
                 )
                 if not definition_result:
                     skipped_count += 1

@@ -33,15 +33,12 @@ from aqt.qt import (
     Qt,
 )
 
-from .parser import (
-    get_dictionary_title,
+from .core import get_provider
+from .utils import (
     find_dictionary_folders,
     is_zip_dictionary,
-    install_dictionary,
-    uninstall_dictionary,
-    IndexingError,
-    get_single_dictionary,
 )
+from .provider import IndexingError
 
 
 # Cross-version PyQt5/PyQt6 enum helpers
@@ -350,13 +347,14 @@ class ConfigDialog(QDialog):
         for i in range(self.dict_list.count()):
             item = self.dict_list.item(i)
             path = item.data(role)
-            title = get_dictionary_title(path)
+            title = get_provider().get_title(path)
             # Index status: dictionaries must be installed (indexed) before
             # generation works; unindexed ones are skipped by lookups.
             try:
-                d = get_single_dictionary(path)
-                if d.is_indexed():
-                    status = f"✓ ({d.entry_count():,} entries)"
+                provider = get_provider()
+                if provider.is_installed(path):
+                    count = provider.get_entry_count(path)
+                    status = f"✓ ({count:,} entries)"
                 else:
                     status = "⚠ not indexed — re-add to install"
             except Exception:
@@ -415,8 +413,7 @@ class ConfigDialog(QDialog):
 
         # INSTALL-TIME INDEXING: a newly added dictionary is parsed and
         # indexed exactly once, here, as a background operation with a
-        # progress dialog. Normal lookups never parse it again (see
-        # parser.py architecture notes).
+        # progress dialog. Normal lookups never parse it again.
         self._install_dictionary_in_background(norm_path)
         return True
 
@@ -479,14 +476,11 @@ class ConfigDialog(QDialog):
             return cancelled["flag"]
 
         def task() -> int:
-            return install_dictionary(path, progress_cb, cancel_check)
+            return get_provider().install(path, progress_cb, cancel_check)
 
         def on_done(future) -> None:
             timer.stop()
             state["finished"] = True
-            # Every branch must be exception-proof: this callback runs on
-            # the main thread and a NameError here once took Anki down and
-            # silently lost the user's unsaved config dialog state.
             try:
                 count = future.result()
                 msg = f"CompreDef: '{title}' indexed ({count:,} entries)."
@@ -581,7 +575,7 @@ class ConfigDialog(QDialog):
         # rows must never block the UI thread).
         if path:
             def task() -> None:
-                uninstall_dictionary(path)
+                get_provider().uninstall(path)
 
             def on_done(_future) -> None:
                 self._refresh_item_labels()
