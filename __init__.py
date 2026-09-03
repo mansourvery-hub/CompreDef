@@ -9,6 +9,9 @@ from aqt import mw
 from aqt.qt import QMenu
 from .gui import show_config_dialog
 from .editor_browser import setup_editor_browser_hooks
+from . import anki
+
+def _add_tools_menu_entry() -> None:
 
 
 def _add_tools_menu_entry() -> None:
@@ -34,8 +37,11 @@ def _add_tools_menu_entry() -> None:
 
 
 # Register the configuration dialog callback with Anki's Addon Manager
-# This allows users to configure the add-on directly from Tools -> Add-ons -> Config
+# This allows users to configure the add-on directly from Tools → Add-ons → Config
 if mw:
+    # Trigger asynchronous build of learner knowledge snapshot on startup
+    anki.init_caches_async()
     mw.addonManager.setConfigAction(__name__, show_config_dialog)
     setup_editor_browser_hooks()
     _add_tools_menu_entry()
+

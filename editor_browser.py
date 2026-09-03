@@ -573,9 +573,10 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                 failures.append((nid, word_text, err.splitlines()[-1] if err else "unknown error"))
                 continue
 
-        # Note fields were modified, so the memoized known-kanji/vocab
-        # sets are stale; force a rescan on next use.
-        reset_caches()
+        # Note fields were modified, but learner knowledge is now a
+        # session snapshot and is NOT rebuilt after individual edits.
+        # reset_caches() # Removed to prevent repeated full collection scans
+
 
         return updated_count, skipped_count, failures
 
