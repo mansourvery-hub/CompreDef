@@ -12,9 +12,6 @@ from .editor_browser import setup_editor_browser_hooks
 from . import anki
 
 def _add_tools_menu_entry() -> None:
-
-
-def _add_tools_menu_entry() -> None:
     """
     Adds a direct 'CompreDef Configuration...' entry under Anki's Tools menu.
 

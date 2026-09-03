@@ -48,7 +48,6 @@ from aqt.utils import tooltip
 
 from .core import get_generator
 from .utils import parse_furigana_field, extract_clean_word, resolve_ladder_paths
-from .anki import reset_caches
 
 
 def _get_addon_name() -> str:
@@ -573,10 +572,8 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                 failures.append((nid, word_text, err.splitlines()[-1] if err else "unknown error"))
                 continue
 
-        # Note fields were modified, but learner knowledge is now a
-        # session snapshot and is NOT rebuilt after individual edits.
-        # reset_caches() # Removed to prevent repeated full collection scans
-
+        # Learner knowledge is a per-session snapshot: bulk definition
+        # writes must NOT invalidate it (no repeated full collection scan).
 
         return updated_count, skipped_count, failures
 

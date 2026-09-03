@@ -95,8 +95,12 @@ class _FakeModels:
         return self.models_dict.get(name)
     def all_names(self):
         return list(self.models_dict.keys())
-    def add_model(self, name, flds):
-        self.models_dict[name] = {"name": name, "flds": flds}
+    def add_model(self, name, field_names):
+        # Real Anki models store fields as a list of dicts with "name".
+        self.models_dict[name] = {
+            "name": name,
+            "flds": [{"name": n} for n in field_names],
+        }
 
 class _FakeAddonManager:
     def __init__(self):
@@ -1483,66 +1487,89 @@ def test_real_dictionary_smoke() -> None:
 
 def test_kanji_extraction_correctness(tmp_root: str) -> None:
     """
-    Guards against incorrectly counting kanji from definition/example fields.
-    Only the configured 'word_field' should contribute to known_kanji.
+    Known kanji must come ONLY from the configured Expression (word) field
+    of mature notes — never from Definition/Example/other fields. This
+    also proves CompreDef-generated definitions (written to the Definition
+    field) can never pollute the learner's known-kanji set.
     """
-    # Setup configured note type and word field
-    note_type = "KnowledgeTestType"
-    word_field = "Expression"
-    aqt.mw.addonManager.writeConfig("compredef", {"note_type": note_type, "word_field": word_field})
-    aqt.mw.col.models.add_model(note_type, [word_field, "Definition", "Example"])
-
-    # Create mature notes with kanji in various fields
-    # Case 1: Kanji in Expression -> Known
-    # Case 2: Kanji ONLY in Definition -> NOT Known
-    # Case 3: Kanji ONLY in Example -> NOT Known
-    # flds are separated by \x1f
-    learned_flds = [
-        ("漢字", "Definition", "Example"), # Kanji 漢, 字 should be known
-        ("Word", "漢字Definition", "Example"), # 漢, 字 should NOT be known from here
-        ("Word", "Definition", "漢字Example"), # 漢, 字 should NOT be known from here
-    ]
-    
-    # Mock the DB to return these flds for mature notes
-    def mock_all(query, params=()):
-        if "SELECT n.flds" in query:
-            return ["\x1f".join(row) for row in learned_flds]
-        return []
-    
-    aqt.mw.col.db.all = mock_all
-
-    # Trigger build
     import anki
-    anki.reset_caches()
-    known = anki.get_known_kanji_set()
 
-    # Check results: only "漢字" from the first note should be present
-    check("kanji: Expression kanji is known", "漢" in known and "字" in known)
-    
-    # Reset and try with distinct kanji
-    learned_flds_distinct = [
-        ("Apple", "Def", "Ex"), 
-        ("漢字", "Def", "Ex"),           # Known: 漢, 字
-        ("Apple", "漢字Def", "Ex"),     # NOT known
-        ("Apple", "Def", "漢字Ex"),     # NOT known
-    ]
-    aqt.mw.col.db.all = lambda q, p=(): ["\x1f".join(row) for row in learned_flds_distinct]
-    
-    anki.reset_caches()
-    known = anki.get_known_kanji_set()
-    
-    # a-priori, the only known kanji should be from "漢字" note
-    check("kanji: only Expression kanji are known", len(known) == 2) # 漢, 字
-    
-    # Final check: generated definitions should not pollute known set
-    import generator
-    original_gen = generator.generate_definition
-    generator.generate_definition = lambda w, **kwargs: "This is a 龍 definition"
-    
-    generator.generate_definition("Word", dictionaries=[])
-    
-    check("kanji: generated definitions do not pollute knowledge", "龍" not in anki.get_known_kanji_set())
-    generator.generate_definition = original_gen
+    # Save global state: this test rebinds the fake DB/config and rebuilds
+    # the session snapshot, so everything must be restored afterwards.
+    prev_db_all = aqt.mw.col.db.all
+    prev_configs = dict(aqt.mw.addonManager.configs)
+    prev_models = dict(aqt.mw.col.models.models_dict)
+    prev_kanji = set(anki._known_kanji_cache)
+    prev_vocab = set(anki._known_vocab_cache)
+    prev_ready = anki._caches_ready.is_set()
+    import core as _core
+    prev_generator = _core._generator
+    try:
+        # Use the real config-key resolution (in tests anki.__name__ is
+        # "anki"; in Anki it is "<addon-id>.anki").
+        addon_key = anki._get_root_addon_name()
+        note_type = "KnowledgeTestType"
+        aqt.mw.addonManager.writeConfig(
+            addon_key, {"note_type": note_type, "word_field": "Expression"}
+        )
+        aqt.mw.col.models.add_model(
+            note_type, ["Expression", "Definition", "Example"]
+        )
+
+        # Distinct kanji per field so leaks are attributable:
+        #   Expression -> 漢字 (must be known)
+        #   Definition -> 龍 (simulates a generated definition; must NOT be known)
+        #   Example    -> 虎 (must NOT be known)
+        SEP = "\x1f"
+        rows = [
+            (SEP.join(["漢字", "plain def", "plain ex"]),),
+            (SEP.join(["plain word", "龍の定義", "plain ex"]),),
+            (SEP.join(["plain word", "plain def", "虎の例文"]),),
+        ]
+        aqt.mw.col.db.all = lambda q, p=(): list(rows)
+
+        anki.reset_caches()
+        known = anki.get_known_kanji_set()
+        vocab = anki.get_known_vocabulary_set()
+
+        check("kanji: Expression kanji is known", "漢" in known and "字" in known)
+        check(
+            "kanji: Definition-only kanji is NOT known",
+            "龍" not in known,
+            f"known={sorted(known)}",
+        )
+        check(
+            "kanji: Example-only kanji is NOT known",
+            "虎" not in known,
+            f"known={sorted(known)}",
+        )
+        check(
+            "kanji: known set is exactly the Expression kanji",
+            known == {"漢", "字"},
+            f"known={sorted(known)}",
+        )
+        check(
+            "kanji: generated definitions do not pollute knowledge",
+            "龍" not in known and "虎" not in known,
+        )
+        check(
+            "kanji: known vocab comes from the Expression field only",
+            "漢字" in vocab and "龍の定義" not in vocab and "虎の例文" not in vocab,
+            f"vocab={sorted(vocab)}",
+        )
+    finally:
+        aqt.mw.col.db.all = prev_db_all
+        aqt.mw.addonManager.configs.clear()
+        aqt.mw.addonManager.configs.update(prev_configs)
+        aqt.mw.col.models.models_dict.clear()
+        aqt.mw.col.models.models_dict.update(prev_models)
+        anki._known_kanji_cache = prev_kanji
+        anki._known_vocab_cache = prev_vocab
+        if prev_ready:
+            anki._caches_ready.set()
+        else:
+            anki._caches_ready.clear()
+        _core._generator = prev_generator
 
 def main() -> int:
     print("=" * 70)
@@ -1573,6 +1600,7 @@ def main() -> int:
         test_reading_disambiguates_homographs(tmp_root)
         test_parse_furigana_field_formats()
         test_disabled_dictionaries_skipped(tmp_root)
+        test_kanji_extraction_correctness(tmp_root)
         test_tab_generate_decisions()
         test_real_dictionary_smoke()
     finally:
