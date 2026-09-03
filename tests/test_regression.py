@@ -75,18 +75,42 @@ FAKE_STUB_DIR = os.path.join(tempfile.gettempdir(), "compredef_test_aqt_stub")
 
 
 class _FakeCol:
-    """Minimal stand-in for mw.col so db_utils imports outside Anki."""
+    """Minimal stand-in for mw.col."""
+    def __init__(self):
+        self.models = _FakeModels()
+        self.db = self._FakeDB()
 
-    class _DB:
-        @staticmethod
-        def all(_query):  # no learned notes in the test environment
+    class _FakeDB:
+        def all(self, query, params=()):
             return []
 
-    db = _DB()
+    def models_by_name(self, name):
+        return self.models.by_name(name)
 
+
+class _FakeModels:
+    def __init__(self):
+        self.models_dict = {}
+    def by_name(self, name):
+        return self.models_dict.get(name)
+    def all_names(self):
+        return list(self.models_dict.keys())
+    def add_model(self, name, flds):
+        self.models_dict[name] = {"name": name, "flds": flds}
+
+class _FakeAddonManager:
+    def __init__(self):
+        self.configs = {}
+    def getConfig(self, name):
+        return self.configs.get(name, {})
+    def writeConfig(self, name, config):
+        self.configs[name] = config
 
 class _FakeMW:
-    col = _FakeCol()
+    def __init__(self):
+        self.col = _FakeCol()
+        self.addonManager = _FakeAddonManager()
+
 
 
 def _install_aqt_stub() -> None:
@@ -1456,6 +1480,69 @@ def test_real_dictionary_smoke() -> None:
 # ---------------------------------------------------------------------------
 # Main entry point.
 # ---------------------------------------------------------------------------
+
+def test_kanji_extraction_correctness(tmp_root: str) -> None:
+    """
+    Guards against incorrectly counting kanji from definition/example fields.
+    Only the configured 'word_field' should contribute to known_kanji.
+    """
+    # Setup configured note type and word field
+    note_type = "KnowledgeTestType"
+    word_field = "Expression"
+    aqt.mw.addonManager.writeConfig("compredef", {"note_type": note_type, "word_field": word_field})
+    aqt.mw.col.models.add_model(note_type, [word_field, "Definition", "Example"])
+
+    # Create mature notes with kanji in various fields
+    # Case 1: Kanji in Expression -> Known
+    # Case 2: Kanji ONLY in Definition -> NOT Known
+    # Case 3: Kanji ONLY in Example -> NOT Known
+    # flds are separated by \x1f
+    learned_flds = [
+        ("漢字", "Definition", "Example"), # Kanji 漢, 字 should be known
+        ("Word", "漢字Definition", "Example"), # 漢, 字 should NOT be known from here
+        ("Word", "Definition", "漢字Example"), # 漢, 字 should NOT be known from here
+    ]
+    
+    # Mock the DB to return these flds for mature notes
+    def mock_all(query, params=()):
+        if "SELECT n.flds" in query:
+            return ["\x1f".join(row) for row in learned_flds]
+        return []
+    
+    aqt.mw.col.db.all = mock_all
+
+    # Trigger build
+    import anki
+    anki.reset_caches()
+    known = anki.get_known_kanji_set()
+
+    # Check results: only "漢字" from the first note should be present
+    check("kanji: Expression kanji is known", "漢" in known and "字" in known)
+    
+    # Reset and try with distinct kanji
+    learned_flds_distinct = [
+        ("Apple", "Def", "Ex"), 
+        ("漢字", "Def", "Ex"),           # Known: 漢, 字
+        ("Apple", "漢字Def", "Ex"),     # NOT known
+        ("Apple", "Def", "漢字Ex"),     # NOT known
+    ]
+    aqt.mw.col.db.all = lambda q, p=(): ["\x1f".join(row) for row in learned_flds_distinct]
+    
+    anki.reset_caches()
+    known = anki.get_known_kanji_set()
+    
+    # a-priori, the only known kanji should be from "漢字" note
+    check("kanji: only Expression kanji are known", len(known) == 2) # 漢, 字
+    
+    # Final check: generated definitions should not pollute known set
+    import generator
+    original_gen = generator.generate_definition
+    generator.generate_definition = lambda w, **kwargs: "This is a 龍 definition"
+    
+    generator.generate_definition("Word", dictionaries=[])
+    
+    check("kanji: generated definitions do not pollute knowledge", "龍" not in anki.get_known_kanji_set())
+    generator.generate_definition = original_gen
 
 def main() -> int:
     print("=" * 70)
