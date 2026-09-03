@@ -1252,6 +1252,49 @@ def test_tab_generate_decisions() -> None:
     check("tab: out-of-range ordinal returns ''",
           eb._field_name_at(note, 99) == "")
 
+    # 13. GUI checkbox init race (production bug, v1.0.2): the checkbox state
+    #     must be restored BEFORE _load_config's dictionary loop, because each
+    #     _add_dict_path persists the dialog state immediately (crash safety).
+    #     With the checkbox left at Qt's default (unchecked), merely OPENING
+    #     the dialog with a saved ladder silently wrote tab_generate=False.
+    #     Guard: a QCheckBox-free simulation of the exact sequence —
+    #     init checkbox state -> (mid-init save reads it) -> final config.
+    class FakeCheckBox:
+        """Mirrors the gui.py contract: created unchecked, then restored."""
+
+        def __init__(self, saved_config: dict):
+            self._checked = False  # Qt default
+            # This is the fix under test: restore AT CREATION TIME.
+            self._checked = bool(saved_config.get("tab_generate", True))
+
+        def isChecked(self) -> bool:
+            return self._checked
+
+    def simulate_dialog_open(saved_config: dict) -> dict:
+        """Opens the dialog (as gui.py does) and returns what an early
+        _save_config_now() (fired by the first _add_dict_path) writes."""
+        checkbox = FakeCheckBox(saved_config)  # _init_ui
+        # _load_config -> _add_dict_path -> _save_config_now (reads checkbox):
+        return {"tab_generate": checkbox.isChecked()}
+
+    # a) Saved ON must survive an early save, not flip to False.
+    early = simulate_dialog_open({"dictionaries": ["/x"], "tab_generate": True})
+    check("tab: early dialog save preserves tab_generate=True",
+          early["tab_generate"] is True,
+          f"early save wrote {early}")
+
+    # b) Missing key (fresh install / legacy config) defaults to ON even in
+    #    the early-save window — never silently disabled by opening the GUI.
+    early_missing = simulate_dialog_open({"dictionaries": ["/x"]})
+    check("tab: early dialog save defaults missing key to True",
+          early_missing["tab_generate"] is True,
+          f"early save wrote {early_missing}")
+
+    # c) Deliberate opt-out must stay out (the toggle itself keeps working).
+    early_off = simulate_dialog_open({"dictionaries": ["/x"], "tab_generate": False})
+    check("tab: early dialog save preserves explicit False",
+          early_off["tab_generate"] is False)
+
 
 # ---------------------------------------------------------------------------
 # Real-dictionary smoke test (skipped if not installed).

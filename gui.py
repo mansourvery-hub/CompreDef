@@ -265,6 +265,13 @@ class ConfigDialog(QDialog):
             "definition\nif (and only if) the definition field is empty. Existing "
             "definitions are never\noverwritten — use the CD toolbar button for that."
         )
+        # CRITICAL: restore the saved state AT CREATION TIME, before any
+        # _save_config_now() can fire. _load_config() restores the dictionary
+        # ladder AFTER _init_ui(), and each added dictionary persists the
+        # dialog state immediately (crash-safety design). With the default
+        # unchecked Qt state, merely OPENING the dialog used to write
+        # tab_generate=False to disk before the real value was ever shown.
+        self.tab_generate_check.setChecked(bool(self.config.get("tab_generate", True)))
         generation_layout.addWidget(self.tab_generate_check)
 
         main_layout.addWidget(generation_group)
@@ -642,11 +649,10 @@ class ConfigDialog(QDialog):
 
         for d_path in saved_dicts:
             self._add_dict_path(d_path)
-
-        # Tab-to-Generate: default ON (historical behaviour of the feature
-        # when it worked); the config key only exists once the user has
-        # saved the dialog at least once.
-        self.tab_generate_check.setChecked(bool(self.config.get("tab_generate", True)))
+        # NOTE: tab_generate_check's state is restored in _init_ui (at widget
+        # creation) — NOT here. The dictionary loop above persists the dialog
+        # state on every add (crash safety), so the checkbox must already
+        # carry its saved value by the time _add_dict_path saves.
 
     def _save_and_accept(self) -> None:
         """Saves settings to Anki config and closes dialog."""
