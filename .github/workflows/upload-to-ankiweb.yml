@@ -22,3 +22,4 @@ jobs:
           title: "CompreDef"
           branches: 23.10.0-26.08+
           addon-files: CompreDef.ankiaddon
+          description: "Generates Japanese definitions tailored to your known kanji and vocabulary. Uses a user-ordered ladder of local Yomitan dictionaries (simplest first, early exit on a fully comprehensible definition). Tab-to-Generate fills empty definition fields automatically. Pure local SQLite lookups — no LLMs, no network calls."
