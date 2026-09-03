@@ -49,10 +49,9 @@ flowchart TD
    - The result is a set $\mathcal{K}_{\text{known}}$ of all kanji the learner currently knows.
 
 2. **The Dictionary Ladder Traversal**:
-   - The user arranges their installed dictionaries in order from simplest to most advanced:
-     1. **Children's / Elementary**: e.g., 小学館例解学習国語
-     2. **Standard / High School**: e.g., 三省堂国語辞典
-     3. **Comprehensive Monolingual**: e.g., 大辞泉, 大辞林
+   - The user arranges their installed dictionaries in any order they prefer — order is a *preference*, not a difficulty rating:
+     1. **Recommended top rung**: the richest dictionary the user can comfortably read (e.g., 三省堂国語辞典) — its definitions win whenever they pass the comprehension gate.
+     2. **Fallback rungs**: progressively simpler dictionaries (e.g., 小学館例解学習国語) that catch words the richer sources explain with too-difficult kanji.
    - The generator iterates through this ladder **one dictionary at a time**.
 
 3. **HTML Processing for Scoring**:
@@ -74,13 +73,14 @@ flowchart TD
 6. **Early Exit (Short-Circuit Evaluation)**:
    - If a definition yields $S(D) = 1.0$ (100% of the kanji are known):
      - **The loop immediately halts and returns that definition.**
-     - Dictionaries further down the ladder are **never loaded or queried**.
+     - Dictionaries further down the ladder are **never queried**.
      - **Benefits**:
-       - *Pedagogical*: The learner receives the simplest definition from the easiest dictionary that can explain the concept.
-       - *Computational*: Avoids unpickling, parsing, or scoring subsequent massive dictionaries, reducing execution time to **0.05 seconds**.
+       - *Comprehension-tailored*: The learner receives the preferred (top-of-ladder) dictionary's definition whenever they can fully read it, and falls back to simpler rungs exactly when they cannot. Since $S(D)$ measures kanji only — kana words are not checked — the ladder order is the user's control for stylistic difficulty.
+       - *Computational*: Avoiding further lookups keeps execution time at **0.05 seconds**.
 
 7. **The Maximal Fallback**:
    - If no dictionary in the entire ladder yields a 100% match, the algorithm returns the candidate definition with the highest comprehension score $S(D)$ found across all evaluated dictionaries.
+   - This fallback is **order-independent**: every dictionary contributes its best candidate, and the highest score wins regardless of ladder position.
    - This ensures the learner always receives the **least complicated definition available**.
 
 ---

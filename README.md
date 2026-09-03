@@ -6,16 +6,15 @@ Anki add-on for automatically generating Japanese vocabulary definitions strictl
  
 ## Core Concept: The Dictionary Ladder
 
-CompreDef eliminates the circular lookup trap of Japanese monolingual dictionaries by searching your dictionaries in an **ordered ladder** from simplest to most advanced:
+CompreDef frees you from the circular lookup trap of Japanese monolingual dictionaries by searching your dictionaries in an **ordered ladder** — and the order is yours to choose:
 
-1. **Children's / Elementary** (e.g. 小学館例解学習国語)
-2. **Intermediate / High School** (e.g. 三省堂国語辞典)
-3. **Advanced / Comprehensive** (e.g. 大辞泉, 大辞林)
+- Dictionaries are tried **top to bottom** in the exact order you configure.
+- The first dictionary whose definition is **fully comprehensible to you** (100% of its kanji on your mature cards) wins — the search stops there (early exit).
+- If none passes, the definition with the highest comprehension score is used (maximal fallback).
 
-### How it Works
-- **Early Exit**: CompreDef checks dictionaries in the order you specify. If a dictionary provides a definition containing only kanji you already know (cards with interval > 0 in Anki), **the search stops immediately** and writes that definition to your note. This gives beginners simple definitions and saves massive CPU time.
-- **Maximal Definition Fallback**: If no definition has 100% known kanji, CompreDef selects the definition with the highest kanji comprehension score (the least complicated definition available).
-- **Zero LLM Dependency**: Operates completely offline, locally, and deterministically.
+**Recommended setup:** put the **richest dictionary you can comfortably read at the top** (e.g. 三省堂国語辞典), with simpler ones (e.g. 小学館例解学習国語) below as fallback. You get the richest definition you can actually read, falling back to simpler dictionaries exactly when needed — and as your kanji knowledge grows, more words naturally come from the richer sources.
+
+> The comprehension gate counts kanji characters only; kana words are not checked — so order the ladder by what you can genuinely read, not just decode.
 
 > For an in-depth mathematical specification and flowcharts, see the [Algorithm Specification Wiki (WIKI.md)](WIKI.md).
 
@@ -92,7 +91,7 @@ For a full release with an explicit version:
 3. Restart Anki again — the new code is active.
 4. Test the feature.
  
-The regression suite verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder exits early on the simplest comprehensible dictionary, cross-reference titles lose to real definitions, `.zip` archives produce byte-identical output to their unzipped folders, and Tab-to-Generate never overwrites an existing definition.
+The regression suite verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder respects user order and exits early on the first fully comprehensible dictionary, cross-reference titles lose to real definitions, `.zip` archives produce byte-identical output to their unzipped folders, and Tab-to-Generate never overwrites an existing definition.
 
 ---
 

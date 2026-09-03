@@ -4,8 +4,10 @@ gui.py - Configuration GUI for the CompreDef Anki add-on.
 Provides a PyQt dialog allowing users to:
 - Select the Target Note Type and map Target Word & Definition fields
   with intelligent automatic field matching.
-- Configure and order the Dictionary Ladder (drag-and-drop or Move Up/Down buttons)
-  from simplest (e.g. Children's) to advanced (e.g. monolingual comprehensive).
+- Configure and order the Dictionary Ladder (drag-and-drop or Move Up/Down
+  buttons). Order is pure user preference — dictionaries are tried top to
+  bottom and the first fully comprehensible definition wins (early exit).
+  Recommended: richest dictionary you can comfortably read at the top.
 """
 
 import os
@@ -169,16 +171,18 @@ class ConfigDialog(QDialog):
         # -------------------------------------------------------------
         # Dictionary Ladder Group
         # -------------------------------------------------------------
-        ladder_group = QGroupBox("Dictionary Ladder (Order of Complexity)")
+        ladder_group = QGroupBox("Dictionary Ladder (Order of Preference)")
         ladder_layout = QVBoxLayout()
         ladder_group.setLayout(ladder_layout)
 
         desc_label = QLabel(
-            "Dictionaries are searched in order from top to bottom.\n"
-            "• Top = Simplest (Children's / Elementary dictionaries)\n"
-            "• Bottom = Advanced (Standard / Monolingual comprehensive)\n"
-            "If a fully comprehensible definition (100% known kanji) is found, "
-            "search stops immediately (early exit), saving CPU time."
+            "Dictionaries are tried in order from top to bottom; the first one\n"
+            "whose definition is fully comprehensible to you (100% known kanji)\n"
+            "wins (early exit). Order = your preference, not difficulty.\n"
+            "Recommended: put the richest dictionary you can comfortably read at\n"
+            "the top — you get its definitions whenever you can read them, and\n"
+            "fall through to simpler ones when you can't.\n"
+            "Note: the gate counts kanji only; kana words are not checked."
         )
         desc_label.setStyleSheet("color: gray; font-size: 11px;")
         desc_label.setWordWrap(True)
@@ -215,7 +219,7 @@ class ConfigDialog(QDialog):
         buttons_vbox.addSpacing(10)
 
         self.move_up_btn = QPushButton("Move Up ↑")
-        self.move_up_btn.setToolTip("Move selected dictionary earlier in ladder (simpler / checked earlier)")
+        self.move_up_btn.setToolTip("Move selected dictionary earlier in ladder (tried earlier)")
         self.move_up_btn.clicked.connect(self._on_move_up)
         buttons_vbox.addWidget(self.move_up_btn)
 

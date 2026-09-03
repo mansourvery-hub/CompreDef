@@ -7,13 +7,19 @@ Build an Anki 2.1+ Python add-on named "CompreDef" that automatically generates 
 Rather than relying on non-deterministic external LLMs or single-dictionary lookups, CompreDef uses an ordered **Dictionary Ladder** of local JSON dictionaries (Yomitan format) paired with **Kanji Matrix Scoring**:
 
 1. **User-Configured Ladder**:
-   The user orders their dictionaries from simplest (e.g. Children's / Elementary) to most advanced (e.g. Standard, Comprehensive Monolingual).
+   The user orders their dictionaries freely; order is a *preference*, not
+   a difficulty rating. Dictionaries are tried top to bottom, and the
+   first dictionary whose definition passes the comprehension gate wins.
+   Recommended setup: put the richest dictionary you can comfortably read
+   at the top (e.g. a comprehensive monolingual like 三省堂国語辞典), with
+   simpler ones (e.g. 小学館例解学習国語) below as fallback. As your kanji
+   knowledge grows, more words will be defined by the richer dictionaries.
 
 2. **Early Exit (Short-Circuit Evaluation)**:
-   The generator evaluates candidate definitions dictionary-by-dictionary in user order. If a dictionary produces a definition where 100% of kanji are known to the user (present on Anki cards with `interval > 0`), the search terminates immediately and writes that definition. This delivers simpler definitions to beginners and avoids unnecessary processing.
+   The generator evaluates candidate definitions dictionary-by-dictionary in user order. If a dictionary produces a definition where 100% of kanji are known to the user (present on Anki cards with `interval > 0`), the search terminates immediately and writes that definition. The gate counts kanji characters only — kana words are not checked — so the ladder order is the user's control against definitions that pass the gate but are still stylistically too hard. This avoids unnecessary processing.
 
 3. **Maximal Definition Fallback**:
-   If no dictionary yields a 100% known definition, the algorithm returns the maximal definition (the definition with the highest kanji comprehension score / least complicated) across all candidate definitions.
+   If no dictionary yields a 100% known definition, the algorithm returns the maximal definition (the definition with the highest kanji comprehension score / least complicated) across all candidate definitions. This fallback is order-independent.
 
 ## Install-Time Indexing (THE core performance architecture)
 
