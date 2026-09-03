@@ -77,14 +77,20 @@ Prefer a live checkout while developing? Symlink the repo instead of installing 
 ln -sfn /path/to/CompreDef ~/.local/share/Anki2/addons21/CompreDef
 ```
 
-For test + commit + push in one go:
+For test + commit + push + full release in one go:
 ```bash
-./scripts/ci.sh
+./scripts/ci.sh          # → GitHub Release + AnkiWeb upload via CI
 ```
-For a full release (tests, package, tag, GitHub Release with the `.ankiaddon`):
+For a full release with an explicit version:
 ```bash
 ./scripts/release.sh [vX.Y.Z]
 ```
+
+**Testing a released change (no manual installs):**
+1. Restart Anki — the add-on update check fires.
+2. Anki detects the new version → "Update All" / auto-installs (~1s download).
+3. Restart Anki again — the new code is active.
+4. Test the feature.
  
 The regression suite verifies (among others) that definitions stay **rich Yomitan HTML** (never plain text), furigana readings never pollute kanji scoring, the dictionary ladder exits early on the simplest comprehensible dictionary, cross-reference titles lose to real definitions, `.zip` archives produce byte-identical output to their unzipped folders, and Tab-to-Generate never overwrites an existing definition.
 

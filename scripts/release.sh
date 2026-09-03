@@ -1,10 +1,20 @@
 #!/bin/bash
 set -e
 
-# CompreDef Release Script
-# Runs tests, packages the .ankiaddon (via scripts/build.sh — no release
-# side effects there), tags the git commit, pushes to remote, and publishes
-# a GitHub Release with the .ankiaddon asset.
+# CompreDef Release Script — ONE command, full pipeline:
+#
+#   ./scripts/release.sh [vX.Y.Z]
+#
+#   tests → package .ankiaddon → commit → push → tag → GitHub Release
+#     → CI uploads to AnkiWeb (see .github/workflows/upload-to-ankiweb.yml)
+#
+# After CI finishes, the user's test loop is exactly:
+#   1. restart Anki            (addon update check fires)
+#   2. Anki shows "Update All" / auto-updates CompreDef in ~1s
+#   3. restart Anki            (new code active)
+#   4. test the change
+# No manual .ankiaddon install is needed once the addon is installed
+# from AnkiWeb (id 1619602654) — updates flow through automatically.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -86,10 +96,36 @@ else
 1. Download **\`CompreDef.ankiaddon\`** below.
 2. In Anki, go to **Tools → Add-ons → Install from file...**
 3. Select \`CompreDef.ankiaddon\` and restart Anki.
-4. Open **Tools → Add-ons → CompreDef → Config** to configure your note fields and dictionary ladder."
+4. Open **Tools → Add-ons → CompreDef → Config** to configure your note fields and dictionary ladder.
+
+Already installed from AnkiWeb? Just restart Anki twice (update check → install → restart) and the new version is active."
+fi
+
+echo "=== [5/5] Waiting for AnkiWeb upload workflow ==="
+# The release 'published' event triggers .github/workflows/upload-to-ankiweb.yml,
+# which pushes the .ankiaddon to AnkiWeb. Surface its result here so a failed
+# upload is never silently missed (it failed silently once already).
+sleep 5
+RUN_ID=$(gh run list --workflow=upload-to-ankiweb.yml --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
+if [ -n "$RUN_ID" ]; then
+    if gh run watch "$RUN_ID" --exit-status >/dev/null 2>&1; then
+        echo "AnkiWeb upload: SUCCESS (run $RUN_ID)"
+        echo "AnkiWeb page: https://ankiweb.net/shared/info/1619602654"
+    else
+        echo "WARNING: AnkiWeb upload workflow FAILED (run $RUN_ID)."
+        echo "Check: gh run view $RUN_ID --log-failed"
+        echo "Common cause: ANKI_WEB_USERNAME / ANKI_WEB_PASSWORD secrets missing:"
+        echo "  gh secret set ANKI_WEB_USERNAME; gh secret set ANKI_WEB_PASSWORD"
+        gh run view "$RUN_ID" --log-failed 2>/dev/null | tail -20 || true
+        exit 1
+    fi
+else
+    echo "NOTE: could not query workflow runs (gh run list failed)."
+    echo "Verify manually: gh run list --workflow=upload-to-ankiweb.yml"
 fi
 
 echo "======================================================================"
-echo "SUCCESS: CompreDef $TAG release published with ready-to-install extension!"
+echo "SUCCESS: CompreDef $TAG released — GitHub + AnkiWeb"
+echo "User test loop: restart Anki → update → restart Anki → test"
 echo "Release URL: $(gh release view "$TAG" --json url -q .url)"
 echo "======================================================================"
