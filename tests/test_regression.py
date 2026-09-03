@@ -1488,52 +1488,52 @@ def test_real_dictionary_smoke() -> None:
 def test_no_undefined_names_in_shipped_modules() -> None:
     """
     Static guard for modules that cannot be imported in this suite
-    (gui.py needs real Qt): every bare name a shipped module loads must
-    be defined, imported, or a builtin. Guards the production crash:
+    (gui.py needs real Qt): every name is resolved with the same scope
+    analysis the compiler uses (symtable), so cross-function globals,
+    closures, comprehensions and imports are all handled precisely.
+    Guards the production crash:
         NameError: name 'get_single_dictionary' is not defined
     (gui.py called it without importing it — invisible to every other
     test because the module never imports without Qt).
     """
-    import ast
     import builtins
     import glob as _glob
+    import symtable
     allowed = set(dir(builtins)) | {"__name__", "__package__"}
     for path in sorted(_glob.glob(os.path.join(REPO_ROOT, "*.py"))):
-        tree = ast.parse(open(path, encoding="utf-8").read())
-        defined, loaded = set(), set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for a in node.names:
-                    defined.add((a.asname or a.name).split(".")[0])
-            elif isinstance(node, ast.ImportFrom):
-                for a in node.names:
-                    defined.add(a.asname or a.name)
-            elif isinstance(node,
-                           (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                defined.add(getattr(node, "name", None))
-                for arg in list(node.args.args) + list(node.args.kwonlyargs):
-                    defined.add(arg.arg)
-                if node.args.vararg:
-                    defined.add(node.args.vararg.arg)
-                if node.args.kwarg:
-                    defined.add(node.args.kwarg.arg)
-            elif isinstance(node, ast.ClassDef):
-                defined.add(node.name)
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                defined.add(node.id)
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                loaded.add(node.id)
-            elif isinstance(node, ast.ExceptHandler) and node.name:
-                defined.add(node.name)
-        defined.discard(None)
-        missing = sorted(
-            n for n in loaded - defined - allowed if not n.startswith("_")
-        )
+        src = open(path, encoding="utf-8").read()
+        table = symtable.symtable(src, path, "exec")
+        module_bound = {
+            s.get_name() for s in table.get_symbols()
+            if s.is_assigned() or s.is_imported() or s.is_namespace()
+        }
+        missing = set()
+
+        def check_scope(scope) -> None:
+            for s in scope.get_symbols():
+                name = s.get_name()
+                if name.startswith("_") or name in allowed:
+                    continue
+                if not s.is_referenced() or s.is_namespace():
+                    continue
+                if scope.get_type() == "module":
+                    if not (s.is_assigned() or s.is_imported()):
+                        missing.add(name)
+                    continue
+                if s.is_local() or s.is_free() or s.is_imported():
+                    continue
+                if name in module_bound:
+                    continue
+                missing.add(name)
+            for child in scope.get_children():
+                check_scope(child)
+
+        check_scope(table)
         check(
             f"static-names: {os.path.basename(path)} "
             "has no undefined names",
             not missing,
-            ", ".join(missing),
+            ", ".join(sorted(missing)),
         )
 
 def test_package_relative_imports() -> None:
