@@ -1,10 +1,15 @@
 """
 yomitan.py - Minimal Yomitan API fallback for CompreDef.
 
-Uses Yomitan's native-messaging HTTP bridge (yomitan-api) via POST /termEntries
-(split into SINGLE definitions so the ladder can pick the best one) with
-fallback to /ankiFields for kanji. When CompreDef has no local dictionary
-result, we ask Yomitan instead of returning None.
+Uses Yomitan's native-messaging HTTP bridge (yomitan-api) via POST /ankiFields
+to fetch beautiful Yomitan HTML directly when CompreDef has no local dictionary
+result. This is a fail-safe: if the local ladder yields nothing, we ask Yomitan
+instead of returning None.
+
+NOTE: the per-definition split experiment (/termEntries, one entry per
+definition so the ladder returns ONLY the best single definition) lives on the
+`yomitan-single-def` branch. Master intentionally stays on the proven
+/ankiFields path until the branch version is verified live.
 
 No second index is built — Yomitan owns the dictionaries. CompreDef stays fast
 by caching per-word results and short-circuiting when Yomitan is unavailable.
@@ -18,7 +23,7 @@ Performance contract (user explicitly asked to think carefully):
   the browser is closed — after the first ECONNREFUSED we skip the rest.
 - Per-word cache (5 min) so repeated lookups for the same term are instant.
 - Lazy health check: no separate /serverVersion ping on every generate; the
-  termEntries call itself is the probe. Availability is cached from its result.
+  ankiFields call itself is the probe. Availability is cached from its result.
 """
 
 import json
@@ -31,10 +36,8 @@ from typing import List, Dict, Tuple, Optional
 # Dual-context sibling imports (see core.py for why)
 if __package__:
     from .models import DictionaryEntry
-    from .renderer import render_yomitan_definition_html
 else:
     from models import DictionaryEntry
-    from renderer import render_yomitan_definition_html
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -189,101 +192,6 @@ def _normalize_reading(reading: str) -> str:
     return re.sub(r"[\s\-・.。_ー()()「」【】]", "", "".join(out))
 
 
-def _entries_from_term_entries(
-    data: object,
-    word: str,
-    reading: str,
-    reading_norm: str,
-) -> List[DictionaryEntry]:
-    """Splits a /termEntries response into SINGLE-definition entries.
-
-    /ankiFields returns one glossary HTML containing ALL dictionaries'
-    definitions glued together, so the ladder can only score the blob as a
-    whole. /termEntries instead returns structured per-dictionary definitions
-    which we render one-by-one — then engine.py scores each and returns only
-    the best single definition.
-    """
-    # Accept several shapes: {"dictionaryEntries": [...]}, plain list, or
-    # {"result": [...]} from different yomitan-api versions.
-    entries_raw: object = []
-    if isinstance(data, dict):
-        for key in ("dictionaryEntries", "result", "entries"):
-            val = data.get(key)
-            if isinstance(val, list) and val:
-                entries_raw = val
-                break
-        # Single-entry dict (not wrapped in a list)?
-        if not entries_raw and data.get("type") in ("term", "kanji"):
-            entries_raw = [data]
-    elif isinstance(data, list):
-        entries_raw = data
-
-    if not isinstance(entries_raw, list) or not entries_raw:
-        return []
-
-    result: List[DictionaryEntry] = []
-    for dent in entries_raw:
-        if not isinstance(dent, dict):
-            continue
-        # Reading filter at headword level: keep entry only if one of its
-        # headword readings matches (handles 先ず まず vs せんず).
-        if reading_norm:
-            headwords = dent.get("headwords")
-            if isinstance(headwords, list) and headwords:
-                matched = False
-                for hw in headwords:
-                    if not isinstance(hw, dict):
-                        continue
-                    for rk in ("reading", "term"):
-                        rv = hw.get(rk)
-                        if isinstance(rv, str) and rv and _normalize_reading(rv) == reading_norm:
-                            matched = True
-                            break
-                    if matched:
-                        break
-                if not matched:
-                    continue
-
-        definitions = dent.get("definitions")
-        if not isinstance(definitions, list) or not definitions:
-            continue
-        for defi in definitions:
-            if not isinstance(defi, dict):
-                continue
-            dict_title = defi.get("dictionary")
-            if not isinstance(dict_title, str) or not dict_title:
-                dict_title = dent.get("dictionary") if isinstance(dent.get("dictionary"), str) else "Yomitan"
-            blocks = defi.get("entries")
-            if not isinstance(blocks, list) or not blocks:
-                # Some versions put the content directly on the definition
-                blocks = [defi]
-            for block in blocks:
-                try:
-                    rendered = render_yomitan_definition_html(block)
-                except Exception:
-                    continue
-                if not rendered or not rendered.strip():
-                    continue
-                # Use headword term when available for nicer DictionaryEntry
-                term = word
-                try:
-                    hws = dent.get("headwords")
-                    if isinstance(hws, list) and hws and isinstance(hws[0], dict):
-                        t0 = hws[0].get("term")
-                        if isinstance(t0, str) and t0.strip():
-                            term = t0.strip()
-                except Exception:
-                    pass
-                result.append(DictionaryEntry(
-                    word=term,
-                    reading=reading,
-                    definition=rendered,
-                    dictionary_title=dict_title,
-                    dictionary_path="yomitan://api",
-                ))
-    return result
-
-
 def fetch_yomitan_definitions(
     word: str,
     reading: str = "",
@@ -291,12 +199,10 @@ def fetch_yomitan_definitions(
     timeout: float = YOMITAN_TIMEOUT,
     base_url: Optional[str] = None,
 ) -> List[DictionaryEntry]:
-    """Fetches definitions from Yomitan, ONE entry per definition.
+    """Fetches definitions from Yomitan via POST /ankiFields.
 
-    Primary path is POST /termEntries (structured, per-dictionary) so the
-    ladder can score each definition separately and return only the best
-    single one. Falls back to /ankiFields for kanji lookups.
-    Returns [] on any failure — never raises.
+    Returns a list of DictionaryEntry (definition = Yomitan's beautiful HTML).
+    Returns [] on any failure or when Yomitan has no entry — never raises.
 
     Caching:
     - Per-word (word, reading, max_entries) cached 5 min.
@@ -326,36 +232,9 @@ def fetch_yomitan_definitions(
     if _is_yomitan_recently_unavailable():
         return []
 
-    # Primary: /termEntries — structured per-definition data.
-    term_data = _post_json("/termEntries", {"term": word}, timeout=timeout, base_url=effective_url)
-    if term_data is None:
-        # Network / Yomitan not running — cache empty result briefly to avoid
-        # hammering in bulk (word cache with empty list)
-        with _word_lock:
-            _word_cache[cache_key] = (_now(), [])
-        return []
-
-    # Bridge-level error dict (e.g. 502 Yomitan not connected) — don't
-    # waste two more round-trips on fallbacks, just fail fast.
-    if isinstance(term_data, dict) and "error" in term_data and "dictionaryEntries" not in term_data:
-        with _word_lock:
-            _word_cache[cache_key] = (_now(), [])
-        return []
-
-    split = _entries_from_term_entries(term_data, word, reading, reading_norm)
-    if split:
-        # Respect max_entries cap (termEntries has no server-side cap)
-        if len(split) > max_entries:
-            split = split[:max_entries]
-        with _word_lock:
-            _word_cache[cache_key] = (_now(), split)
-        return split
-    # NOTE: empty split does NOT return yet — it may mean "term not found"
-    # (e.g. single kanji like 口 stored as kanji entry), so fall through to
-    # the /ankiFields fallback below instead of caching [].
-
-    # Fallback: /ankiFields term query (single glossary blob per headword).
-    # Only used when /termEntries yields nothing splittable.
+    # Build ankiFields request — this is Yomitan's rendered HTML path
+    # so CompreDef gets the beautiful glossary without re-implementing rendering.
+    # We request reading+expression markers to allow reading disambiguation.
     af_payload = {
         "text": word,
         "type": "term",
@@ -364,6 +243,12 @@ def fetch_yomitan_definitions(
         "includeMedia": False,
     }
     af_data = _post_json("/ankiFields", af_payload, timeout=timeout, base_url=effective_url)
+    if af_data is None:
+        # Network / Yomitan not running — cache empty result briefly to avoid
+        # hammering in bulk (word cache with empty list)
+        with _word_lock:
+            _word_cache[cache_key] = (_now(), [])
+        return []
     # Response: {"fields": [{"expression": "...", "reading": "...", "glossary": "<div>..."}]}
     fields = af_data.get("fields") if isinstance(af_data, dict) else None
     # Fallback for single kanji like "口": Yomitan may store it as kanji entry, not term.

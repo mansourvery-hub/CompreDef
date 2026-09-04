@@ -348,16 +348,28 @@ def _manifest_install_file(manifest: str, path: str) -> None:
     with open(os.path.join(path, NAME + ".json"), "w", encoding="utf-8") as f:
         f.write(manifest)
 
+def _is_browser_launched(cmdline: str) -> bool:
+    """True if the bridge was launched by a browser (has extension-origin argv).
+
+    Chrome/Chromium/Brave/Firefox launch native hosts with the calling
+    origin appended (e.g. `.../yomitan_api.py chrome-extension://<id>/`).
+    Our old standalone autostart ran bare (`python3 -u yomitan_api.py`).
+    Only the bare ones are safe to kill — killing a browser-launched bridge
+    destroys a LIVE Yomitan connection (the v1.0.34 mistake).
+    """
+    return "chrome-extension://" in cmdline or "moz-extension://" in cmdline
+
+
 def _kill_standalone_bridge() -> str:
-    """Kills any standalone bridge we previously autostarted.
+    """Kills only TRUE standalone orphans (bare cmdline, no extension argv).
 
     A standalone bridge holds port 19633 with stdin=/dev/null, so EVERY
-    /ankiFields returns 502 and — worse — the browser-launched bridge
-    cannot bind (Address already in use). After removing autostart we must
-    clean up orphans from older versions.
+    /ankiFields returns 502 and the browser-launched bridge cannot bind.
+    Browser-launched bridges (with extension-origin argv) are NEVER touched.
     """
     import subprocess
     killed = []
+    skipped_live = 0
     try:
         # Find PIDs listening on 19633 via /proc (Linux) or lsof fallback
         if sys.platform != "win32":
@@ -376,28 +388,37 @@ def _kill_standalone_bridge() -> str:
                     try:
                         with open(f"/proc/{pid}/cmdline", "rb") as f:
                             cmd = f.read().decode(errors="ignore")
-                        if "yomitan_api.py" in cmd:
-                            os.kill(pid, 15)
-                            killed.append(pid)
+                        if "yomitan_api.py" not in cmd:
+                            continue
+                        if _is_browser_launched(cmd):
+                            skipped_live += 1
+                            continue
+                        os.kill(pid, 15)
+                        killed.append(pid)
                     except Exception:
                         continue
             except Exception:
                 pass
-            # Fallback: kill by cmdline scan
-            if not killed:
+            # Fallback: kill by cmdline scan (same browser-launch guard)
+            if not killed and not skipped_live:
                 try:
                     out = subprocess.run(
-                        ["pgrep", "-f", "yomitan_api.py"],
+                        ["pgrep", "-af", "yomitan_api.py"],
                         capture_output=True, text=True, timeout=3,
                     )
                     for line in out.stdout.splitlines():
-                        line = line.strip()
-                        if line.isdigit():
-                            try:
-                                os.kill(int(line), 15)
-                                killed.append(int(line))
-                            except Exception:
-                                continue
+                        parts = line.strip().split(None, 1)
+                        if not parts or not parts[0].isdigit():
+                            continue
+                        cmd = parts[1] if len(parts) > 1 else ""
+                        if _is_browser_launched(cmd):
+                            skipped_live += 1
+                            continue
+                        try:
+                            os.kill(int(parts[0]), 15)
+                            killed.append(int(parts[0]))
+                        except Exception:
+                            continue
                 except Exception:
                     pass
         # Remove stale crowbar so next browser launch doesn't SIGTERM a dead PID
@@ -414,6 +435,8 @@ def _kill_standalone_bridge() -> str:
         pass
     if killed:
         return f"killed stale standalone bridge PID(s) {killed} holding port 19633"
+    if skipped_live:
+        return "left browser-launched bridge alone (live Yomitan connection)"
     return "no stale standalone bridge found"
 
 
