@@ -149,7 +149,22 @@ class ConfigDialog(QDialog):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("CompreDef Configuration")
+        # Show version in title so user can verify update instantly
+        try:
+            import json as _j
+            _v = "?"
+            _mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest.json")
+            if os.path.isfile(_mp):
+                with open(_mp, "r", encoding="utf-8") as _mf:
+                    _v = _j.load(_mf).get("human_version") or _v
+            if _v == "?":
+                _vp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+                if os.path.isfile(_vp):
+                    with open(_vp, "r", encoding="utf-8") as _vf:
+                        _v = _vf.read().strip().lstrip("v")
+            self.setWindowTitle(f"CompreDef Configuration — v{_v}" if _v != "?" else "CompreDef Configuration")
+        except Exception:
+            self.setWindowTitle("CompreDef Configuration")
         self.resize(660, 680)
 
         self.addon_name = _get_addon_name()
@@ -424,6 +439,27 @@ class ConfigDialog(QDialog):
         button_box.accepted.connect(self._save_and_accept)
         button_box.rejected.connect(self.reject)
         main_layout.addWidget(button_box)
+
+        # Footer: version + AnkiWeb link (user asked how to check version easily)
+        try:
+            import json as _json
+            _ver = "?"
+            _manifest_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest.json")
+            if os.path.isfile(_manifest_path):
+                with open(_manifest_path, "r", encoding="utf-8") as _mf:
+                    _ver = _json.load(_mf).get("human_version") or _ver
+            if _ver == "?":
+                _ver_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+                if os.path.isfile(_ver_path):
+                    with open(_ver_path, "r", encoding="utf-8") as _vf:
+                        _ver = _vf.read().strip().lstrip("v")
+            footer = QLabel(f'CompreDef v{_ver} — <a href="https://ankiweb.net/shared/info/1619602654">AnkiWeb</a> • <a href="https://github.com/mansourvery-hub/CompreDef">GitHub</a>')
+            footer.setOpenExternalLinks(True)
+            footer.setStyleSheet("color: gray; font-size: 10px;")
+            footer.setAlignment(Qt.AlignmentFlag.AlignCenter if hasattr(Qt, "AlignmentFlag") else Qt.AlignCenter)
+            main_layout.addWidget(footer)
+        except Exception:
+            pass
 
     def _get_field_names(self, note_type_name: str) -> List[str]:
         """Retrieves field names for the given note type using mw.col.models."""
