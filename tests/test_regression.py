@@ -1171,9 +1171,14 @@ def test_tab_generate_decisions() -> None:
     class FakeNote:
         """Mimics anki.notes.Note field access for the decision core."""
 
-        def __init__(self, fields: dict, nid: int = 123):
+        def __init__(self, fields: dict, nid: int = 123, note_type: str = ""):
             self._fields = fields
             self.id = nid
+            self._note_type = note_type
+
+        def note_type(self):
+            """Mimics the non-deprecated note API for type-aware paths."""
+            return {"name": self._note_type} if self._note_type else {}
 
         def __contains__(self, name):
             return name in self._fields
@@ -1332,6 +1337,149 @@ def test_tab_generate_decisions() -> None:
     early_off = simulate_dialog_open({"dictionaries": ["/x"], "tab_generate": False})
     check("tab: early dialog save preserves explicit False",
           early_off["tab_generate"] is False)
+
+
+def test_multi_note_type_targeting() -> None:
+    """
+    Multi-note-type support: the 'targets' config shape maps EACH note
+    type to its own word/reading/definition fields, and every generation
+    path (editor button, bulk, Tab-to-Generate) routes through the same
+    resolver. Guards: correct mapping per type, unconfigured types never
+    generating, and full legacy single-type compatibility.
+    """
+    # Same stub+package machinery as test_tab_generate_decisions.
+    aqt_dir = os.path.join(FAKE_STUB_DIR, "aqt")
+    with open(os.path.join(aqt_dir, "browser.py"), "w") as f:
+        f.write("class Browser:  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "qt.py"), "w") as f:
+        f.write("class QMenu:  # stub\n    pass\n\nclass QKeySequence:  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "utils.py"), "w") as f:
+        f.write("def tooltip(*args, **kwargs):  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "gui_hooks.py"), "w") as f:
+        f.write(
+            "class _Hook:  # stub: append-only registry like the real one\n"
+            "    def __init__(self): self._hooks = []\n"
+            "    def append(self, fn): self._hooks.append(fn)\n"
+            "    def __call__(self, *a, **kw):\n"
+            "        r = None\n"
+            "        for fn in self._hooks:\n"
+            "            r = fn(*a, **kw)\n"
+            "        return r\n"
+            "editor_did_init_buttons = _Hook()\n"
+            "browser_menus_did_init = _Hook()\n"
+            "browser_will_show_context_menu = _Hook()\n"
+            "editor_did_load_note = _Hook()\n"
+            "editor_did_unfocus_field = _Hook()\n"
+            "editor_did_init = _Hook()\n"
+            "profile_did_open = _Hook()\n"
+        )
+    import importlib
+    import types
+    pkg_name = "compredef_addon"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [REPO_ROOT]
+        sys.modules[pkg_name] = pkg
+    else:
+        pkg = sys.modules[pkg_name]
+    sys.modules[f"{pkg_name}.generator"] = compredef_generator
+    sys.modules[f"{pkg_name}.parser"] = compredef_parser
+    if "db_utils" in sys.modules:
+        sys.modules[f"{pkg_name}.db_utils"] = sys.modules["db_utils"]
+    else:
+        sys.modules[f"{pkg_name}.db_utils"] = importlib.import_module("db_utils")
+
+    eb = importlib.import_module(f"{pkg_name}.editor_browser")
+
+    class Note:
+        def __init__(self, fields, type_name):
+            self._fields = fields
+            self.id = hash(type_name) % 10_000
+            self._type = type_name
+
+        def note_type(self):
+            return {"name": self._type}
+
+        def __contains__(self, name):
+            return name in self._fields
+
+        def __getitem__(self, name):
+            return self._fields[name]
+
+        def keys(self):
+            return list(self._fields)
+
+    targets_config = {
+        "targets": {
+            "JP Mining Note": {
+                "word_field": "Word", "reading_field": "Furigana",
+                "definition_field": "Definition",
+            },
+            "Animecards": {
+                "word_field": "Expression", "reading_field": "",
+                "definition_field": "Meaning",
+            },
+        },
+        "dictionaries": ["/some/dict"],
+    }
+
+    # 1. Each configured type resolves to its OWN field mapping.
+    r1 = eb.resolve_fields_for_note(
+        Note({"Word": "x", "Furigana": "f", "Definition": "d"},
+             "JP Mining Note"), targets_config)
+    check("multi: JP Mining Note resolves its mapping",
+          r1 == {"word_field": "Word", "reading_field": "Furigana",
+                 "definition_field": "Definition"}, f"got {r1}")
+    r2 = eb.resolve_fields_for_note(
+        Note({"Expression": "x", "Meaning": "m"}, "Animecards"),
+        targets_config)
+    check("multi: Animecards resolves its mapping",
+          r2 == {"word_field": "Expression", "reading_field": "",
+                 "definition_field": "Meaning"}, f"got {r2}")
+
+    # 2. Unconfigured types never generate (bulk/editor show tooltips).
+    r3 = eb.resolve_fields_for_note(
+        Note({"Expression": "x"}, "Kaishi 1.5k"), targets_config)
+    check("multi: unconfigured type is rejected", r3 is None, f"got {r3}")
+
+    # 3. A target missing word or definition fields cannot generate.
+    broken = dict(targets_config)
+    broken["targets"] = {"Ghost": {"word_field": "", "reading_field": "",
+                                   "definition_field": "Def"}}
+    r4 = eb.resolve_fields_for_note(Note({"Def": "d"}, "Ghost"), broken)
+    check("multi: incomplete mapping is rejected", r4 is None, f"got {r4}")
+
+    # 4. Legacy single-type configs behave exactly as before.
+    legacy_config = {"note_type": "Japanese", "word_field": "Expression",
+                     "reading_field": "furigana",
+                     "definition_field": "Definition"}
+    r5 = eb.resolve_fields_for_note(
+        Note({"Expression": "x"}, "Japanese"), legacy_config)
+    check("multi: legacy config resolves unchanged",
+          r5 == {"word_field": "Expression", "reading_field": "furigana",
+                 "definition_field": "Definition"}, f"got {r5}")
+    r6 = eb.resolve_fields_for_note(
+        Note({"Expression": "x"}, "Other"), legacy_config)
+    check("multi: legacy config still excludes other types",
+          r6 is None, f"got {r6}")
+
+    # 5. Tab-to-Generate follows the same multi-type rules.
+    mining_note = Note({"Word": "x", "Furigana": "f", "Definition": ""},
+                       "JP Mining Note")
+    check("multi: tab fires on configured type's word field",
+          eb._should_auto_generate(mining_note, "Word", targets_config))
+    check("multi: tab ignores non-word fields of same type",
+          not eb._should_auto_generate(mining_note, "Furigana",
+                                       targets_config))
+    unconfigured_note = Note({"Expression": "x", "Meaning": ""},
+                             "Kaishi 1.5k")
+    check("multi: tab never fires on unconfigured type",
+          not eb._should_auto_generate(unconfigured_note, "Expression",
+                                       targets_config))
+    check("multi: tab legacy config still works",
+          eb._should_auto_generate(
+              Note({"Expression": "x", "Definition": ""}, "Japanese"),
+              "Expression", legacy_config))
 
 
 # ---------------------------------------------------------------------------
@@ -1889,6 +2037,7 @@ def main() -> int:
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()
         test_tab_generate_decisions()
+        test_multi_note_type_targeting()
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.

@@ -43,10 +43,12 @@ CompreDef frees you from the circular lookup trap of Japanese monolingual dictio
 
 ## Configuration
 
-1. **Target Note Type**: Choose your Japanese note type (e.g., `Japanese`, `Mining`).
-2. **Target Word Field**: Field containing the Japanese word to define (e.g., `Expression`).
-3. **Definition Field**: Field to populate with the chosen definition.
-4. **Dictionary Ladder**:
+1. **Note Types & Field Mappings**: Check every note type CompreDef should
+   generate definitions for (e.g., `Japanese`, `Mining`, `Animecards`).
+   Select a type's row to map its fields — each type keeps its **own**
+   Word / Reading / Definition fields, auto-matched from the type's
+   schema. Unchecked types are ignored by generation.
+2. **Dictionary Ladder**:
    - Click **Add Zip Archive...** to select a Yomitan `.zip` file.
    - Click **Add Folder...** to select an unzipped dictionary folder.
    - Click **Scan Folder...** to select a parent folder containing multiple dictionaries (both `.zip` files and subfolders).

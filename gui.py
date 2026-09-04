@@ -142,15 +142,36 @@ class ConfigDialog(QDialog):
         self.setLayout(main_layout)
 
         # -------------------------------------------------------------
-        # Note Type & Field Mappings Group
+        # Note Types & Field Mappings Group
         # -------------------------------------------------------------
-        mapping_group = QGroupBox("Note Type & Field Mappings")
-        mapping_layout = QFormLayout()
-        mapping_group.setLayout(mapping_layout)
+        mapping_group = QGroupBox("Note Types & Field Mappings")
+        outer_mapping_layout = QVBoxLayout()
+        mapping_group.setLayout(outer_mapping_layout)
 
-        self.note_type_combo = QComboBox()
-        self.note_type_combo.currentTextChanged.connect(self._on_note_type_changed)
-        mapping_layout.addRow("Target Note Type:", self.note_type_combo)
+        intro = QLabel(
+            "Check every note type CompreDef should generate definitions\n"
+            "for, then map its fields below. Unchecked types are ignored;\n"
+            "each type keeps its own field mapping."
+        )
+        intro.setStyleSheet("color: gray; font-size: 11px;")
+        intro.setWordWrap(True)
+        outer_mapping_layout.addWidget(intro)
+
+        # Checkable list of all note types (same interaction pattern as
+        # the dictionary ladder: checkbox = enabled, click = configure).
+        self.note_types_list = QListWidget()
+        self.note_types_list.setToolTip(
+            "Check a note type to make it a generation target.\n"
+            "Select a row to view/edit its field mapping below."
+        )
+        self.note_types_list.itemChanged.connect(self._on_type_item_changed)
+        self.note_types_list.currentRowChanged.connect(
+            lambda _row: self._on_type_selected()
+        )
+        outer_mapping_layout.addWidget(self.note_types_list)
+
+        mapping_layout = QFormLayout()
+        outer_mapping_layout.addLayout(mapping_layout)
 
         self.word_field_combo = QComboBox()
         mapping_layout.addRow("Target Word Field:", self.word_field_combo)
@@ -305,7 +326,12 @@ class ConfigDialog(QDialog):
         return [field["name"] for field in model["flds"]]
 
     def _on_note_type_changed(self, note_type_name: str) -> None:
-        """Dynamically populates and auto-matches field dropdowns."""
+        """Populates the field dropdowns for a note type and auto-matches.
+
+        Called when a type's row is selected or checked for the first
+        time. Auto-match runs only for types without saved mappings —
+        saved mappings survive every re-selection untouched.
+        """
         fields = self._get_field_names(note_type_name)
 
         # Store previous selections
@@ -328,7 +354,7 @@ class ConfigDialog(QDialog):
 
         # Compute best matches for new fields
         auto_word = _find_best_field_match(fields, _TARGET_WORD_KEYWORDS)
-        
+
         # Prefer dedicated reading/furigana field, else word field itself
         auto_reading = _find_best_field_match(fields, _READING_FIELD_KEYWORDS) or \
                        (auto_word if auto_word else "")
@@ -341,6 +367,110 @@ class ConfigDialog(QDialog):
         self.word_field_combo.setCurrentText(prev_word if prev_word in fields else (auto_word or ""))
         self.reading_field_combo.setCurrentText(prev_reading if prev_reading in fields else (auto_reading or ""))
         self.definition_field_combo.setCurrentText(prev_def if prev_def in fields else (auto_def or ""))
+
+    # ------------------------------------------------------------------
+    # Multi-note-type state: {type_name: {'word_field', 'reading_field',
+    # 'definition_field', '_auto': True until user edits anything}}
+    # ------------------------------------------------------------------
+
+    def _load_type_mappings(self) -> None:
+        """
+        Populates the checkable note-type list and restores mappings
+        from config (multi-type 'targets' with legacy fallback).
+        """
+        self.type_mappings: Dict[str, Dict[str, str]] = {}
+        saved_targets = self.config.get("targets")
+        if isinstance(saved_targets, dict) and saved_targets:
+            for type_name, mapping in saved_targets.items():
+                if isinstance(mapping, dict):
+                    self.type_mappings[str(type_name)] = {
+                        "word_field": str(mapping.get("word_field", "") or ""),
+                        "reading_field": str(mapping.get("reading_field", "") or ""),
+                        "definition_field": str(mapping.get("definition_field", "") or ""),
+                        "_auto": False,
+                    }
+        elif self.config.get("note_type"):
+            # Legacy single-type config: one target, fields as configured.
+            self.type_mappings[str(self.config["note_type"])] = {
+                "word_field": str(self.config.get("word_field", "") or ""),
+                "reading_field": str(self.config.get("reading_field", "") or ""),
+                "definition_field": str(self.config.get("definition_field", "") or ""),
+                "_auto": False,
+            }
+
+        role = _user_role()
+        self.note_types_list.blockSignals(True)
+        self.note_types_list.clear()
+        if mw and mw.col:
+            for name in mw.col.models.all_names():
+                item = QListWidgetItem(name)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                checked = name in self.type_mappings
+                if hasattr(Qt, "CheckState"):
+                    item.setCheckState(
+                        Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                    )
+                else:  # PyQt5 fallback
+                    from aqt.qt import Checked, Unchecked  # type: ignore
+                    item.setCheckState(Checked if checked else Unchecked)
+                item.setData(role, name)
+                self.note_types_list.addItem(item)
+        self.note_types_list.blockSignals(False)
+
+    def _on_type_item_changed(self, item: QListWidgetItem) -> None:
+        """Checkbox toggled: track mapping edits per type."""
+        role = _user_role()
+        type_name = item.data(role)
+        if not type_name:
+            return
+        if hasattr(Qt, "CheckState"):
+            is_checked = item.checkState() == Qt.CheckState.Checked
+        else:  # PyQt5 fallback
+            from aqt.qt import Checked  # type: ignore
+            is_checked = item.checkState() == Checked
+        if is_checked and type_name not in self.type_mappings:
+            # First check: seed the mapping via auto-match (fields
+            # populate when the row is selected).
+            self.type_mappings[type_name] = {
+                "word_field": "", "reading_field": "",
+                "definition_field": "", "_auto": True,
+            }
+        elif not is_checked and type_name in self.type_mappings:
+            # Unchecking removes the mapping immediately (re-checking
+            # re-runs auto-match; the user said 'not this type').
+            del self.type_mappings[type_name]
+
+    def _on_type_selected(self) -> None:
+        """A row was selected: load that type's mapping into the form."""
+        item = self.note_types_list.currentItem()
+        if item is None:
+            return
+        role = _user_role()
+        type_name = item.data(role)
+        if not type_name:
+            return
+        # Remember the previously edited type's dropdown values.
+        self._stash_current_mapping()
+        self._active_type = type_name
+        self._on_note_type_changed(type_name)
+        mapping = self.type_mappings.get(type_name, {})
+        if mapping and not mapping.get("_auto"):
+            # Saved mapping wins over auto-match.
+            self.word_field_combo.setCurrentText(mapping.get("word_field", ""))
+            self.reading_field_combo.setCurrentText(mapping.get("reading_field", ""))
+            self.definition_field_combo.setCurrentText(mapping.get("definition_field", ""))
+
+    def _stash_current_mapping(self) -> None:
+        """Saves the visible dropdowns into the active type's mapping."""
+        active = getattr(self, "_active_type", None)
+        if not active or active not in self.type_mappings:
+            return
+        self.type_mappings[active].update({
+            "word_field": self.word_field_combo.currentText().strip(),
+            "reading_field": self.reading_field_combo.currentText().strip(),
+            "definition_field": self.definition_field_combo.currentText().strip(),
+            "_auto": False,
+        })
 
     def _refresh_item_labels(self) -> None:
         """Updates labels: '[n] Title ✓' and syncs checkbox state."""
@@ -609,31 +739,20 @@ class ConfigDialog(QDialog):
 
     def _load_config(self) -> None:
         """Populates form controls with current configuration values."""
-        if mw and mw.col:
-            all_note_types = mw.col.models.all_names()
-            self.note_type_combo.blockSignals(True)
-            self.note_type_combo.clear()
-            self.note_type_combo.addItems(all_note_types)
-            self.note_type_combo.blockSignals(False)
-
-        saved_note_type = self.config.get("note_type", "")
-        if saved_note_type and self.note_type_combo.findText(saved_note_type) != -1:
-            self.note_type_combo.setCurrentText(saved_note_type)
-
-        current_note_type = self.note_type_combo.currentText()
-        self._on_note_type_changed(current_note_type)
-
-        saved_word_field = self.config.get("word_field", "")
-        if saved_word_field and self.word_field_combo.findText(saved_word_field) != -1:
-            self.word_field_combo.setCurrentText(saved_word_field)
-
-        saved_reading_field = self.config.get("reading_field", "")
-        if saved_reading_field and self.reading_field_combo.findText(saved_reading_field) != -1:
-            self.reading_field_combo.setCurrentText(saved_reading_field)
-
-        saved_def_field = self.config.get("definition_field", "")
-        if saved_def_field and self.definition_field_combo.findText(saved_def_field) != -1:
-            self.definition_field_combo.setCurrentText(saved_def_field)
+        # Checkable note-type list + per-type mappings (multi-type mode)
+        self._load_type_mappings()
+        # Select the first checked type so the field form starts populated
+        for row in range(self.note_types_list.count()):
+            item = self.note_types_list.item(row)
+            role = _user_role()
+            checked = (
+                item.checkState() == Qt.CheckState.Checked
+                if hasattr(Qt, "CheckState")
+                else item.checkState() == 2
+            )
+            if checked:
+                self.note_types_list.setCurrentRow(row)
+                break
 
         # Load dictionary ladder
         saved_dicts = self.config.get("dictionaries", [])
@@ -655,6 +774,37 @@ class ConfigDialog(QDialog):
         # state on every add (crash safety), so the checkbox must already
         # carry its saved value by the time _add_dict_path saves.
 
+    def _collect_type_config(self) -> Dict[str, Any]:
+        """
+        Builds the note-type portion of the config: the multi-type
+        'targets' dict plus a legacy mirror (note_type + flat fields) of
+        the FIRST target so old configs and hand-edited config.json
+        files keep working.
+        """
+        self._stash_current_mapping()  # dropdowns -> active type
+        targets: Dict[str, Dict[str, str]] = {}
+        for type_name, mapping in self.type_mappings.items():
+            word = mapping.get("word_field", "")
+            def_f = mapping.get("definition_field", "")
+            # Only complete mappings can generate; incomplete ones are
+            # kept in the UI but not saved as targets.
+            if word and def_f:
+                targets[type_name] = {
+                    "word_field": word,
+                    "reading_field": mapping.get("reading_field", ""),
+                    "definition_field": def_f,
+                }
+        first_name = next(iter(targets), "")
+        first = targets.get(first_name, {})
+        return {
+            "targets": targets,
+            # Legacy mirror: first configured target in flat form.
+            "note_type": first_name,
+            "word_field": first.get("word_field", ""),
+            "reading_field": first.get("reading_field", ""),
+            "definition_field": first.get("definition_field", ""),
+        }
+
     def _save_and_accept(self) -> None:
         """Saves settings to Anki config and closes dialog."""
         role = _user_role()
@@ -664,10 +814,7 @@ class ConfigDialog(QDialog):
         ]
 
         updated_config = {
-            "note_type": self.note_type_combo.currentText().strip(),
-            "word_field": self.word_field_combo.currentText().strip(),
-            "reading_field": self.reading_field_combo.currentText().strip(),
-            "definition_field": self.definition_field_combo.currentText().strip(),
+            **self._collect_type_config(),
             "dictionaries": ordered_dicts,
             # Disabled paths: kept in `dictionaries` for order preservation,
             # listed here so generation skips them.
@@ -698,10 +845,7 @@ class ConfigDialog(QDialog):
                 for i in range(self.dict_list.count())
             ]
             mw.addonManager.writeConfig(self.addon_name, {
-                "note_type": self.note_type_combo.currentText().strip(),
-                "word_field": self.word_field_combo.currentText().strip(),
-                "reading_field": self.reading_field_combo.currentText().strip(),
-                "definition_field": self.definition_field_combo.currentText().strip(),
+                **self._collect_type_config(),
                 "dictionaries": ordered_dicts,
                 "disabled_dictionaries": sorted(self.disabled_dicts),
                 "tab_generate": self.tab_generate_check.isChecked(),

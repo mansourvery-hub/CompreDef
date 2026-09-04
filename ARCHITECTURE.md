@@ -27,7 +27,10 @@ Implementation (provider.py -> LocalSQLiteProvider)
 ```
 
 ### Key Modules
-- `gui.py`, `editor_browser.py`: Anki-specific UI and hook logic.
+- `gui.py`, `editor_browser.py`: Anki-specific UI and hook logic. The
+  config GUI manages multiple note types ("targets": each checked type
+  keeps its own word/reading/definition field mapping); generation
+  paths resolve fields per note via `resolve_fields_for_note`.
 - `core.py`: Application wiring and singleton management.
 - `engine.py`: Implements the Dictionary Ladder algorithm.
 - `scoring.py`: Kanji comprehension scoring and reference filtering.

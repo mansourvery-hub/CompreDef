@@ -110,6 +110,49 @@ def _get_note_type_name(note) -> str:
     return ""
 
 
+def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    Returns {'word_field', 'reading_field', 'definition_field'} for this
+    note, or None when the note's type is not a configured target.
+
+    Config supports two shapes (the GUI writes both; legacy single-type
+    configs keep working untouched):
+
+    - 'targets': {note_type_name: {'word_field': ..., 'reading_field': ...,
+      'definition_field': ...}} — multi-note-type mode. The note's type
+      name is looked up directly; reading_field may be '' (optional).
+    - Legacy: flat 'note_type' + field names — applies ONLY to notes of
+      that single type, exactly as before.
+
+    Fields absent from the note are not an error here (callers report
+    friendlier messages); only a non-matching type yields None.
+    """
+    targets = config.get("targets")
+    if isinstance(targets, dict) and targets:
+        mapping = targets.get(_get_note_type_name(note))
+        if isinstance(mapping, dict):
+            resolved = {
+                "word_field": str(mapping.get("word_field", "") or ""),
+                "reading_field": str(mapping.get("reading_field", "") or ""),
+                "definition_field": str(mapping.get("definition_field", "") or ""),
+            }
+            # A target without a usable word/def pair cannot generate
+            if not resolved["word_field"] or not resolved["definition_field"]:
+                return None
+            return resolved
+        return None
+
+    # Legacy single-type config: applies only to that one type.
+    legacy_type = str(config.get("note_type", "") or "").strip()
+    if legacy_type and _get_note_type_name(note) != legacy_type:
+        return None
+    return {
+        "word_field": str(config.get("word_field", "") or ""),
+        "reading_field": str(config.get("reading_field", "") or ""),
+        "definition_field": str(config.get("definition_field", "") or ""),
+    }
+
+
 def _resolve_editor_note(editor) -> Optional[Any]:
     """
     Returns the current Note object from either editor generation.
@@ -151,23 +194,24 @@ def on_editor_generate_definition(editor) -> None:
         return
 
     config = _get_addon_config()
-    target_note_type = config.get("note_type", "")
-    word_field = config.get("word_field", "")
-    reading_field = config.get("reading_field", "")
-    def_field = config.get("definition_field", "")
     dictionaries = config.get("dictionaries", [])
     disabled_dictionaries = config.get("disabled_dictionaries", [])
     dictionary_folder = config.get("dictionary_folder", "")
 
-    # Validate note type match (both sides trimmed; empty config = all types)
-    note_model_name = _get_note_type_name(note)
-    if target_note_type and target_note_type.strip() and \
-            note_model_name != target_note_type.strip():
+    # Field mapping comes from the note's own type (multi-type 'targets'
+    # when configured, legacy single-type otherwise). Unconfigured types
+    # simply do not participate in generation.
+    fields = resolve_fields_for_note(note, config)
+    if fields is None:
         tooltip(
-            f"Note type '{note_model_name}' does not match configured target '{target_note_type}'.",
+            f"Note type '{_get_note_type_name(note)}' is not a configured CompreDef target.\n"
+            "Configure it under Tools -> CompreDef Configuration.",
             parent=editor.parentWindow,
         )
         return
+    word_field = fields["word_field"]
+    reading_field = fields["reading_field"]
+    def_field = fields["definition_field"]
 
     # Check field presence in note
     if word_field not in note:
@@ -375,8 +419,22 @@ def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any]) ->
     if not _tab_generate_enabled(config):
         return False
 
-    word_field = config.get("word_field", "")
-    def_field = config.get("definition_field", "")
+    # Multi-type mode: only fire when the note's type is a configured
+    # target AND its own word/definition fields are involved.
+    targets = config.get("targets")
+    if isinstance(targets, dict) and targets:
+        mapping = targets.get(_get_note_type_name(note))
+        if not isinstance(mapping, dict):
+            return False
+        word_field = str(mapping.get("word_field", "") or "")
+        def_field = str(mapping.get("definition_field", "") or "")
+    else:
+        # Legacy single-type config
+        legacy_type = str(config.get("note_type", "") or "").strip()
+        if legacy_type and _get_note_type_name(note) != legacy_type:
+            return False
+        word_field = config.get("word_field", "")
+        def_field = config.get("definition_field", "")
 
     if not word_field or not def_field or word_field == def_field:
         return False
@@ -491,10 +549,6 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
         return
 
     config = _get_addon_config()
-    target_note_type = config.get("note_type", "")
-    word_field = config.get("word_field", "")
-    reading_field = config.get("reading_field", "")
-    def_field = config.get("definition_field", "")
     dictionaries = config.get("dictionaries", [])
     disabled_dictionaries = config.get("disabled_dictionaries", [])
     dictionary_folder = config.get("dictionary_folder", "")
@@ -528,10 +582,16 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
             try:
                 note = mw.col.get_note(nid)
 
-                # Check note type match
-                if target_note_type and target_note_type.strip():
-                    if _get_note_type_name(note) != target_note_type.strip():
-                        continue
+                # Field mapping per note type (multi-type 'targets' or
+                # legacy single-type). Unconfigured types are skipped
+                # silently in bulk — the selection may span many types.
+                fields = resolve_fields_for_note(note, config)
+                if fields is None:
+                    skipped_count += 1
+                    continue
+                word_field = fields["word_field"]
+                reading_field = fields["reading_field"]
+                def_field = fields["definition_field"]
 
                 if word_field not in note or def_field not in note:
                     continue
