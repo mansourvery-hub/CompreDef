@@ -19,16 +19,91 @@ else:
 # Singletons for the application lifecycle
 _provider = None
 _generator = None
+_provider_source = None  # tracks which source the singleton was built for
+
+def _get_dictionary_source() -> str:
+    """Reads the user's chosen dictionary source from config."""
+    try:
+        from aqt import mw  # type: ignore
+        if mw and hasattr(mw, "addonManager"):
+            try:
+                name = mw.addonManager.addonFromModule(__name__)
+            except Exception:
+                name = None
+            if not name:
+                name = "1619602654"
+            cfg = mw.addonManager.getConfig(name)
+            if isinstance(cfg, dict):
+                src = str(cfg.get("dictionary_source") or "local").strip().lower()
+                if src in ("yomitan", "yomitan_api", "api"):
+                    return "yomitan"
+    except Exception:
+        pass
+    return "local"
+
+
+def _get_yomitan_url() -> str:
+    """Reads Yomitan API URL from config, defaulting to localhost:19633."""
+    try:
+        from aqt import mw  # type: ignore
+        if mw and hasattr(mw, "addonManager"):
+            try:
+                name = mw.addonManager.addonFromModule(__name__)
+            except Exception:
+                name = None
+            if not name:
+                name = "1619602654"
+            cfg = mw.addonManager.getConfig(name)
+            if isinstance(cfg, dict) and cfg.get("yomitan_url"):
+                url = str(cfg["yomitan_url"]).strip()
+                if url:
+                    return url.rstrip("/")
+    except Exception:
+        pass
+    return "http://127.0.0.1:19633"
+
 
 def get_provider():
-    global _provider
+    global _provider, _provider_source
+    src = _get_dictionary_source()
+    # Rebuild singleton if source changed (user toggled in GUI)
+    if _provider is not None and _provider_source != src:
+        _provider = None
+        # Also reset generator so it picks up new provider
+        global _generator
+        _generator = None
     if _provider is None:
-        # Replicate the old _get_cache_dir() logic
-        addon_dir = os.path.dirname(os.path.abspath(__file__))
-        cache_dir = os.path.join(addon_dir, "user_files", "cache")
-        os.makedirs(cache_dir, exist_ok=True)
-        _provider = LocalSQLiteProvider(cache_dir)
+        _provider_source = src
+        if src == "yomitan":
+            # Lazy import to avoid circular deps and keep tests headless
+            try:
+                if __package__:
+                    from .yomitan import YomitanApiProvider
+                else:
+                    from yomitan import YomitanApiProvider
+                _provider = YomitanApiProvider(base_url=_get_yomitan_url())
+            except Exception:
+                # Fallback to local if Yomitan provider fails to import
+                addon_dir = os.path.dirname(os.path.abspath(__file__))
+                cache_dir = os.path.join(addon_dir, "user_files", "cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                _provider = LocalSQLiteProvider(cache_dir)
+                _provider_source = "local"
+        else:
+            addon_dir = os.path.dirname(os.path.abspath(__file__))
+            cache_dir = os.path.join(addon_dir, "user_files", "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            _provider = LocalSQLiteProvider(cache_dir)
     return _provider
+
+
+def reset_provider_cache() -> None:
+    """Forces next get_provider() to re-read config — called after GUI save."""
+    global _provider, _generator, _provider_source
+    _provider = None
+    _generator = None
+    _provider_source = None
+
 
 def get_generator():
     global _generator

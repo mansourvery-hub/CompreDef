@@ -31,6 +31,7 @@ from aqt.qt import (
     QLabel,
     QGroupBox,
     QTextEdit,
+    QLineEdit,
     Qt,
 )
 
@@ -224,6 +225,52 @@ class ConfigDialog(QDialog):
         ladder_layout = QVBoxLayout()
         ladder_group.setLayout(ladder_layout)
 
+        # --- Dictionary Source selector (Local vs Yomitan) ---
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Dictionary Source:"))
+        self.source_combo = QComboBox()
+        self.source_combo.addItem("Local dictionaries (indexed)", "local")
+        self.source_combo.addItem("Yomitan API (live, all Yomitan dictionaries)", "yomitan")
+        self.source_combo.setToolTip(
+            "Local: use indexed dictionaries below (fast, offline).\n"
+            "Yomitan API: borrow Yomitan's dictionaries live via http://127.0.0.1:19633\n"
+            "(browser must be open + Yomitan API enabled). No indexing needed."
+        )
+        # Restore at creation for crash-safety (same as tab_generate)
+        _src = str(self.config.get("dictionary_source") or "local").strip().lower()
+        if _src not in ("local", "yomitan"):
+            _src = "local"
+        for i in range(self.source_combo.count()):
+            if self.source_combo.itemData(i) == _src:
+                self.source_combo.setCurrentIndex(i)
+                break
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
+        source_row.addWidget(self.source_combo)
+        source_row.addStretch()
+        ladder_layout.addLayout(source_row)
+
+        # --- Yomitan settings row (visible only when Yomitan selected) ---
+        self.yomitan_settings_widget = QWidget()
+        yomitan_layout = QHBoxLayout()
+        yomitan_layout.setContentsMargins(0, 0, 0, 0)
+        self.yomitan_settings_widget.setLayout(yomitan_layout)
+        yomitan_layout.addWidget(QLabel("Yomitan URL:"))
+        self.yomitan_url_edit = QLineEdit()
+        self.yomitan_url_edit.setPlaceholderText("http://127.0.0.1:19633")
+        self.yomitan_url_edit.setText(str(self.config.get("yomitan_url") or "http://127.0.0.1:19633"))
+        self.yomitan_url_edit.setToolTip("Yomitan API bridge URL (default 127.0.0.1:19633). Change only if you edited yomitan_api.py ADDR/PORT.")
+        yomitan_layout.addWidget(self.yomitan_url_edit, stretch=1)
+        self.yomitan_test_btn = _size_button(QPushButton("Test"))
+        self.yomitan_test_btn.setToolTip("Ping Yomitan API (/serverVersion). Browser must be open + Yomitan API enabled.")
+        self.yomitan_test_btn.clicked.connect(self._on_test_yomitan)
+        yomitan_layout.addWidget(self.yomitan_test_btn)
+        ladder_layout.addWidget(self.yomitan_settings_widget)
+
+        self.yomitan_status_label = QLabel("")
+        self.yomitan_status_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.yomitan_status_label.setWordWrap(True)
+        ladder_layout.addWidget(self.yomitan_status_label)
+
         desc_label = QLabel(
             "Dictionaries are tried top to bottom; the first definition you can\n"
             "fully read (100% known kanji) wins. Recommended: put the richest\n"
@@ -352,6 +399,12 @@ class ConfigDialog(QDialog):
         generation_layout.addWidget(self.plain_text_check)
 
         main_layout.addWidget(generation_group)
+
+        # Initial sync of Yomitan vs Local visibility (must be after all widgets exist)
+        try:
+            self._on_source_changed()
+        except Exception:
+            pass
 
         # -------------------------------------------------------------
         # OK / Cancel Dialog Buttons
@@ -519,23 +572,47 @@ class ConfigDialog(QDialog):
 
     def _refresh_item_labels(self) -> None:
         """Updates labels: '[n] Title ✓' and syncs checkbox state."""
+        # When Yomitan is active the local list is disabled — keep it as-is
+        try:
+            if hasattr(self, "source_combo") and self.source_combo.currentData() == "yomitan":
+                return
+        except Exception:
+            pass
         role = _user_role()
+        # Prepare a local provider once for title/count (Yomitan provider would return "Yomitan" for any path)
+        _local_prov = None
+        try:
+            from .provider import LocalSQLiteProvider as _Local
+            import os as _os
+            _addon_dir = _os.path.dirname(_os.path.abspath(__file__))
+            _cache_dir = _os.path.join(_addon_dir, "user_files", "cache")
+            _os.makedirs(_cache_dir, exist_ok=True)
+            _local_prov = _Local(_cache_dir)
+        except Exception:
+            pass
         # Block signals to prevent itemChanged from triggering a loop during refresh
         self.dict_list.blockSignals(True)
         for i in range(self.dict_list.count()):
             item = self.dict_list.item(i)
             path = item.data(role)
-            title = get_provider().get_title(path)
-            # Index status: dictionaries must be installed (indexed) before
-            # generation works; unindexed ones are skipped by lookups.
             try:
-                provider = get_provider()
-                if provider.is_installed(path):
-                    count = provider.get_entry_count(path)
-                    status = f"✓ ({count:,} entries)"
+                if _local_prov is not None:
+                    title = _local_prov.get_title(path)
+                    if _local_prov.is_installed(path):
+                        count = _local_prov.get_entry_count(path)
+                        status = f"✓ ({count:,} entries)"
+                    else:
+                        status = "⚠ not indexed — re-add to install"
                 else:
-                    status = "⚠ not indexed — re-add to install"
+                    title = get_provider().get_title(path)
+                    provider = get_provider()
+                    if provider.is_installed(path):
+                        count = provider.get_entry_count(path)
+                        status = f"✓ ({count:,} entries)"
+                    else:
+                        status = "⚠ not indexed — re-add to install"
             except Exception:
+                title = path
                 status = "⚠ error"
             item.setText(f"[{i + 1}] {title} {status}")
             item.setCheckState(Qt.CheckState.Checked if path not in self.disabled_dicts else Qt.CheckState.Unchecked)
@@ -543,6 +620,82 @@ class ConfigDialog(QDialog):
                 path + ("\n(disabled — skipped during generation)" if path in self.disabled_dicts else "")
             )
         self.dict_list.blockSignals(False)
+
+    def _on_source_changed(self, _idx: int = 0) -> None:
+        """Toggles Yomitan vs Local UI and persists immediately."""
+        is_yomitan = self.source_combo.currentData() == "yomitan"
+        # Show/hide Yomitan URL row + status
+        self.yomitan_settings_widget.setVisible(is_yomitan)
+        self.yomitan_status_label.setVisible(is_yomitan)
+        if is_yomitan:
+            self.yomitan_status_label.setText("Yomitan mode: live dictionaries from browser (no indexing needed). Ensure browser is open + Yomitan API enabled.")
+        # Grey out local ladder when Yomitan is active (still visible for reference)
+        for w in (self.dict_list, self.add_zip_btn, self.add_dict_btn, self.add_folder_btn,
+                  self.move_up_btn, self.move_down_btn, self.remove_btn, self.reindex_btn):
+            w.setEnabled(not is_yomitan)
+        # Persist instantly so closing dialog keeps choice (same crash-safety as others)
+        try:
+            self._save_config_now()
+        except Exception:
+            pass
+        # Reset provider singleton so next get_provider() reads new source
+        try:
+            from .core import reset_provider_cache  # type: ignore
+            reset_provider_cache()
+        except Exception:
+            try:
+                from core import reset_provider_cache  # type: ignore
+                reset_provider_cache()
+            except Exception:
+                pass
+
+    def _on_test_yomitan(self) -> None:
+        """Pings Yomitan API and shows result in status label + tooltip."""
+        url = self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633"
+        self.yomitan_status_label.setText(f"Testing {url} ...")
+        self.yomitan_status_label.setStyleSheet("color: gray; font-size: 11px;")
+        # Save URL first so test uses what user typed
+        try:
+            self._save_config_now()
+        except Exception:
+            pass
+        def task():
+            import json, urllib.request, urllib.error
+            # Try /serverVersion then /yomitanVersion
+            for path in ("/serverVersion", "/yomitanVersion"):
+                try:
+                    req = urllib.request.Request(url.rstrip("/") + path, data=b"{}", headers={"Content-Type":"application/json"}, method="POST")
+                    with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        body = resp.read().decode("utf-8")
+                        data = json.loads(body) if body else {}
+                        return (path, data, None)
+                except Exception as e:
+                    last_err = e
+                    continue
+            return (None, None, last_err)
+        def on_done(future):
+            try:
+                path, data, err = future.result()
+                if data is not None:
+                    self.yomitan_status_label.setText(f"✓ Yomitan OK ({path}: {data}) — all Yomitan dictionaries available.")
+                    self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
+                    tooltip(f"Yomitan OK: {data}")
+                else:
+                    msg = f"✗ Yomitan not reachable at {url} ({err}). Is browser open + Yomitan API enabled?"
+                    self.yomitan_status_label.setText(msg)
+                    self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                    print(f"CompreDef: Yomitan test failed: {err}")
+                    tooltip(msg)
+            except Exception as e:
+                import traceback
+                self.yomitan_status_label.setText(f"✗ Test error: {e}")
+                self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                print(traceback.format_exc())
+        try:
+            mw.taskman.run_in_background(task, on_done)
+        except Exception:
+            # Fallback synchronous for tests
+            task()
 
     def _on_item_changed(self, item: QListWidgetItem) -> None:
         """Handles checkbox toggles to update disabled_dicts set."""
@@ -862,12 +1015,24 @@ class ConfigDialog(QDialog):
             # Tab-to-Generate (auto-fill on word-field unfocus)
             "tab_generate": self.tab_generate_check.isChecked(),
             "plain_text_definitions": self.plain_text_check.isChecked(),
+            "dictionary_source": self.source_combo.currentData() or "local",
+            "yomitan_url": self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633",
             # Backwards compatibility
             "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
             "mode": "Ladder",
         }
 
         mw.addonManager.writeConfig(self.addon_name, updated_config)
+        # Reset provider singleton so next get_provider() respects new source
+        try:
+            from .core import reset_provider_cache  # type: ignore
+            reset_provider_cache()
+        except Exception:
+            try:
+                from core import reset_provider_cache  # type: ignore
+                reset_provider_cache()
+            except Exception:
+                pass
         self.accept()
 
     def _save_config_now(self) -> None:
@@ -891,6 +1056,8 @@ class ConfigDialog(QDialog):
                 "disabled_dictionaries": sorted(self.disabled_dicts),
                 "tab_generate": self.tab_generate_check.isChecked(),
                 "plain_text_definitions": self.plain_text_check.isChecked(),
+                "dictionary_source": self.source_combo.currentData() or "local",
+                "yomitan_url": self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633",
                 "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
                 "mode": "Ladder",
             })

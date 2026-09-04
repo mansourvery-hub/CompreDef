@@ -24,6 +24,27 @@ except Exception:
     fetch_yomitan_definitions = None  # type: ignore
 
 
+def _get_dictionary_source() -> str:
+    """Reads the user's chosen dictionary source from config."""
+    try:
+        from aqt import mw  # type: ignore
+        if mw and hasattr(mw, "addonManager"):
+            try:
+                name = mw.addonManager.addonFromModule(__name__)
+            except Exception:
+                name = None
+            if not name:
+                name = "1619602654"
+            cfg = mw.addonManager.getConfig(name)
+            if isinstance(cfg, dict):
+                src = str(cfg.get("dictionary_source") or "local").strip().lower()
+                if src in ("yomitan", "yomitan_api", "api"):
+                    return "yomitan"
+    except Exception:
+        pass
+    return "local"
+
+
 def _is_plain_text_mode() -> bool:
     """Reads the GUI toggle 'plain_text_definitions' from add-on config.
 
@@ -104,6 +125,33 @@ class DefinitionGenerator:
                 # No HTML generation here; just strip if needed.
                 return _to_plain_text(definition)
             return definition
+
+        # If user selected Yomitan as primary source, bypass local ladder
+        # entirely and query Yomitan directly (single fetch, then score).
+        # This keeps Yomitan provider simple and avoids per-path duplicate fetches.
+        if _get_dictionary_source() == "yomitan":
+            if fetch_yomitan_definitions is not None:
+                try:
+                    y_entries_primary = fetch_yomitan_definitions(word, reading)
+                except Exception:
+                    y_entries_primary = []
+                if y_entries_primary:
+                    non_ref = [e for e in y_entries_primary if not is_reference_title(e.definition)]
+                    valid = non_ref if non_ref else (y_entries_primary if len(y_entries_primary) == 1 else [])
+                    best_y: Optional[str] = None
+                    best_y_score: float = -1.0
+                    for entry in valid:
+                        res = calculate_kanji_score(entry.definition, self.known_kanji)
+                        if res.is_perfect:
+                            return _finalize(res.definition)
+                        if res.score > best_y_score:
+                            best_y_score = res.score
+                            best_y = res.definition
+                    if best_y is not None:
+                        if plain_text:
+                            return _to_plain_text(best_y)
+                        return best_y
+            return None
 
         best_definition: Optional[str] = None
         best_score: float = -1.0

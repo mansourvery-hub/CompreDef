@@ -33,13 +33,34 @@ else:
     from models import DictionaryEntry
 
 # ---------------------------------------------------------------------------
-# Configuration (minimal — no GUI yet, just a fail-safe)
+# Configuration
 # ---------------------------------------------------------------------------
 YOMITAN_URL = "http://127.0.0.1:19633"
 YOMITAN_TIMEOUT = 2.5  # seconds per request — must stay short
 YOMITAN_MAX_ENTRIES = 8  # enough to let ladder scoring see a good candidate
 _WORD_CACHE_TTL = 300.0  # seconds
 _NEGATIVE_CACHE_TTL = 30.0  # seconds after a failure, skip Yomitan quickly
+
+
+def _get_configured_url() -> str:
+    """Reads yomitan_url from add-on config, falls back to default."""
+    try:
+        from aqt import mw  # type: ignore
+        if mw and hasattr(mw, "addonManager"):
+            try:
+                name = mw.addonManager.addonFromModule(__name__)
+            except Exception:
+                name = None
+            if not name:
+                name = "1619602654"
+            cfg = mw.addonManager.getConfig(name)
+            if isinstance(cfg, dict) and cfg.get("yomitan_url"):
+                url = str(cfg["yomitan_url"]).strip()
+                if url:
+                    return url.rstrip("/")
+    except Exception:
+        pass
+    return YOMITAN_URL
 
 # ---------------------------------------------------------------------------
 # Caches (process-wide, thread-safe)
@@ -72,12 +93,12 @@ def _mark_availability(success: bool) -> None:
         _availability["checked_at"] = _now()
 
 
-def _post_json(path: str, payload: dict, timeout: float) -> Optional[dict]:
+def _post_json(path: str, payload: dict, timeout: float, base_url: Optional[str] = None) -> Optional[dict]:
     """POSTs JSON to Yomitan bridge and returns parsed response, or None on failure.
 
     Must never raise — Anki must never crash because Yomitan is closed.
     """
-    url = YOMITAN_URL.rstrip("/") + path
+    url = (base_url or _get_configured_url()).rstrip("/") + path
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -120,6 +141,7 @@ def fetch_yomitan_definitions(
     reading: str = "",
     max_entries: int = YOMITAN_MAX_ENTRIES,
     timeout: float = YOMITAN_TIMEOUT,
+    base_url: Optional[str] = None,
 ) -> List[DictionaryEntry]:
     """Fetches definitions from Yomitan via POST /ankiFields.
 
@@ -135,8 +157,9 @@ def fetch_yomitan_definitions(
 
     word = word.strip()
     reading_norm = _normalize_reading(reading) if reading else ""
+    effective_url = base_url or _get_configured_url()
 
-    cache_key = (word, reading_norm, max_entries)
+    cache_key = (word, reading_norm, max_entries, effective_url)
 
     # Fast-path: per-word cache hit
     with _word_lock:
@@ -164,7 +187,7 @@ def fetch_yomitan_definitions(
         "includeMedia": False,
     }
 
-    data = _post_json("/ankiFields", payload, timeout=timeout)
+    data = _post_json("/ankiFields", payload, timeout=timeout, base_url=effective_url)
     if data is None:
         # Network / Yomitan not running — cache empty result briefly to avoid
         # hammering in bulk (word cache with empty list)
@@ -255,7 +278,7 @@ try:
             self.max_entries = max_entries
 
         def lookup(self, word: str, reading: str = "") -> List[DictionaryEntry]:
-            return fetch_yomitan_definitions(word, reading, max_entries=self.max_entries, timeout=self.timeout)
+            return fetch_yomitan_definitions(word, reading, max_entries=self.max_entries, timeout=self.timeout, base_url=self.base_url)
 
         def lookup_by_path(self, path: str, word: str, reading: str = "") -> List[DictionaryEntry]:
             # path is ignored — Yomitan owns all dictionaries
@@ -270,7 +293,7 @@ try:
             if _is_yomitan_recently_unavailable():
                 return False
             # Probe with short timeout
-            data = _post_json("/serverVersion", {}, timeout=1.0)
+            data = _post_json("/serverVersion", {}, timeout=1.0, base_url=self.base_url)
             return data is not None
 
         def get_entry_count(self, path: str) -> int:
