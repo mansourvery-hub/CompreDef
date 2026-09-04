@@ -232,7 +232,10 @@ def on_editor_generate_definition(editor) -> None:
         return
 
     # Early validation: without any dictionary configured nothing can be generated
-    if not dictionaries and not dictionary_folder:
+    # When Yomitan is the selected source, local dictionaries are not required
+    _src = str(config.get("dictionary_source") or "local").strip().lower()
+    _is_yomitan_src = _src in ("yomitan", "yomitan_api", "api")
+    if not _is_yomitan_src and not dictionaries and not dictionary_folder:
         tooltip(
             "CompreDef: No dictionaries configured.\nSet them under Tools -> Add-ons -> CompreDef -> Config.",
             parent=editor.parentWindow,
@@ -265,8 +268,30 @@ def on_editor_generate_definition(editor) -> None:
         try:
             definition_result = future.result()
             if not definition_result:
+                # When Yomitan is the selected source, surface the actual
+                # bridge error instead of the generic "No definition found"
+                _is_yomitan = str(config.get("dictionary_source") or "local").strip().lower() in ("yomitan","yomitan_api","api")
+                if _is_yomitan:
+                    try:
+                        if __package__:
+                            from .yomitan import get_last_yomitan_error
+                        else:
+                            from yomitan import get_last_yomitan_error
+                        err = get_last_yomitan_error()
+                        if err:
+                            print(f"CompreDef: Yomitan lookup failed for '{word_text}': {err}")
+                            tooltip(
+                                f"CompreDef: Yomitan not reachable.\n{err}\n"
+                                f"Fix: run 'python install_yomitan_api.py' once and enable\n"
+                                f"Yomitan → Settings → Advanced → General → Enable Yomitan API.\n"
+                                f"Or switch back to Local dictionaries in CompreDef config.",
+                                parent=editor.parentWindow,
+                            )
+                            return
+                    except Exception:
+                        pass
                 tooltip(
-                    f"CompreDef: No definition found for '{word_text}'.",
+                    f"CompreDef: No definition found for '{word_text}'." + (" (Yomitan mode — is Yomitan running?)" if _is_yomitan else ""),
                     parent=editor.parentWindow,
                 )
                 return
@@ -554,7 +579,9 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
     dictionary_folder = config.get("dictionary_folder", "")
 
     # Early validation: without any dictionary configured nothing can be generated
-    if not dictionaries and not dictionary_folder:
+    _src2 = str(config.get("dictionary_source") or "local").strip().lower()
+    _is_yomitan_src2 = _src2 in ("yomitan", "yomitan_api", "api")
+    if not _is_yomitan_src2 and not dictionaries and not dictionary_folder:
         tooltip(
             "CompreDef: No dictionaries configured.\nSet them under Tools -> Add-ons -> CompreDef -> Config.",
             parent=browser,

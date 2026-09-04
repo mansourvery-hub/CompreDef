@@ -234,7 +234,8 @@ class ConfigDialog(QDialog):
         self.source_combo.setToolTip(
             "Local: use indexed dictionaries below (fast, offline).\n"
             "Yomitan API: borrow Yomitan's dictionaries live via http://127.0.0.1:19633\n"
-            "(browser must be open + Yomitan API enabled). No indexing needed."
+            "(browser must be open + Yomitan API enabled + one-time 'python install_yomitan_api.py').\n"
+            "Without the bridge the Test below will stay red — Local is simpler for most users."
         )
         # Restore at creation for crash-safety (same as tab_generate)
         _src = str(self.config.get("dictionary_source") or "local").strip().lower()
@@ -399,12 +400,6 @@ class ConfigDialog(QDialog):
         generation_layout.addWidget(self.plain_text_check)
 
         main_layout.addWidget(generation_group)
-
-        # Initial sync of Yomitan vs Local visibility (must be after all widgets exist)
-        try:
-            self._on_source_changed()
-        except Exception:
-            pass
 
         # -------------------------------------------------------------
         # OK / Cancel Dialog Buttons
@@ -621,33 +616,44 @@ class ConfigDialog(QDialog):
             )
         self.dict_list.blockSignals(False)
 
-    def _on_source_changed(self, _idx: int = 0) -> None:
-        """Toggles Yomitan vs Local UI and persists immediately."""
+    def _on_source_changed(self, _idx: int = 0, save: bool = True) -> None:
+        """Toggles Yomitan vs Local UI and persists immediately.
+
+        save=False is used during initial load to avoid overwriting the
+        ladder with an empty list before _load_config populates it
+        (the v1.0.20 'disappearing dictionaries' bug).
+        """
         is_yomitan = self.source_combo.currentData() == "yomitan"
         # Show/hide Yomitan URL row + status
         self.yomitan_settings_widget.setVisible(is_yomitan)
         self.yomitan_status_label.setVisible(is_yomitan)
         if is_yomitan:
-            self.yomitan_status_label.setText("Yomitan mode: live dictionaries from browser (no indexing needed). Ensure browser is open + Yomitan API enabled.")
+            self.yomitan_status_label.setText(
+                "Yomitan mode: live dictionaries from browser (no indexing needed).\n"
+                "Requires Yomitan API bridge: run 'python install_yomitan_api.py' once\n"
+                "and enable Yomitan → Settings → Advanced → General → Enable Yomitan API.\n"
+                "Without it the Test below will stay red — browser must be open."
+            )
         # Grey out local ladder when Yomitan is active (still visible for reference)
         for w in (self.dict_list, self.add_zip_btn, self.add_dict_btn, self.add_folder_btn,
                   self.move_up_btn, self.move_down_btn, self.remove_btn, self.reindex_btn):
             w.setEnabled(not is_yomitan)
-        # Persist instantly so closing dialog keeps choice (same crash-safety as others)
-        try:
-            self._save_config_now()
-        except Exception:
-            pass
-        # Reset provider singleton so next get_provider() reads new source
-        try:
-            from .core import reset_provider_cache  # type: ignore
-            reset_provider_cache()
-        except Exception:
+        if save:
+            # Persist instantly so closing dialog keeps choice (same crash-safety as others)
             try:
-                from core import reset_provider_cache  # type: ignore
-                reset_provider_cache()
+                self._save_config_now()
             except Exception:
                 pass
+            # Reset provider singleton so next get_provider() reads new source
+            try:
+                from .core import reset_provider_cache  # type: ignore
+                reset_provider_cache()
+            except Exception:
+                try:
+                    from core import reset_provider_cache  # type: ignore
+                    reset_provider_cache()
+                except Exception:
+                    pass
 
     def _on_test_yomitan(self) -> None:
         """Pings Yomitan API and shows result in status label + tooltip."""
@@ -681,11 +687,16 @@ class ConfigDialog(QDialog):
                     self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
                     tooltip(f"Yomitan OK: {data}")
                 else:
-                    msg = f"✗ Yomitan not reachable at {url} ({err}). Is browser open + Yomitan API enabled?"
+                    msg = (
+                        f"✗ Yomitan not reachable at {url} ({err}).\n"
+                        f"Browser must be open, Yomitan → Settings → Advanced → General → Enable Yomitan API must be ON,\n"
+                        f"and you must run 'python install_yomitan_api.py' once (from yomitan-api repo) for your browser.\n"
+                        f"Without that bridge CompreDef cannot see Yomitan's dictionaries — switch to Local if you don't want the extra step."
+                    )
                     self.yomitan_status_label.setText(msg)
                     self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
                     print(f"CompreDef: Yomitan test failed: {err}")
-                    tooltip(msg)
+                    tooltip(msg, parent=self)
             except Exception as e:
                 import traceback
                 self.yomitan_status_label.setText(f"✗ Test error: {e}")
@@ -962,6 +973,12 @@ class ConfigDialog(QDialog):
 
         for d_path in saved_dicts:
             self._add_dict_path(d_path)
+        # Sync Yomitan/Local visibility after ladder is populated (must be
+        # after _add_dict_path so ordered_dicts is not empty when we save).
+        try:
+            self._on_source_changed(save=False)
+        except Exception:
+            pass
         # NOTE: tab_generate_check's state is restored in _init_ui (at widget
         # creation) — NOT here. The dictionary loop above persists the dialog
         # state on every add (crash safety), so the checkbox must already
@@ -1050,6 +1067,12 @@ class ConfigDialog(QDialog):
                 self.dict_list.item(i).data(role)
                 for i in range(self.dict_list.count())
             ]
+            # Never clobber a populated ladder with an empty one during
+            # the initial Yomitan/Local toggle race (v1.0.20 bug).
+            if not ordered_dicts and isinstance(self.config.get("dictionaries"), list) and self.config["dictionaries"]:
+                # If the UI list is empty but config still has dictionaries, keep them
+                # (happens only during the early _on_source_changed save before _load_config).
+                ordered_dicts = list(self.config["dictionaries"])
             mw.addonManager.writeConfig(self.addon_name, {
                 **self._collect_type_config(),
                 "dictionaries": ordered_dicts,

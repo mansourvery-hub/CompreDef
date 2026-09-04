@@ -71,6 +71,8 @@ _word_lock = threading.Lock()
 # availability: None = unknown, True = last probe succeeded, False = last probe failed
 _availability: Dict[str, float | bool | None] = {"available": None, "checked_at": 0.0}
 _avail_lock = threading.Lock()
+_last_error: Optional[str] = None
+_last_error_lock = threading.Lock()
 
 
 def _now() -> float:
@@ -93,6 +95,17 @@ def _mark_availability(success: bool) -> None:
         _availability["checked_at"] = _now()
 
 
+def _set_last_error(msg: Optional[str]) -> None:
+    global _last_error
+    with _last_error_lock:
+        _last_error = msg
+
+
+def get_last_yomitan_error() -> Optional[str]:
+    with _last_error_lock:
+        return _last_error
+
+
 def _post_json(path: str, payload: dict, timeout: float, base_url: Optional[str] = None) -> Optional[dict]:
     """POSTs JSON to Yomitan bridge and returns parsed response, or None on failure.
 
@@ -105,12 +118,28 @@ def _post_json(path: str, payload: dict, timeout: float, base_url: Optional[str]
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
             _mark_availability(True)
+            _set_last_error(None)
             try:
                 return json.loads(body) if body else {}
-            except Exception:
+            except Exception as je:
+                _set_last_error(f"Yomitan returned invalid JSON on {path}: {je}")
+                print(f"CompreDef Yomitan: invalid JSON {path}: {je}")
                 return {}
-    except urllib.error.URLError:
+    except urllib.error.URLError as e:
         _mark_availability(False)
+        reason = getattr(e, "reason", str(e))
+        msg = f"Yomitan not reachable at {url}{path}: {reason}. Is browser open + Yomitan API enabled + install_yomitan_api.py run?"
+        _set_last_error(msg)
+        print(f"CompreDef Yomitan: {msg} ({e})")
+        return None
+    except Exception as e:
+        # Any other error (timeout, etc.) counts as unavailable for negative cache,
+        # but we distinguish timeout as transient — still mark unavailable to avoid
+        # hammering the browser in bulk jobs.
+        _mark_availability(False)
+        msg = f"Yomitan error {url}{path}: {e}"
+        _set_last_error(msg)
+        print(f"CompreDef Yomitan: {msg}")
         return None
     except Exception:
         # Any other error (timeout, etc.) counts as unavailable for negative cache,
