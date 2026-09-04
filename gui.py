@@ -676,33 +676,83 @@ class ConfigDialog(QDialog):
             pass
         def task():
             import json, urllib.request, urllib.error
-            # Try /serverVersion then /yomitanVersion
-            for path in ("/serverVersion", "/yomitanVersion"):
+            # Step 1: Check bridge HTTP server (serverVersion) — does not need Yomitan
+            bridge_data = None
+            bridge_err = None
+            for path in ("/serverVersion",):
                 try:
                     req = urllib.request.Request(url.rstrip("/") + path, data=b"{}", headers={"Content-Type":"application/json"}, method="POST")
                     with urllib.request.urlopen(req, timeout=2.0) as resp:
                         body = resp.read().decode("utf-8")
-                        data = json.loads(body) if body else {}
-                        return (path, data, None)
+                        bridge_data = json.loads(body) if body else {}
+                        bridge_err = None
+                        break
                 except Exception as e:
-                    last_err = e
+                    bridge_err = e
                     continue
-            return (None, None, last_err)
+            if bridge_data is None:
+                return (None, None, bridge_err, None)
+            # Step 2: Check Yomitan dictionaries via ankiFields (needs browser + Yomitan + dictionaries)
+            # Use a simple kanji "口" that should exist in any Japanese dict
+            try:
+                payload = json.dumps({"text": "口", "type": "term", "markers": ["glossary"], "maxEntries": 1, "includeMedia": False}).encode()
+                req = urllib.request.Request(url.rstrip("/") + "/ankiFields", data=payload, headers={"Content-Type":"application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    body = resp.read().decode("utf-8")
+                    data = json.loads(body) if body else {}
+                    fields = data.get("fields") if isinstance(data, dict) else None
+                    if isinstance(fields, list) and fields:
+                        return ("ankiFields", {"yomitan_fields": len(fields)}, None, bridge_data)
+                    else:
+                        # Bridge is up but Yomitan returned no fields — could be no dict or Yomitan not enabled
+                        return ("ankiFields", None, "Yomitan returned no fields for '口' (is Yomitan enabled with dictionaries?)", bridge_data)
+            except urllib.error.HTTPError as he:
+                try:
+                    body = he.read().decode("utf-8")
+                    err_data = json.loads(body) if body else {}
+                    err_msg = err_data.get("error") if isinstance(err_data, dict) else str(err_data)
+                except Exception:
+                    err_msg = str(he)
+                return (None, None, f"Yomitan not connected (HTTP {he.code}): {err_msg}. Browser must be open + Yomitan API enabled.", bridge_data)
+            except Exception as e:
+                return (None, None, e, bridge_data)
+            return ("/serverVersion", bridge_data, None, None)
         def on_done(future):
             try:
-                path, data, err = future.result()
-                if data is not None:
+                path, data, err, bridge_data = future.result()
+                if data is not None and bridge_data is not None and path == "ankiFields":
+                    # Full success: bridge + Yomitan dictionaries
+                    self.yomitan_status_label.setText(f"✓ Yomitan OK (bridge {bridge_data} + dictionaries: {data}) — ready for '口'.")
+                    self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
+                    tooltip(f"Yomitan OK: {data}")
+                elif data is not None and path == "/serverVersion":
+                    # Bridge is up but Yomitan dictionaries not yet available — show yellow warning
+                    # This happens when bridge was manually started but Yomitan not yet launched it
+                    self.yomitan_status_label.setText(f"⚠ Bridge running at {url} ({data}) but Yomitan not yet connected — restart browser and enable Yomitan → Settings → Advanced → General → Enable Yomitan API, then Test again.")
+                    self.yomitan_status_label.setStyleSheet("color: orange; font-size: 11px;")
+                    tooltip(f"Bridge OK but Yomitan not connected: {data}")
+                elif data is not None:
                     self.yomitan_status_label.setText(f"✓ Yomitan OK ({path}: {data}) — all Yomitan dictionaries available.")
                     self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
                     tooltip(f"Yomitan OK: {data}")
                 else:
-                    msg = (
-                        f"✗ Yomitan not reachable at {url} ({err}).\n"
-                        f"Browser must be open, Yomitan → Settings → Advanced → General → Enable Yomitan API must be ON,\n"
-                        f"and click 'Install / Repair Bridge' above once (no terminal) then restart browser.\n"
-                        f"Without that bridge CompreDef cannot see Yomitan's dictionaries — switch to Local if you don't want the extra step."
-                    )
-                    self.yomitan_status_label.setText(msg)
+                    # Check if bridge_data is available (bridge is running) but Yomitan failed
+                    if bridge_data is not None:
+                        msg = (
+                            f"⚠ Bridge running at {url} ({bridge_data}) but Yomitan not reachable ({err}).\n"
+                            f"Browser must be open, Yomitan → Settings → Advanced → General → Enable Yomitan API must be ON (restart browser after enabling).\n"
+                            f"Without Yomitan, CompreDef cannot fetch '口' — switch to Local if you don't want the bridge."
+                        )
+                        self.yomitan_status_label.setText(msg)
+                        self.yomitan_status_label.setStyleSheet("color: orange; font-size: 11px;")
+                    else:
+                        msg = (
+                            f"✗ Yomitan not reachable at {url} ({err}).\n"
+                            f"Browser must be open, Yomitan → Settings → Advanced → General → Enable Yomitan API must be ON,\n"
+                            f"and click 'Install / Repair Bridge' above once (no terminal) then restart browser.\n"
+                            f"Without that bridge CompreDef cannot see Yomitan's dictionaries — switch to Local if you don't want the extra step."
+                        )
+                        self.yomitan_status_label.setText(msg)
                     self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
                     print(f"CompreDef: Yomitan test failed: {err}")
                     tooltip(msg, parent=self)
