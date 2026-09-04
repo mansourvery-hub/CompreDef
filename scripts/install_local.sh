@@ -58,19 +58,26 @@ echo "Target: $TARGET_DIR"
 
 mkdir -p "$TARGET_DIR"
 
-# Preserve user_files (dictionaries.db, yomitan_bridge, etc.) — they live
-# inside the add-on folder but must survive overwrites. Move them aside,
-# wipe the rest, unzip, then restore.
+# Preserve user_files and meta.json — they contain the user's dictionaries,
+# yomitan_bridge, and the add-on's display name (human_name) + config.
+# meta.json must survive because Anki 26.08 stores `name` and `human_version`
+# there (copied from manifest.json on install). Deleting it makes the add-on
+# appear as its folder ID (1619602654) instead of "CompreDef".
 PRESERVE_DIR="$(mktemp -d)"
 USER_FILES_PRESERVED=false
+META_PRESERVED=false
 if [[ -d "$TARGET_DIR/user_files" ]]; then
     echo "Preserving $TARGET_DIR/user_files ..."
     cp -a "$TARGET_DIR/user_files" "$PRESERVE_DIR/" 2>/dev/null && USER_FILES_PRESERVED=true || true
 fi
+if [[ -f "$TARGET_DIR/meta.json" ]]; then
+    echo "Preserving $TARGET_DIR/meta.json ..."
+    cp -a "$TARGET_DIR/meta.json" "$PRESERVE_DIR/" 2>/dev/null && META_PRESERVED=true || true
+fi
 
-# Clean old code but keep user_files aside — remove everything except it
+# Clean old code but keep user_files/meta.json aside
 if [[ -d "$TARGET_DIR" ]]; then
-    find "$TARGET_DIR" -mindepth 1 -maxdepth 1 ! -name "user_files" -exec rm -rf {} + 2>/dev/null || true
+    find "$TARGET_DIR" -mindepth 1 -maxdepth 1 ! -name "user_files" ! -name "meta.json" -exec rm -rf {} + 2>/dev/null || true
 fi
 
 echo "Unzipping $ANKIADDON -> $TARGET_DIR ..."
@@ -80,6 +87,42 @@ if [[ "$USER_FILES_PRESERVED" == true ]]; then
     echo "Restoring user_files ..."
     rm -rf "$TARGET_DIR/user_files"
     cp -a "$PRESERVE_DIR/user_files" "$TARGET_DIR/" 2>/dev/null || true
+fi
+if [[ "$META_PRESERVED" == true ]]; then
+    echo "Restoring meta.json ..."
+    if [[ -f "$PRESERVE_DIR/meta.json" ]]; then
+        cp -a "$PRESERVE_DIR/meta.json" "$TARGET_DIR/meta.json" 2>/dev/null || true
+        # Patch name/human_version from new manifest.json into the restored meta.json
+        python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+target = os.path.expanduser("~/.local/share/Anki2/addons21/1619602654")
+if not os.path.isdir(target):
+    home = os.path.expanduser("~")
+    for cand in [
+        os.path.join(home, "Library/Application Support/Anki2/addons21/1619602654"),
+        os.path.join(os.getenv("APPDATA", ""), "Anki2/addons21/1619602654"),
+    ]:
+        if os.path.isdir(cand):
+            target = cand
+            break
+try:
+    with open(os.path.join(target, "manifest.json"), "r", encoding="utf-8") as mf:
+        mani = json.load(mf)
+    with open(os.path.join(target, "meta.json"), "r", encoding="utf-8") as mf:
+        meta = json.load(mf)
+    for key in ("name", "human_version", "package"):
+        if key in mani:
+            meta[key] = mani[key]
+    if "name" not in meta or not meta["name"]:
+        meta["name"] = "CompreDef"
+    with open(os.path.join(target, "meta.json"), "w", encoding="utf-8") as out:
+        json.dump(meta, out, indent=4)
+        out.write("\n")
+    print(f"Patched meta.json name={meta.get('name')} human_version={meta.get('human_version')}")
+except Exception as e:
+    print(f"meta.json patch failed: {e}")
+PYEOF
+    fi
 fi
 rm -rf "$PRESERVE_DIR"
 
