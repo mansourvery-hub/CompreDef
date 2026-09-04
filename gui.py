@@ -71,6 +71,19 @@ def _user_checkable_flag() -> Any:
     return Qt.ItemIsUserCheckable
 
 
+def _size_button(btn: QPushButton) -> QPushButton:
+    """Applies uniform comfortable sizing so buttons never render cramped.
+
+    Without explicit minimums, Qt compresses buttons below their natural
+    height whenever the dialog runs out of vertical space (the 'cramped
+    buttons' problem). Minimums make the layout grow the dialog instead
+    of squashing the widgets.
+    """
+    btn.setMinimumWidth(140)
+    btn.setMinimumHeight(30)
+    return btn
+
+
 # Keyword lists for auto-matching target word and definition fields
 _TARGET_WORD_KEYWORDS = [
     "word", "expression", "kanji", "reading", "furigana",
@@ -136,7 +149,7 @@ class ConfigDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("CompreDef Configuration")
-        self.resize(600, 650)
+        self.resize(660, 680)
 
         self.addon_name = _get_addon_name()
         self.config: Dict[str, Any] = mw.addonManager.getConfig(self.addon_name) or {}
@@ -152,6 +165,8 @@ class ConfigDialog(QDialog):
         """Sets up the form controls and layout structure."""
         main_layout = QVBoxLayout()
         self.setLayout(main_layout)
+        # Airier separation between groups prevents a "wall of widgets".
+        main_layout.setSpacing(10)
 
         # -------------------------------------------------------------
         # Note Types & Field Mappings Group
@@ -161,9 +176,8 @@ class ConfigDialog(QDialog):
         mapping_group.setLayout(outer_mapping_layout)
 
         intro = QLabel(
-            "Check every note type CompreDef should generate definitions\n"
-            "for, then map its fields below. Unchecked types are ignored;\n"
-            "each type keeps its own field mapping."
+            "Check every note type CompreDef should generate definitions for,\n"
+            "then map its fields below. Unchecked types are ignored."
         )
         intro.setStyleSheet("color: gray; font-size: 11px;")
         intro.setWordWrap(True)
@@ -172,6 +186,8 @@ class ConfigDialog(QDialog):
         # Checkable list of all note types (same interaction pattern as
         # the dictionary ladder: checkbox = enabled, click = configure).
         self.note_types_list = QListWidget()
+        # Minimum visible rows even when the dialog is resized small.
+        self.note_types_list.setMinimumHeight(96)
         self.note_types_list.setToolTip(
             "Check a note type to make it a generation target.\n"
             "Select a row to view/edit its field mapping below."
@@ -209,13 +225,10 @@ class ConfigDialog(QDialog):
         ladder_group.setLayout(ladder_layout)
 
         desc_label = QLabel(
-            "Dictionaries are tried in order from top to bottom; the first one\n"
-            "whose definition is fully comprehensible to you (100% known kanji)\n"
-            "wins (early exit). Order = your preference, not difficulty.\n"
-            "Recommended: put the richest dictionary you can comfortably read at\n"
-            "the top — you get its definitions whenever you can read them, and\n"
-            "fall through to simpler ones when you can't.\n"
-            "Note: the gate counts kanji only; kana words are not checked."
+            "Dictionaries are tried top to bottom; the first definition you can\n"
+            "fully read (100% known kanji) wins. Recommended: put the richest\n"
+            "dictionary you can comfortably read at the top. The gate counts\n"
+            "kanji only — kana is never checked."
         )
         desc_label.setStyleSheet("color: gray; font-size: 11px;")
         desc_label.setWordWrap(True)
@@ -224,64 +237,69 @@ class ConfigDialog(QDialog):
         # List Widget with drag-and-drop reordering
         list_and_buttons_layout = QHBoxLayout()
 
+        # --- Left/center: the ladder list itself ---
+        list_column = QVBoxLayout()
+
+        # Add-actions sit in ONE compact row ABOVE the list (they were a
+        # 3-button stack in the side column, which wasted vertical budget
+        # and made the dialog cram everything below it).
+        add_row = QHBoxLayout()
+        self.add_zip_btn = _size_button(QPushButton("Add Zip..."))
+        self.add_zip_btn.setToolTip("Select a Yomitan dictionary .zip file")
+        self.add_zip_btn.clicked.connect(self._on_add_zip)
+        add_row.addWidget(self.add_zip_btn)
+
+        self.add_dict_btn = _size_button(QPushButton("Add Folder..."))
+        self.add_dict_btn.setToolTip("Select a single unzipped dictionary folder")
+        self.add_dict_btn.clicked.connect(self._on_add_dictionary)
+        add_row.addWidget(self.add_dict_btn)
+
+        self.add_folder_btn = _size_button(QPushButton("Scan Folder..."))
+        self.add_folder_btn.setToolTip(
+            "Scan a parent folder to automatically find and add all "
+            "dictionary archives (.zip) and subfolders"
+        )
+        self.add_folder_btn.clicked.connect(self._on_scan_folder)
+        add_row.addWidget(self.add_folder_btn)
+
+        add_row.addStretch()
+        list_column.addLayout(add_row)
+
         self.dict_list = QListWidget()
         self.dict_list.setDragDropMode(_internal_move_mode())
+        self.dict_list.setMinimumHeight(120)
         # Track checkbox changes to update disabled_dicts
         self.dict_list.itemChanged.connect(self._on_item_changed)
         self.dict_list.model().rowsMoved.connect(lambda *_: self._refresh_item_labels())
-        list_and_buttons_layout.addWidget(self.dict_list)
+        list_column.addWidget(self.dict_list)
+        list_and_buttons_layout.addLayout(list_column, stretch=1)
 
-        # Buttons on the side for reordering and management
+        # --- Right: list-management actions only ---
         buttons_vbox = QVBoxLayout()
-        btn_min_width = 160
 
-        self.add_zip_btn = QPushButton("Add Zip Archive...")
-        self.add_zip_btn.setToolTip("Select a Yomitan dictionary .zip file")
-        self.add_zip_btn.setMinimumWidth(btn_min_width)
-        self.add_zip_btn.clicked.connect(self._on_add_zip)
-        buttons_vbox.addWidget(self.add_zip_btn)
-
-        self.add_dict_btn = QPushButton("Add Folder...")
-        self.add_dict_btn.setToolTip("Select a single unzipped dictionary folder")
-        self.add_dict_btn.setMinimumWidth(btn_min_width)
-        self.add_dict_btn.clicked.connect(self._on_add_dictionary)
-        buttons_vbox.addWidget(self.add_dict_btn)
-
-        self.add_folder_btn = QPushButton("Scan Folder...")
-        self.add_folder_btn.setToolTip("Scan a parent folder to automatically find and add all dictionary archives (.zip) and subfolders")
-        self.add_folder_btn.setMinimumWidth(btn_min_width)
-        self.add_folder_btn.clicked.connect(self._on_scan_folder)
-        buttons_vbox.addWidget(self.add_folder_btn)
-
-        buttons_vbox.addSpacing(15)
-
-        self.move_up_btn = QPushButton("Move Up ↑")
+        self.move_up_btn = _size_button(QPushButton("Move Up ↑"))
         self.move_up_btn.setToolTip("Move selected dictionary earlier in ladder (tried earlier)")
-        self.move_up_btn.setMinimumWidth(btn_min_width)
         self.move_up_btn.clicked.connect(self._on_move_up)
         buttons_vbox.addWidget(self.move_up_btn)
 
-        self.move_down_btn = QPushButton("Move Down ↓")
+        self.move_down_btn = _size_button(QPushButton("Move Down ↓"))
         self.move_down_btn.setToolTip("Move selected dictionary later in ladder (more advanced)")
-        self.move_down_btn.setMinimumWidth(btn_min_width)
         self.move_down_btn.clicked.connect(self._on_move_down)
         buttons_vbox.addWidget(self.move_down_btn)
 
-        buttons_vbox.addSpacing(15)
+        buttons_vbox.addSpacing(10)
 
-        self.remove_btn = QPushButton("Remove")
-        self.remove_btn.setToolTip("Remove selected dictionary from ladder")
-        self.remove_btn.setMinimumWidth(btn_min_width)
+        self.remove_btn = _size_button(QPushButton("Remove"))
+        self.remove_btn.setToolTip("Remove selected dictionary from ladder (and its index)")
         self.remove_btn.clicked.connect(self._on_remove_dictionary)
         buttons_vbox.addWidget(self.remove_btn)
 
-        self.reindex_btn = QPushButton("Reinstall / Update Index")
+        self.reindex_btn = _size_button(QPushButton("Reinstall / Update"))
         self.reindex_btn.setToolTip(
             "Re-parse the selected dictionary and rebuild its index.\n"
             "Use this after replacing a dictionary's files on disk.\n"
             "Runs in the background with progress."
         )
-        self.reindex_btn.setMinimumWidth(btn_min_width)
         self.reindex_btn.clicked.connect(self._on_reindex_dictionary)
         buttons_vbox.addWidget(self.reindex_btn)
 
