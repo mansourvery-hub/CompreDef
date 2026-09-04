@@ -344,29 +344,74 @@ def _manifest_install_file(manifest: str, path: str) -> None:
     with open(os.path.join(path, NAME + ".json"), "w", encoding="utf-8") as f:
         f.write(manifest)
 
-def _try_start_bridge(script_path: str) -> tuple[bool, str]:
-    """Tries to start the HTTP bridge in background so Test works without browser restart."""
+def _kill_standalone_bridge() -> str:
+    """Kills any standalone bridge we previously autostarted.
+
+    A standalone bridge holds port 19633 with stdin=/dev/null, so EVERY
+    /ankiFields returns 502 and — worse — the browser-launched bridge
+    cannot bind (Address already in use). After removing autostart we must
+    clean up orphans from older versions.
+    """
     import subprocess
-    import time
-    import socket
+    killed = []
     try:
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-            subprocess.Popen([sys.executable, "-u", script_path],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=creationflags, close_fds=True)
-        else:
-            subprocess.Popen([sys.executable, "-u", script_path],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True, close_fds=True)
-        time.sleep(0.9)
+        # Find PIDs listening on 19633 via /proc (Linux) or lsof fallback
+        if sys.platform != "win32":
+            try:
+                out = subprocess.run(
+                    ["fuser", "19633/tcp"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                # fuser prints PIDs to stderr
+                pids = set()
+                for chunk in (out.stdout + " " + out.stderr).split():
+                    chunk = chunk.strip().strip(",")
+                    if chunk.isdigit():
+                        pids.add(int(chunk))
+                for pid in pids:
+                    try:
+                        with open(f"/proc/{pid}/cmdline", "rb") as f:
+                            cmd = f.read().decode(errors="ignore")
+                        if "yomitan_api.py" in cmd:
+                            os.kill(pid, 15)
+                            killed.append(pid)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            # Fallback: kill by cmdline scan
+            if not killed:
+                try:
+                    out = subprocess.run(
+                        ["pgrep", "-f", "yomitan_api.py"],
+                        capture_output=True, text=True, timeout=3,
+                    )
+                    for line in out.stdout.splitlines():
+                        line = line.strip()
+                        if line.isdigit():
+                            try:
+                                os.kill(int(line), 15)
+                                killed.append(int(line))
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+        # Remove stale crowbar so next browser launch doesn't SIGTERM a dead PID
+        # (it handles missing file already, but a stale PID pointing at an
+        # unrelated reused PID would be bad — remove it).
         try:
-            with socket.create_connection(("127.0.0.1", 19633), timeout=1.0):
-                return (True, "bridge started, listening on 127.0.0.1:19633 (restart browser for Yomitan dictionaries)")
-        except Exception as se:
-            return (False, f"bridge launched but not listening yet ({se}); restart browser may be needed")
-    except Exception as e:
-        return (False, f"failed to start bridge: {e}")
+            bridge_dir = _get_bridge_dir()
+            crowbar = os.path.join(bridge_dir, ".crowbar")
+            if os.path.isfile(crowbar):
+                os.remove(crowbar)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if killed:
+        return f"killed stale standalone bridge PID(s) {killed} holding port 19633"
+    return "no stale standalone bridge found"
+
 
 def install_bridge(additional_extension_ids=None) -> dict:
     """Installs the Yomitan bridge for all detected browsers.
@@ -438,19 +483,15 @@ def install_bridge(additional_extension_ids=None) -> dict:
         except Exception as e:
             results[browser] = (False, f"unexpected: {e}")
 
-    # Try to start the HTTP bridge so Test turns green without browser restart
+    # DO NOT autostart a standalone bridge here. A standalone instance holds
+    # port 19633 with stdin=/dev/null, so /serverVersion looks green while
+    # EVERY /ankiFields returns 502 — and the browser-launched bridge can't
+    # bind (Address already in use). The browser must own the port.
+    # Instead, kill orphans from older CompreDef versions that did autostart.
     try:
-        script_path = _ensure_bridge_script()
-        started, msg = _try_start_bridge(script_path)
-        results["_bridge"] = (started, msg)
-        # Clear any stale crowbar error that would confuse next launch
-        try:
-            import time as _t
-            _t.sleep(0.2)
-        except Exception:
-            pass
+        results["_cleanup"] = (True, _kill_standalone_bridge())
     except Exception as e:
-        results["_bridge"] = (False, f"bridge start failed: {e}")
+        results["_cleanup"] = (False, f"cleanup failed: {e}")
 
     return results
 

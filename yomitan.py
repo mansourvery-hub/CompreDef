@@ -65,7 +65,7 @@ def _get_configured_url() -> str:
 # ---------------------------------------------------------------------------
 # Caches (process-wide, thread-safe)
 # ---------------------------------------------------------------------------
-_word_cache: Dict[Tuple[str, str, int], Tuple[float, List[DictionaryEntry]]] = {}
+_word_cache: Dict[Tuple[str, str, int, str], Tuple[float, List[DictionaryEntry]]] = {}
 _word_lock = threading.Lock()
 
 # availability: None = unknown, True = last probe succeeded, False = last probe failed
@@ -166,12 +166,6 @@ def _post_json(path: str, payload: dict, timeout: float, base_url: Optional[str]
         msg = f"Yomitan error {url}{path}: {e}"
         _set_last_error(msg)
         print(f"CompreDef Yomitan: {msg}")
-        return None
-    except Exception:
-        # Any other error (timeout, etc.) counts as unavailable for negative cache,
-        # but we distinguish timeout as transient — still mark unavailable to avoid
-        # hammering the browser in bulk jobs.
-        _mark_availability(False)
         return None
 
 

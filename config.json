@@ -8,5 +8,6 @@
     "tab_generate": true,
     "plain_text_definitions": false,
     "dictionary_source": "local",
-    "yomitan_url": "http://127.0.0.1:19633"
+    "yomitan_url": "http://127.0.0.1:19633",
+    "yomitan_extension_id": ""
 }

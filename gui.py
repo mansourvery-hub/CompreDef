@@ -276,6 +276,25 @@ class ConfigDialog(QDialog):
         self.yomitan_url_edit.setText(str(self.config.get("yomitan_url") or "http://127.0.0.1:19633"))
         self.yomitan_url_edit.setToolTip("Yomitan API bridge URL (default 127.0.0.1:19633). Change only if you edited yomitan_api.py ADDR/PORT.")
         yomitan_layout.addWidget(self.yomitan_url_edit, stretch=1)
+        # Second row: extension ID (for custom/source builds) + debug
+        yomitan_row2 = QHBoxLayout()
+        yomitan_row2.setContentsMargins(0, 0, 0, 0)
+        yomitan_row2.addWidget(QLabel("Extension ID (only if custom build):"))
+        self.yomitan_extid_edit = QLineEdit()
+        self.yomitan_extid_edit.setPlaceholderText("chrome-extension://.../  (leave empty for store install)")
+        self.yomitan_extid_edit.setText(str(self.config.get("yomitan_extension_id") or ""))
+        self.yomitan_extid_edit.setToolTip(
+            "Only needed if you built Yomitan from source (its extension ID differs).\n"
+            "Find it on the Yomitan settings page URL (chrome-extension://<id>/settings.html)\n"
+            "or about:debugging in Firefox. Store installs work with empty field."
+        )
+        yomitan_row2.addWidget(self.yomitan_extid_edit, stretch=1)
+        self.yomitan_debug_btn = QPushButton("Copy Debug Info")
+        self.yomitan_debug_btn.setMinimumHeight(30)
+        self.yomitan_debug_btn.setToolTip("Collects bridge manifests, serverVersion, ankiFields for 口, error.log tail into clipboard + console. Paste it back when reporting.")
+        self.yomitan_debug_btn.clicked.connect(self._on_copy_yomitan_debug)
+        yomitan_row2.addWidget(self.yomitan_debug_btn)
+        ladder_layout.addLayout(yomitan_row2)
         self.yomitan_install_btn = _size_button(QPushButton("Install / Repair Bridge"))
         self.yomitan_install_btn.setToolTip(
             "One-click install of the Yomitan bridge (native messaging host).\n"
@@ -703,6 +722,15 @@ class ConfigDialog(QDialog):
     def _on_test_yomitan(self) -> None:
         """Pings Yomitan API and shows result in status label + tooltip."""
         url = self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633"
+        # Clear stale negative cache so a Test right after browser restart retries for real.
+        try:
+            if __package__:
+                from .yomitan import clear_yomitan_cache
+            else:
+                from yomitan import clear_yomitan_cache
+            clear_yomitan_cache()
+        except Exception:
+            pass
         self.yomitan_status_label.setText(f"Testing {url} ...")
         self.yomitan_status_label.setStyleSheet("color: gray; font-size: 11px;")
         # Save URL first so test uses what user typed
@@ -789,7 +817,7 @@ class ConfigDialog(QDialog):
                             f"Without that bridge CompreDef cannot see Yomitan's dictionaries — switch to Local if you don't want the extra step."
                         )
                         self.yomitan_status_label.setText(msg)
-                    self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                        self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
                     print(f"CompreDef: Yomitan test failed: {err}")
                     tooltip(msg, parent=self)
             except Exception as e:
@@ -817,7 +845,13 @@ class ConfigDialog(QDialog):
                     from .yomitan_installer import install_bridge
                 else:
                     from yomitan_installer import install_bridge
-                results = install_bridge()
+                extid = ""
+                try:
+                    extid = self.yomitan_extid_edit.text().strip()
+                except Exception:
+                    pass
+                extra = [extid] if extid else []
+                results = install_bridge(extra)
                 return (results, None)
             except Exception as e:
                 import traceback
@@ -841,45 +875,39 @@ class ConfigDialog(QDialog):
                     clear_yomitan_cache()
                 except Exception:
                     pass
-                # Summarize per-browser (exclude _bridge)
+                # Summarize per-browser (plus _cleanup note, no more _bridge autostart)
                 if isinstance(results, dict) and results:
-                    # _bridge is the HTTP server, not a browser
-                    bridge_ok, bridge_msg = results.get("_bridge", (False, "")) if "_bridge" in results else (False, "")
+                    cleanup_msg = ""
+                    if "_cleanup" in results:
+                        _ok, _msg = results["_cleanup"]
+                        cleanup_msg = f" Cleanup: {_msg}."
+                        print(f"CompreDef: Yomitan bridge cleanup: {_msg}")
                     browser_results = {k: v for k, v in results.items() if not k.startswith("_")}
                     ok = [b for b, (s, _) in browser_results.items() if s]
                     fail = [(b, m) for b, (s, m) in browser_results.items() if not s]
                     if ok:
-                        if bridge_ok:
-                            msg = f"✓ Bridge installed for: {', '.join(ok)} and started ({bridge_msg}). Click Test — should turn green (if Yomitan API enabled, else enable it, no restart needed for Test)."
-                        else:
-                            msg = f"✓ Bridge installed for: {', '.join(ok)}. Restart browser, then enable Yomitan → Settings → Advanced → General → Enable Yomitan API, then click Test."
-                            if bridge_msg:
-                                msg += f" (bridge start: {bridge_msg})"
+                        msg = (
+                            f"✓ Manifests installed for: {', '.join(ok)}.{cleanup_msg} "
+                            f"FULLY QUIT the browser (all windows), reopen it, enable "
+                            f"Yomitan → Settings → Advanced → General → Enable Yomitan API, then click Test. "
+                            f"NOTE: Test only turns fully green when the BROWSER owns port 19633 — "
+                            f"a standalone bridge gives serverVersion but always 502 on ankiFields."
+                        )
                         self.yomitan_status_label.setText(msg)
                         self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
                         print(f"CompreDef: Yomitan bridge install results: {results}")
-                        tooltip(f"Yomitan bridge installed — {bridge_msg}", parent=self)
+                        tooltip(f"Yomitan manifests installed for {', '.join(ok)} — restart browser completely, then Test", parent=self)
                     if fail:
                         print(f"CompreDef: Yomitan bridge partial failures: {fail}")
                         if not ok:
-                            self.yomitan_status_label.setText(f"✗ Bridge install failed for all browsers: {fail} | bridge: {bridge_msg}")
+                            self.yomitan_status_label.setText(f"✗ Bridge install failed for all browsers: {fail}.{cleanup_msg}")
                             self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
-                    if not ok and not fail and bridge_ok:
-                        # Only bridge started, browsers may have failed but bridge is running for Test
-                        self.yomitan_status_label.setText(f"✓ Bridge started ({bridge_msg}). Click Test.")
-                        self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
                 else:
                     self.yomitan_status_label.setText("✗ Bridge install returned no results — see console")
                     self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
-                # Auto-test after install (give bridge a moment)
-                try:
-                    from aqt.qt import QTimer
-                    QTimer.singleShot(1200, self._on_test_yomitan)
-                except Exception:
-                    try:
-                        self._on_test_yomitan()
-                    except Exception:
-                        pass
+                # Do NOT auto-Test immediately: browser restart is required for
+                # the browser-launched bridge to bind. Auto-test would hit the
+                # (now killed) standalone port and confuse with red.
             except Exception as e:
                 import traceback
                 self.yomitan_status_label.setText(f"✗ Install error: {e}")
@@ -894,6 +922,127 @@ class ConfigDialog(QDialog):
             class FakeFuture:
                 def result(self): return res
             on_done(FakeFuture())
+
+    def _on_copy_yomitan_debug(self) -> None:
+        """Collects bridge diagnostics into clipboard + console for bug reports."""
+        url = ""
+        try:
+            url = self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633"
+        except Exception:
+            url = "http://127.0.0.1:19633"
+        self.yomitan_status_label.setText("Collecting Yomitan debug info ...")
+        def task():
+            import json, os, urllib.request, urllib.error, subprocess
+            lines = [f"CompreDef Yomitan debug @ {url}"]
+            try:
+                if __package__:
+                    from .yomitan_installer import _get_bridge_dir, get_install_status
+                else:
+                    from yomitan_installer import _get_bridge_dir, get_install_status
+                bdir = _get_bridge_dir()
+                bscript = os.path.join(bdir, "yomitan_api.py")
+                lines.append(f"bridge script: {bscript} exists={os.path.isfile(bscript)}")
+                elog = os.path.join(bdir, "error.log")
+                if os.path.isfile(elog):
+                    try:
+                        with open(elog, encoding="utf-8", errors="replace") as f:
+                            tail = f.read()[-2000:]
+                        lines.append("error.log tail:\n" + tail)
+                    except Exception as e:
+                        lines.append(f"error.log unreadable: {e}")
+                else:
+                    lines.append("error.log: (none — bridge never errored)")
+                try:
+                    st = get_install_status()
+                    lines.append(f"manifests: {st}")
+                    candidates = {
+                        "chrome": os.path.expanduser("~/.config/google-chrome/NativeMessagingHosts/yomitan_api.json"),
+                        "chromium": os.path.expanduser("~/.config/chromium/NativeMessagingHosts/yomitan_api.json"),
+                        "brave": os.path.expanduser("~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/yomitan_api.json"),
+                        "firefox": os.path.expanduser("~/.mozilla/native-messaging-hosts/yomitan_api.json"),
+                    }
+                    for browser, p in candidates.items():
+                        if p and os.path.isfile(p):
+                            with open(p, encoding="utf-8") as f:
+                                content = f.read()
+                            lines.append(f"{browser} manifest ({p}): {content[:400]}")
+                        else:
+                            lines.append(f"{browser} manifest: MISSING at {p}")
+                except Exception as e:
+                    lines.append(f"install status failed: {e}")
+            except Exception as e:
+                lines.append(f"installer import failed: {e}")
+            try:
+                import socket
+                try:
+                    with socket.create_connection(("127.0.0.1", 19633), timeout=1.0):
+                        lines.append("port 19633: OPEN (something listening)")
+                except Exception as e:
+                    lines.append(f"port 19633: CLOSED ({e})")
+            except Exception as e:
+                lines.append(f"socket check failed: {e}")
+            try:
+                out = subprocess.run(["pgrep", "-af", "yomitan_api.py"], capture_output=True, text=True, timeout=3)
+                lines.append("yomitan processes:\n" + (out.stdout.strip() or "(none)"))
+            except Exception as e:
+                lines.append(f"pgrep failed: {e}")
+            try:
+                req = urllib.request.Request(url.rstrip("/") + "/serverVersion", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                    lines.append(f"serverVersion 200: {resp.read().decode()[:300]}")
+            except Exception as e:
+                lines.append(f"serverVersion FAILED: {e}")
+            try:
+                req = urllib.request.Request(url.rstrip("/") + "/yomitanVersion", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    lines.append(f"yomitanVersion 200: {resp.read().decode()[:500]}")
+            except urllib.error.HTTPError as he:
+                try:
+                    body = he.read().decode()[:500]
+                except Exception:
+                    body = str(he)
+                lines.append(f"yomitanVersion HTTP {he.code}: {body}")
+            except Exception as e:
+                lines.append(f"yomitanVersion FAILED: {e}")
+            try:
+                payload = json.dumps({"text": "口", "type": "term", "markers": ["glossary"], "maxEntries": 1, "includeMedia": False}).encode()
+                req = urllib.request.Request(url.rstrip("/") + "/ankiFields", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=4.0) as resp:
+                    body = resp.read().decode()
+                    lines.append(f"ankiFields(口) 200 len={len(body)}: {body[:600]}")
+            except urllib.error.HTTPError as he:
+                try:
+                    body = he.read().decode()[:600]
+                except Exception:
+                    body = str(he)
+                lines.append(f"ankiFields(口) HTTP {he.code}: {body}")
+            except Exception as e:
+                lines.append(f"ankiFields(口) FAILED: {e}")
+            return "\n".join(lines)
+
+        def on_done(future):
+            try:
+                text = future.result()
+                print(text)
+                try:
+                    from aqt.qt import QApplication
+                    QApplication.clipboard().setText(text)
+                    self.yomitan_status_label.setText("Debug info copied to clipboard + printed to console — paste it back in chat.")
+                except Exception:
+                    self.yomitan_status_label.setText("Debug info printed to console (clipboard unavailable).")
+                self.yomitan_status_label.setStyleSheet("color: gray; font-size: 11px;")
+                tooltip("Yomitan debug copied — paste it back", parent=self)
+            except Exception as e:
+                import traceback
+                print(traceback.format_exc())
+                self.yomitan_status_label.setText(f"Debug failed: {e}")
+        try:
+            mw.taskman.run_in_background(task, on_done)
+        except Exception:
+            res = task()
+            class FakeFuture2:
+                def result(self): return res
+            on_done(FakeFuture2())
 
     def _on_item_changed(self, item: QListWidgetItem) -> None:
         """Handles checkbox toggles to update disabled_dicts set."""
@@ -1267,6 +1416,7 @@ class ConfigDialog(QDialog):
             "plain_text_definitions": self.plain_text_check.isChecked(),
             "dictionary_source": self.source_combo.currentData() or "local",
             "yomitan_url": self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633",
+            "yomitan_extension_id": self.yomitan_extid_edit.text().strip() if hasattr(self, "yomitan_extid_edit") else "",
             # Backwards compatibility
             "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
             "mode": "Ladder",
@@ -1332,6 +1482,11 @@ class ConfigDialog(QDialog):
                                 _conn2.close()
                     except Exception:
                         pass
+            _extid = ""
+            try:
+                _extid = self.yomitan_extid_edit.text().strip() if hasattr(self, "yomitan_extid_edit") else ""
+            except Exception:
+                pass
             mw.addonManager.writeConfig(self.addon_name, {
                 **self._collect_type_config(),
                 "dictionaries": ordered_dicts,
@@ -1340,6 +1495,7 @@ class ConfigDialog(QDialog):
                 "plain_text_definitions": self.plain_text_check.isChecked(),
                 "dictionary_source": self.source_combo.currentData() or "local",
                 "yomitan_url": self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633",
+                "yomitan_extension_id": _extid,
                 "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
                 "mode": "Ladder",
             })
