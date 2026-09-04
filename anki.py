@@ -10,6 +10,7 @@ _known_kanji_cache: Set[str] = set()
 _known_vocab_cache: Set[str] = set()
 _caches_ready = threading.Event()
 _build_lock = threading.Lock()
+_db_warned = False
 
 def _get_root_addon_name() -> str:
     """Retrieves the root add-on package name for config access."""
@@ -18,16 +19,41 @@ def _get_root_addon_name() -> str:
     # We are in 'compredef.anki', we want 'compredef'
     return __name__.split('.')[0]
 
+def _warn_db_error(msg: str) -> None:
+    """
+    Surfaces database failures visibly instead of failing silently.
+    A silent empty knowledge set (0 known kanji) is indistinguishable
+    from a genuine beginner collection — the v1.0.5 'JOIN models' bug
+    proved this must be loud. Warns once per session to avoid spam.
+    """
+    global _db_warned
+    print(f"CompreDef: {msg}")
+    if _db_warned:
+        return
+    _db_warned = True
+    try:
+        from aqt.utils import tooltip
+        tooltip(f"CompreDef: {msg}")
+    except Exception:
+        pass  # headless/test environments have no tooltip; print suffices
+
 def _fetch_learned_note_fields() -> list:
     """
-    Fetches the 'flds' blob for all mature notes of the configured note type.
-    Returns a list of (flds, field_index).
+    Fetches the Expression field of every mature note of the configured
+    note type. Returns a list of (word_text,) already extracted.
+
+    Schema-proof by design: the query touches ONLY the 'notes' and
+    'cards' tables (stable across Anki versions) and resolves each note's
+    model via the public mw.col.models API. It must NEVER reference the
+    legacy 'models' table by name — that table was renamed to 'notetypes'
+    in Anki 23.10+, so 'JOIN models' fails with 'no such table' on modern
+    Anki and silently yields an empty knowledge set.
     """
     try:
         if not mw or not mw.col:
             return []
 
-        # 1. Get configured note type and word field
+        # 1. Configured note type and word field
         root_name = _get_root_addon_name()
         config = mw.addonManager.getConfig(root_name) or {}
         note_type_name = config.get("note_type")
@@ -36,36 +62,57 @@ def _fetch_learned_note_fields() -> list:
         if not note_type_name or not word_field_name:
             return []
 
-        # 2. Find the index of the word_field in the model
-        model = mw.col.models.by_name(note_type_name)
-        if not model:
-            return []
-        
-        # model["flds"] is a list of dicts like {"name": "Expression", ...}
-        field_index = None
-        for i, f in enumerate(model["flds"]):
-            if f["name"] == word_field_name:
-                field_index = i
-                break
-        
-        if field_index is None:
-            return []
+        # 2. Mature notes: (mid, flds). The mid identifies the note's
+        # model without any assumption about Anki's internal table names.
+        rows = mw.col.db.all(
+            "SELECT mid, flds FROM notes "
+            "WHERE id IN (SELECT nid FROM cards WHERE ivl >= 21)"
+        ) or []
 
-        # 3. Query for flds of mature notes of this specific type
-        query = """
-        SELECT n.flds
-        FROM notes n
-        JOIN models m ON n.mid = m.id
-        WHERE m.name = ? 
-          AND n.id IN (SELECT nid FROM cards WHERE ivl >= 21)
-        """
-        rows = mw.col.db.all(query, (note_type_name,)) or []
-        
-        # Return the flds and the target index for extraction
-        return [(row[0], field_index) for row in rows]
+        # 3. Resolve mid -> Expression-field index once per model, keeping
+        # only notes whose model IS the configured note type.
+        index_by_mid: dict = {}
+        out = []
+        for row in rows:
+            mid, flds_blob = row[0], row[1]
+            if mid not in index_by_mid:
+                index_by_mid[mid] = _expression_index(mid, note_type_name,
+                                                      word_field_name)
+            field_index = index_by_mid[mid]
+            if field_index is None:
+                continue
+            if not flds_blob or not isinstance(flds_blob, str):
+                continue
+            fields = flds_blob.split(_FIELD_SEP)
+            if field_index >= len(fields):
+                continue
+            word_text = fields[field_index].strip()
+            if word_text:
+                out.append(word_text)
+        return out
     except Exception as e:
-        print(f"CompreDef: DB error while fetching learned notes: {e}")
+        _warn_db_error(f"DB error while fetching learned notes: {e}")
         return []
+
+def _expression_index(mid: int, note_type_name: str,
+                      word_field_name: str) -> Optional[int]:
+    """
+    Returns the index of the configured word field for the model 'mid',
+    or None if that model is not the configured note type or lacks the
+    field. Model lookup goes through mw.col.models (public API), never
+    raw SQL against Anki's internal tables.
+    """
+    try:
+        model = mw.col.models.get(mid)
+    except Exception:
+        return None
+    if not model or model.get("name") != note_type_name:
+        return None
+    for i, f in enumerate(model.get("flds", [])):
+        name = f.get("name") if isinstance(f, dict) else f
+        if name == word_field_name:
+            return i
+    return None
 
 def _build_caches() -> None:
     """Internal worker to build the session knowledge snapshot."""
@@ -77,20 +124,13 @@ def _build_caches() -> None:
         known_kanji: Set[str] = set()
         known_words: Set[str] = set()
 
-        for flds_blob, field_index in _fetch_learned_note_fields():
-            if not flds_blob or not isinstance(flds_blob, str): 
+        # _fetch_learned_note_fields already returns ONLY the configured
+        # Expression field text — kanji from Definition/Example fields can
+        # never reach the known set (and generated definitions written to
+        # the Definition field can never pollute it).
+        for word_text in _fetch_learned_note_fields():
+            if not word_text or not isinstance(word_text, str):
                 continue
-            
-            # Split the flds blob into individual fields
-            fields = flds_blob.split(_FIELD_SEP)
-            if field_index >= len(fields):
-                continue
-            
-            # CORRECTNESS FIX: Only extract knowledge from the Expression field
-            word_text = fields[field_index].strip()
-            if not word_text:
-                continue
-                
             known_kanji.update(_KANJI_RE.findall(word_text))
             known_words.add(word_text)
 

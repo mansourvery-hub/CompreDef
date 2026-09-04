@@ -146,3 +146,12 @@ The fundamental regression suite lives at `tests/test_regression.py` and **must 
 | Renderer upgrade left duplicate/orphan rows behind | `test_renderer_upgrade_reindexes_cleanly` |
 
 The suite stubs `aqt` so it runs on both system Python and Anki's bundled Python without Anki installed. Smoke tests against the real installed dictionaries self-skip when those dictionaries are absent.
+
+## 5. On-Demand Debugging
+
+Beyond the per-commit suite, `debug/` holds the learner-knowledge
+snapshot spec (SP1–SP6), use cases (U1–U5), copy-paste Debug Console
+recipes for the live collection (`console_snippets.md`), and a
+standalone sanity script (`python3 debug/sanity_knowledge.py`) that is
+deliberately **not** run by CI — it is for triage when something looks
+wrong (e.g. 0 known kanji after an Anki upgrade).

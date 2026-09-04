@@ -34,8 +34,9 @@ Implementation (provider.py -> LocalSQLiteProvider)
 - `provider.py`: Defines the `DictionaryProvider` interface and the current SQLite-backed implementation.
 - `renderer.py`: Renders Yomitan structured content to HTML.
 - `utils.py`: Shared text cleaning and dictionary discovery utilities.
-- `anki.py`: Safe Anki database interaction for known-kanji extraction.
-- `models.py`: Shared data structures (e.g., `DictionaryEntry`).
+- `anki.py`: Safe Anki database interaction for known-kanji extraction
+  (Expression field of mature notes only; on-demand diagnostics and the
+  snapshot spec live in `debug/`).- `models.py`: Shared data structures (e.g., `DictionaryEntry`).
 
 ## Install-Time Indexing
 Indexing happens exactly ONCE per dictionary during installation via the GUI. This builds a persistent SQLite index in `user_files/cache/dictionaries.db`. Lookups are pure SQL queries, ensuring the UI never freezes during generation.

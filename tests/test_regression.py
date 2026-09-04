@@ -91,16 +91,24 @@ class _FakeCol:
 class _FakeModels:
     def __init__(self):
         self.models_dict = {}
+        self._next_id = 1
     def by_name(self, name):
         return self.models_dict.get(name)
+    def get(self, mid):
+        # Public models API used by anki.py (mid-based, schema-proof).
+        for m in self.models_dict.values():
+            if m.get("id") == mid:
+                return m
+        return None
     def all_names(self):
         return list(self.models_dict.keys())
     def add_model(self, name, field_names):
-        # Real Anki models store fields as a list of dicts with "name".
-        self.models_dict[name] = {
-            "name": name,
-            "flds": [{"name": n} for n in field_names],
-        }
+        # Real Anki models carry an id and fields as dicts with "name".
+        model = {"id": self._next_id, "name": name,
+                 "flds": [{"name": n} for n in field_names]}
+        self._next_id += 1
+        self.models_dict[name] = model
+        return model["id"]
 
 class _FakeAddonManager:
     def __init__(self):
@@ -1633,6 +1641,7 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
     prev_db_all = aqt.mw.col.db.all
     prev_configs = dict(aqt.mw.addonManager.configs)
     prev_models = dict(aqt.mw.col.models.models_dict)
+    prev_next_id = aqt.mw.col.models._next_id
     prev_kanji = set(anki._known_kanji_cache)
     prev_vocab = set(anki._known_vocab_cache)
     prev_ready = anki._caches_ready.is_set()
@@ -1646,7 +1655,7 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         aqt.mw.addonManager.writeConfig(
             addon_key, {"note_type": note_type, "word_field": "Expression"}
         )
-        aqt.mw.col.models.add_model(
+        mid = aqt.mw.col.models.add_model(
             note_type, ["Expression", "Definition", "Example"]
         )
 
@@ -1654,11 +1663,12 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         #   Expression -> 漢字 (must be known)
         #   Definition -> 龍 (simulates a generated definition; must NOT be known)
         #   Example    -> 虎 (must NOT be known)
+        # Rows are (mid, flds) exactly as the real query returns them.
         SEP = "\x1f"
         rows = [
-            (SEP.join(["漢字", "plain def", "plain ex"]),),
-            (SEP.join(["plain word", "龍の定義", "plain ex"]),),
-            (SEP.join(["plain word", "plain def", "虎の例文"]),),
+            (mid, SEP.join(["漢字", "plain def", "plain ex"])),
+            (mid, SEP.join(["plain word", "龍の定義", "plain ex"])),
+            (mid, SEP.join(["plain word", "plain def", "虎の例文"])),
         ]
         aqt.mw.col.db.all = lambda q, p=(): list(rows)
 
@@ -1697,6 +1707,74 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         aqt.mw.addonManager.configs.update(prev_configs)
         aqt.mw.col.models.models_dict.clear()
         aqt.mw.col.models.models_dict.update(prev_models)
+        aqt.mw.col.models._next_id = prev_next_id
+        anki._known_kanji_cache = prev_kanji
+        anki._known_vocab_cache = prev_vocab
+        if prev_ready:
+            anki._caches_ready.set()
+        else:
+            anki._caches_ready.clear()
+        _core._generator = prev_generator
+
+def test_knowledge_survives_new_schema(tmp_root: str) -> None:
+    """
+    The v1.0.5 production bug: the knowledge query referenced the legacy
+    'models' table ('JOIN models'), which does not exist on Anki 23.10+
+    (renamed to 'notetypes'). The query failed, the error was swallowed,
+    and every user got 0 known kanji. This test simulates the new schema
+    by rejecting ANY query that names the legacy table, then asserts the
+    snapshot still builds correctly from the Expression field.
+    """
+    import anki
+    import sqlite3 as _sqlite3
+
+    prev_db_all = aqt.mw.col.db.all
+    prev_configs = dict(aqt.mw.addonManager.configs)
+    prev_models = dict(aqt.mw.col.models.models_dict)
+    prev_next_id = aqt.mw.col.models._next_id
+    prev_kanji = set(anki._known_kanji_cache)
+    prev_vocab = set(anki._known_vocab_cache)
+    prev_ready = anki._caches_ready.is_set()
+    import core as _core
+    prev_generator = _core._generator
+    try:
+        addon_key = anki._get_root_addon_name()
+        note_type = "SchemaProofType"
+        aqt.mw.addonManager.writeConfig(
+            addon_key, {"note_type": note_type, "word_field": "Expression"}
+        )
+        mid = aqt.mw.col.models.add_model(
+            note_type, ["Expression", "Definition"]
+        )
+        SEP = "\x1f"
+        rows = [(mid, SEP.join(["漢字", "龍の定義"]))]
+
+        def strict_all(query, params=()):
+            # New-schema Anki: there is no 'models' table at all.
+            if re.search(r"\b(join|from)\s+models\b", query,
+                         re.IGNORECASE):
+                raise _sqlite3.OperationalError("no such table: models")
+            return list(rows)
+
+        aqt.mw.col.db.all = strict_all
+        anki.reset_caches()
+        known = anki.get_known_kanji_set()
+        check(
+            "schema: snapshot builds without the legacy models table",
+            known == {"漢", "字"},
+            f"known={sorted(known)}",
+        )
+        check(
+            "schema: Definition kanji still excluded under new schema",
+            "龍" not in known,
+        )
+    finally:
+        aqt.mw.col.db.all = prev_db_all
+        aqt.mw.addonManager.configs.clear()
+        aqt.mw.addonManager.configs.update(prev_configs)
+        aqt.mw.col.models.models_dict.clear()
+        aqt.mw.col.models.models_dict.update(prev_models)
+        aqt.mw.col.models._next_id = prev_next_id
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:
@@ -1735,6 +1813,7 @@ def main() -> int:
         test_parse_furigana_field_formats()
         test_disabled_dictionaries_skipped(tmp_root)
         test_kanji_extraction_correctness(tmp_root)
+        test_knowledge_survives_new_schema(tmp_root)
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()
         test_tab_generate_decisions()
