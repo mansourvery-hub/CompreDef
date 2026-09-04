@@ -59,6 +59,18 @@ def _internal_move_mode() -> Any:
     return QAbstractItemView.InternalMove
 
 
+def _user_checkable_flag() -> Any:
+    """Returns Qt.ItemIsUserCheckable across PyQt5 and PyQt6.
+
+    PyQt6 scoped the enums (Qt.ItemFlag.ItemIsUserCheckable); the raw
+    top-level spelling crashed the config dialog on Anki's Qt6 builds
+    (production bug, v1.0.14).
+    """
+    if hasattr(Qt, "ItemFlag") and hasattr(Qt.ItemFlag, "ItemIsUserCheckable"):
+        return Qt.ItemFlag.ItemIsUserCheckable
+    return Qt.ItemIsUserCheckable
+
+
 # Keyword lists for auto-matching target word and definition fields
 _TARGET_WORD_KEYWORDS = [
     "word", "expression", "kanji", "reading", "furigana",
@@ -404,15 +416,12 @@ class ConfigDialog(QDialog):
         if mw and mw.col:
             for name in mw.col.models.all_names():
                 item = QListWidgetItem(name)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setFlags(item.flags() | _user_checkable_flag())
                 checked = name in self.type_mappings
-                if hasattr(Qt, "CheckState"):
-                    item.setCheckState(
-                        Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-                    )
-                else:  # PyQt5 fallback
-                    from aqt.qt import Checked, Unchecked  # type: ignore
-                    item.setCheckState(Checked if checked else Unchecked)
+                # Qt.CheckState works unscoped (PyQt5) AND scoped (PyQt6)
+                item.setCheckState(
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                )
                 item.setData(role, name)
                 self.note_types_list.addItem(item)
         self.note_types_list.blockSignals(False)
@@ -423,11 +432,7 @@ class ConfigDialog(QDialog):
         type_name = item.data(role)
         if not type_name:
             return
-        if hasattr(Qt, "CheckState"):
-            is_checked = item.checkState() == Qt.CheckState.Checked
-        else:  # PyQt5 fallback
-            from aqt.qt import Checked  # type: ignore
-            is_checked = item.checkState() == Checked
+        is_checked = item.checkState() == Qt.CheckState.Checked
         if is_checked and type_name not in self.type_mappings:
             # First check: seed the mapping via auto-match (fields
             # populate when the row is selected).
@@ -744,12 +749,7 @@ class ConfigDialog(QDialog):
         # Select the first checked type so the field form starts populated
         for row in range(self.note_types_list.count()):
             item = self.note_types_list.item(row)
-            role = _user_role()
-            checked = (
-                item.checkState() == Qt.CheckState.Checked
-                if hasattr(Qt, "CheckState")
-                else item.checkState() == 2
-            )
+            checked = item.checkState() == Qt.CheckState.Checked
             if checked:
                 self.note_types_list.setCurrentRow(row)
                 break

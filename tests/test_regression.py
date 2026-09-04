@@ -1692,6 +1692,53 @@ def test_no_undefined_names_in_shipped_modules() -> None:
             ", ".join(sorted(missing)),
         )
 
+def test_qt_enum_compat() -> None:
+    """
+    PyQt6 scoped all Qt enums: raw spellings like `Qt.ItemIsUserCheckable`
+    or `Qt.UserRole` raise AttributeError at RUNTIME on Anki's Qt6
+    builds (production crash, v1.0.14 — the config dialog died on open).
+    gui.py may reference Qt enums ONLY via two-level scoped names
+    (Qt.CheckState.X, Qt.ItemFlag.X, ...) or via the designated compat
+    helpers' `return Qt.<Name>` fallback lines, which exist precisely
+    to serve PyQt5.
+    """
+    import re as _re
+    path = os.path.join(REPO_ROOT, "gui.py")
+    src = open(path, encoding="utf-8").read()
+    # Strip comments and docstrings: only executable code counts.
+    import ast
+    tree = ast.parse(src)
+    doc_ranges = []
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if body and isinstance(body, list) and isinstance(body[0], ast.Expr):
+            v = body[0].value
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                doc_ranges.append((body[0].lineno, body[0].end_lineno))
+    lines = src.splitlines()
+    offenders = []
+    pattern = _re.compile(r"Qt\.([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?")
+    for lineno, line in enumerate(lines, start=1):
+        if any(a <= lineno <= b for a, b in doc_ranges):
+            continue
+        code = line.split("#", 1)[0]  # strip trailing comments
+        stripped = code.strip()
+        if "hasattr(Qt" in code:
+            continue  # compat-probe lines (enum CLASS refs are still top-level in PyQt6)
+        for m in pattern.finditer(code):
+            first, second = m.group(1), m.group(2)
+            if second:
+                continue  # scoped usage (Qt.CheckState.Checked) — always fine
+            if stripped.startswith("return Qt."):
+                continue  # compat-helper PyQt5 fallback (see _user_role etc.)
+            offenders.append(f"gui.py:{lineno}: raw 'Qt.{first}' -> use scoped enum")
+    check(
+        "qt-compat: gui.py uses only scoped Qt enums (PyQt6-safe)",
+        not offenders,
+        "; ".join(offenders[:6]),
+    )
+
+
 def test_package_relative_imports() -> None:
     """
     Simulates how Anki loads the add-on: as a PACKAGE whose folder is NOT
@@ -2036,6 +2083,7 @@ def main() -> int:
         test_knowledge_summary_text()
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()
+        test_qt_enum_compat()
         test_tab_generate_decisions()
         test_multi_note_type_targeting()
         test_real_dictionary_smoke()
