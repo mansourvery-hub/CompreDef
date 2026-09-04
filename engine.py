@@ -14,6 +14,15 @@ else:
     from utils import extract_clean_word, extract_base_text
     from models import DictionaryEntry
 
+# Yomitan fail-safe import — never crash if yomitan.py is missing or aqt stub incomplete
+try:
+    if __package__:
+        from .yomitan import fetch_yomitan_definitions
+    else:
+        from yomitan import fetch_yomitan_definitions
+except Exception:
+    fetch_yomitan_definitions = None  # type: ignore
+
 
 def _is_plain_text_mode() -> bool:
     """Reads the GUI toggle 'plain_text_definitions' from add-on config.
@@ -124,6 +133,57 @@ class DefinitionGenerator:
                     best_score = res.score
                     best_definition = res.definition
 
-        if best_definition is not None and plain_text:
-            return _to_plain_text(best_definition)
-        return best_definition
+        if best_definition is not None:
+            if plain_text:
+                return _to_plain_text(best_definition)
+            return best_definition
+
+        # ------------------------------------------------------------------
+        # Fail-safe: if local ladder produced nothing, try Yomitan API.
+        # Minimal, no GUI toggle — if the user has Yomitan running with
+        # dictionaries, we borrow them instead of returning None. All local
+        # dictionaries still take precedence; this only fires when CompreDef
+        # has zero candidates. Users can manually set "yomitan_fallback": false
+        # in config.json to disable.
+        # ------------------------------------------------------------------
+        def _yomitan_enabled() -> bool:
+            try:
+                from aqt import mw  # type: ignore
+                if mw and hasattr(mw, "addonManager"):
+                    try:
+                        name = mw.addonManager.addonFromModule(__name__)
+                    except Exception:
+                        name = None
+                    if not name:
+                        name = "1619602654"
+                    cfg = mw.addonManager.getConfig(name)
+                    if isinstance(cfg, dict) and cfg.get("yomitan_fallback") is False:
+                        return False
+            except Exception:
+                pass
+            return True
+
+        if fetch_yomitan_definitions is not None and _yomitan_enabled():
+            try:
+                y_entries = fetch_yomitan_definitions(word, reading)
+            except Exception:
+                y_entries = []
+            if y_entries:
+                # Same filtering + scoring as local path
+                non_ref_y = [e for e in y_entries if not is_reference_title(e.definition)]
+                valid_y = non_ref_y if non_ref_y else (y_entries if len(y_entries) == 1 else [])
+                best_y: Optional[str] = None
+                best_y_score: float = -1.0
+                for entry in valid_y:
+                    res = calculate_kanji_score(entry.definition, self.known_kanji)
+                    if res.is_perfect:
+                        return _finalize(res.definition)
+                    if res.score > best_y_score:
+                        best_y_score = res.score
+                        best_y = res.definition
+                if best_y is not None:
+                    if plain_text:
+                        return _to_plain_text(best_y)
+                    return best_y
+
+        return None
