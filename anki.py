@@ -113,7 +113,7 @@ def _build_caches() -> None:
         print(f"CompreDef: learner snapshot built: "
               f"{len(known_kanji)} kanji / {len(known_words)} words "
               f"from {_last_rows_scanned} mature notes "
-              f"(all note types, first field only)")
+              f"(mature = ivl >= 21, all note types, first field only)")
 
 def init_caches_async() -> None:
     """
@@ -164,7 +164,7 @@ def knowledge_status() -> dict:
         "known_words": len(_known_vocab_cache),
         "mature_notes_scanned": _last_rows_scanned,
         "words_kept": _last_words_kept,
-        "scope": "all note types, first field only",
+        "scope": "mature notes only (ivl >= 21), all note types, first field",
         "last_error": _last_error,
     }
 
@@ -189,7 +189,7 @@ def knowledge_summary_text(max_kanji: int = 2000,
     lines = [
         f"Known kanji: {len(known)}",
         f"Known words: {len(vocab)}",
-        f"Scope: {status['scope']}",
+        f"Source: {status['scope']}",
         f"Mature notes scanned: {status['mature_notes_scanned']}",
     ]
     if status["last_error"]:

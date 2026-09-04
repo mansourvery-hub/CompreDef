@@ -728,8 +728,10 @@ def show_knowledge_dialog() -> None:
     layout = QVBoxLayout()
     dialog.setLayout(layout)
     hint = QLabel(
-        "Session snapshot of your Japanese proficiency, used for scoring. "
-        "Restart Anki to rebuild it."
+        "Kanji and words from the FIRST FIELD of your MATURE notes\n"
+        "(cards with interval \u2265 21 days), across all note types.\n"
+        "Definitions, examples, and other fields are never counted.\n"
+        "Restart Anki to rebuild the snapshot."
     )
     hint.setWordWrap(True)
     layout.addWidget(hint)

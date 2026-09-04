@@ -1696,7 +1696,7 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         check(
             "kanji: status reports a ready all-types snapshot",
             status["ready"] and status["mature_notes_scanned"] == 5
-            and status["scope"] == "all note types, first field only"
+            and status["scope"] == "mature notes only (ivl >= 21), all note types, first field"
             and status["last_error"] is None,
             f"status={status}",
         )
@@ -1788,7 +1788,7 @@ def test_knowledge_summary_text() -> None:
         check("summary: shows word count", "Known words: 2" in text, text)
         check("summary: lists the kanji",
               "漢" in text and "語" in text, text)
-        check("summary: shows scope", "all note types" in text, text)
+        check("summary: shows scope", "mature notes" in text, text)
         short = anki.knowledge_summary_text(max_kanji=2, max_words=1)
         check("summary: truncates long lists with a remainder",
               "more" in short, short)
