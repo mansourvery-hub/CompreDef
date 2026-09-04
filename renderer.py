@@ -89,6 +89,43 @@ def render_structured_content_node(node: Any) -> str:
 
     return ""
 
+def _extract_plain_text_node(node: Any) -> str:
+    """Recursively extracts visible plain text from a Yomitan structured-content node.
+
+    Unlike render_structured_content_node this does NOT build HTML — it walks
+    the tree and concatenates only text, skipping all tags/attributes/styles.
+    This is the zero-HTML path used when the user opts for plain-text
+    definitions (avoids generating HTML at all).
+    """
+    if isinstance(node, str):
+        return node
+
+    if isinstance(node, list):
+        return "".join(_extract_plain_text_node(child) for child in node)
+
+    if isinstance(node, dict):
+        # Structured node: recurse into its 'content'. Ignore tag/data/style/
+        # lang/title/href/colSpan/img etc. — only visible text matters.
+        # For <img> preserve alt/title as plain text (same as Yomitan shows).
+        tag = node.get("tag", "")
+        # Furigana readings (<rt>) and <rp> are ruby annotations, not base
+        # text — skip them so plain output matches scoring's base_text
+        # (e.g. 先[rt]ま[/rt]ず -> "先ず", not "先まず"). Same for <rp>.
+        if tag in ("rt", "rp"):
+            return ""
+        if tag == "img":
+            alt = node.get("title") or node.get("alt", "")
+            return str(alt) if alt else ""
+        if tag == "br":
+            return "\n"
+        content = node.get("content", "")
+        if content is not None:
+            return _extract_plain_text_node(content)
+        return ""
+
+    return ""
+
+
 def render_yomitan_definition_html(def_block: Any) -> str:
     """Renders a Yomitan definition block into Anki-ready HTML."""
     if isinstance(def_block, str):
@@ -101,5 +138,25 @@ def render_yomitan_definition_html(def_block: Any) -> str:
             content = def_block.get("content", [])
             rendered = render_structured_content_node(content)
             return f'<span class="structured-content">{rendered}</span>'
+
+    return ""
+
+
+def render_yomitan_definition_text(def_block: Any) -> str:
+    """Renders a Yomitan definition block to plain text (no HTML).
+
+    This is the efficient plain-text path: it extracts visible text directly
+    from the structured content without ever building an HTML string. The
+    result is stripped but preserves internal newlines from <br> / text blocks.
+    """
+    if isinstance(def_block, str):
+        return def_block.strip()
+
+    if isinstance(def_block, dict):
+        if def_block.get("type") == "text":
+            return str(def_block.get("text", "")).strip()
+        if def_block.get("type") == "structured-content" or "content" in def_block:
+            content = def_block.get("content", [])
+            return _extract_plain_text_node(content).strip()
 
     return ""

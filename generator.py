@@ -10,14 +10,18 @@ else:
     from core import get_generator
     from utils import extract_clean_word
 
-def generate_definition(target_word, mode="", dictionary_folder="", dictionaries=None, reading="", disabled_dictionaries=None):
+def generate_definition(target_word, mode="", dictionary_folder="", dictionaries=None, reading="", disabled_dictionaries=None, plain_text=None):
     # Map legacy args to new DefinitionGenerator.generate()
     if __package__:
         from .utils import resolve_ladder_paths
     else:
         from utils import resolve_ladder_paths
     ladder = resolve_ladder_paths(dictionaries, dictionary_folder, disabled_dictionaries)
-    return get_generator().generate(target_word, ladder, reading)
+    # plain_text=None lets engine auto-detect from config; explicit True/False
+    # forces the mode (useful for tests / callers that want to override).
+    if plain_text is None:
+        return get_generator().generate(target_word, ladder, reading)
+    return get_generator().generate(target_word, ladder, reading, plain_text=plain_text)
 
 # Re-export for tests
 def _calculate_kanji_score(text, known):

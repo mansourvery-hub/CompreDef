@@ -12,10 +12,10 @@ from typing import List, Optional, Callable, Any, Dict
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .models import DictionaryEntry
-    from .renderer import render_yomitan_definition_html
+    from .renderer import render_yomitan_definition_html, render_yomitan_definition_text
 else:
     from models import DictionaryEntry
-    from renderer import render_yomitan_definition_html
+    from renderer import render_yomitan_definition_html, render_yomitan_definition_text
 
 class IndexingError(Exception):
     """Raised when dictionary installation/indexing fails."""
@@ -64,6 +64,34 @@ class LocalSQLiteProvider(DictionaryProvider):
     RENDERER_VERSION = "yomitan_html_v2_reading"
     _INDEX_BATCH_SIZE = 5000
     _install_lock = threading.Lock()
+
+    def _should_use_plain_text(self) -> bool:
+        """Checks add-on config for plain-text mode without hard dependency on aqt.
+
+        Returns True if the user enabled 'plain_text_definitions' in the
+        config. In headless/test environments (no mw/col) returns False so
+        existing tests keep expecting HTML.
+        """
+        try:
+            # Delayed import: aqt may be a stub in tests or absent.
+            from aqt import mw  # type: ignore
+            if mw is None or not hasattr(mw, "addonManager"):
+                return False
+            # Resolve add-on name for config lookup
+            try:
+                name = mw.addonManager.addonFromModule(__name__)
+            except Exception:
+                name = None
+            if not name:
+                # Fallback: try well-known package id
+                name = "1619602654"
+            cfg = mw.addonManager.getConfig(name)
+            if isinstance(cfg, dict) and cfg.get("plain_text_definitions"):
+                return True
+            # Also check legacy config dict if available via utils helper
+            return False
+        except Exception:
+            return False
 
     def __init__(self, cache_dir: str):
         self.cache_dir = cache_dir
@@ -211,10 +239,23 @@ class LocalSQLiteProvider(DictionaryProvider):
         rows = self._db_query("SELECT definition FROM entries WHERE dict_path = ? AND term = ?", (norm, word))
         return [DictionaryEntry(word, reading, r[0], title, norm) for r in rows]
 
-    def install(self, path: str, progress_cb: Optional[Callable[[int, int], None]] = None, cancel_check: Optional[Callable[[], bool]] = None) -> int:
+    def install(self, path: str, progress_cb: Optional[Callable[[int, int], None]] = None, cancel_check: Optional[Callable[[], bool]] = None, plain_text: Optional[bool] = None) -> int:
+        """
+        Parse and index a dictionary.
+
+        When plain_text is True the definitions are rendered as plain text
+        (zero HTML generation). When False/None the rich Yomitan HTML is used.
+        If plain_text is None the value is read from add-on config
+        (plain_text_definitions) so new installs automatically respect the GUI
+        toggle without an explicit argument.
+        """
         norm = os.path.realpath(os.path.expanduser(path))
         if not os.path.exists(norm): raise IndexingError(f"Dict not found: {norm}")
-        
+
+        # Resolve plain-text mode: explicit arg wins, else config.
+        if plain_text is None:
+            plain_text = self._should_use_plain_text()
+
         with self._install_lock:
             sig = self._compute_signature(norm)
             rows = self._db_query("SELECT signature FROM dictionaries WHERE path = ?", (norm,))
@@ -256,9 +297,15 @@ class LocalSQLiteProvider(DictionaryProvider):
                         if not word or not isinstance(word, str): continue
                         reading = entry[1] if isinstance(entry[1], str) else ""
                         for def_block in entry[5]:
-                            html_def = render_yomitan_definition_html(def_block)
-                            if html_def:
-                                batch.append((norm, word, html_def, self._normalize_reading(reading)))
+                            if plain_text:
+                                # Plain-text path: NO HTML generation at all.
+                                text_def = render_yomitan_definition_text(def_block)
+                                if text_def:
+                                    batch.append((norm, word, text_def, self._normalize_reading(reading)))
+                            else:
+                                html_def = render_yomitan_definition_html(def_block)
+                                if html_def:
+                                    batch.append((norm, word, html_def, self._normalize_reading(reading)))
                         if len(batch) >= self._INDEX_BATCH_SIZE:
                             flush()
                             if progress_cb: progress_cb(total, grand_total[0])

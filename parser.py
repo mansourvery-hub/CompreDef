@@ -6,7 +6,7 @@ Redirects to provider.py, renderer.py and utils.py.
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .provider import LocalSQLiteProvider, IndexingError
-    from .renderer import render_structured_content_node, render_yomitan_definition_html
+    from .renderer import render_structured_content_node, render_yomitan_definition_html, render_yomitan_definition_text
     from .utils import (
         is_zip_dictionary,
         is_directory_dictionary,
@@ -18,7 +18,7 @@ if __package__:
     from .core import get_provider
 else:
     from provider import LocalSQLiteProvider, IndexingError
-    from renderer import render_structured_content_node, render_yomitan_definition_html
+    from renderer import render_structured_content_node, render_yomitan_definition_html, render_yomitan_definition_text
     from utils import (
         is_zip_dictionary,
         is_directory_dictionary,
@@ -45,8 +45,8 @@ def get_single_dictionary(path):
             return get_provider().is_installed(self.path)
         def entry_count(self):
             return get_provider().get_entry_count(self.path)
-        def install(self, progress_cb=None, cancel_check=None):
-            return get_provider().install(self.path, progress_cb, cancel_check)
+        def install(self, progress_cb=None, cancel_check=None, plain_text=None):
+            return get_provider().install(self.path, progress_cb, cancel_check, plain_text=plain_text)
         def lookup(self, word, reading=""):
             entries = get_provider().lookup_by_path(self.path, word, reading)
             return [e.definition for e in entries]
@@ -65,8 +65,8 @@ class SingleDictionary:
     @staticmethod
     def _iter_term_banks(self): pass # stub
 
-def install_dictionary(path, progress_cb=None, cancel_check=None):
-    return get_provider().install(path, progress_cb, cancel_check)
+def install_dictionary(path, progress_cb=None, cancel_check=None, plain_text=None):
+    return get_provider().install(path, progress_cb, cancel_check, plain_text=plain_text)
 
 def uninstall_dictionary(path):
     get_provider().uninstall(path)

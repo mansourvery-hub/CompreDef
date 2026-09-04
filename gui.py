@@ -337,6 +337,20 @@ class ConfigDialog(QDialog):
         self.tab_generate_check.setChecked(bool(self.config.get("tab_generate", True)))
         generation_layout.addWidget(self.tab_generate_check)
 
+        self.plain_text_check = QCheckBox(
+            "Plain-text definitions: store plain text instead of Yomitan HTML"
+        )
+        self.plain_text_check.setToolTip(
+            "When enabled, NEW dictionary installs render definitions as plain\n"
+            "text (no <ruby>, <span>, data-sc-* or inline CSS). Existing\n"
+            "indexed entries are converted on-the-fly via cheap HTML stripping,\n"
+            "so toggling does not require a full re-index — but new installs\n"
+            "skip HTML generation entirely (saves the costly HTML build)."
+        )
+        # Same crash-safety timing as tab_generate: restore at creation.
+        self.plain_text_check.setChecked(bool(self.config.get("plain_text_definitions", False)))
+        generation_layout.addWidget(self.plain_text_check)
+
         main_layout.addWidget(generation_group)
 
         # -------------------------------------------------------------
@@ -847,6 +861,7 @@ class ConfigDialog(QDialog):
             "disabled_dictionaries": sorted(self.disabled_dicts),
             # Tab-to-Generate (auto-fill on word-field unfocus)
             "tab_generate": self.tab_generate_check.isChecked(),
+            "plain_text_definitions": self.plain_text_check.isChecked(),
             # Backwards compatibility
             "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
             "mode": "Ladder",
@@ -875,6 +890,7 @@ class ConfigDialog(QDialog):
                 "dictionaries": ordered_dicts,
                 "disabled_dictionaries": sorted(self.disabled_dicts),
                 "tab_generate": self.tab_generate_check.isChecked(),
+                "plain_text_definitions": self.plain_text_check.isChecked(),
                 "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
                 "mode": "Ladder",
             })
