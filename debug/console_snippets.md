@@ -7,25 +7,23 @@ your add-on folder id differs.
 ## U1 — Triage "0 known kanji"
 
 ```python
-import importlib
+import importlib, json, os
+folder = mw.addonManager.addonsFolder("1619602654")
+print("version:", json.load(open(os.path.join(folder, "manifest.json")))["human_version"])
 m = importlib.import_module("1619602654.anki")
-print("mature cards:", len(mw.col.find_cards("prop:ivl>=21")))
-print("config:", mw.addonManager.getConfig("1619602654"))
-print("tables:", [r[0] for r in mw.col.db.all(
-    "SELECT name FROM sqlite_master WHERE type='table'")])
-known = m.get_known_kanji_set()
-print("known kanji:", len(known))
+print("status:", m.knowledge_status())
+print("mature:", len(mw.col.find_cards("prop:ivl>=21")))
 ```
 
-Interpretation:
+Interpretation (see also `status["last_error"]`):
 
-- `mature cards: 0` → the empty set is correct; knowledge needs
+- `mature: 0` → the empty set is correct; knowledge needs
   `ivl >= 21` cards.
-- `config` shows a wrong `note_type`/`word_field` (exact names matter)
-  → fix it in Tools → CompreDef Configuration and restart Anki.
-- `tables` lacks `models` but the snapshot is still empty with mature
-  cards present → the query is hitting a renamed table (the v1.0.5
-  incident); current code must not reference it (see S1).
+- `mature_notes_scanned: 0` with mature cards present → the query
+  itself failed (check `last_error`); on old versions this meant the
+  query hit a renamed table.
+- `words_kept: 0` with scanned notes present → every mature note has
+  an empty first field (unusual — inspect a few notes manually).
 
 ## U2 — Does the set match my level?
 
@@ -45,23 +43,17 @@ not (expect False) in the probe list.
 
 ## U3 — Where did this kanji come from?
 
-Finds mature notes whose **Expression field** contains a kanji:
+Finds mature notes whose **first field** contains a kanji:
 
 ```python
 K, SEP = "龍", "\x1f"
-cfg = mw.addonManager.getConfig("1619602654")
-model = mw.col.models.by_name(cfg["note_type"])
-idx = [f["name"] for f in model["flds"]].index(cfg["word_field"])
 hits = 0
-for mid, flds in mw.col.db.all(
-        "SELECT mid, flds FROM notes WHERE id IN "
+for (flds,) in mw.col.db.all(
+        "SELECT flds FROM notes WHERE id IN "
         "(SELECT nid FROM cards WHERE ivl >= 21)"):
-    model2 = mw.col.models.get(mid)
-    if not model2 or model2["name"] != cfg["note_type"]:
-        continue
-    parts = flds.split(SEP)
-    if idx < len(parts) and K in parts[idx]:
-        print("note mid:", mid, "| expression:", parts[idx][:60])
+    first = flds.split(SEP, 1)[0]
+    if K in first:
+        print("first field:", first[:60])
         hits += 1
         if hits >= 10:
             break

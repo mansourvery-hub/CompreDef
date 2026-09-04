@@ -26,14 +26,18 @@ and is **never** executed by CI, `build.sh`, or `release.sh`.
 
 The learner-knowledge snapshot MUST satisfy:
 
-- **SP1 — Expression-only extraction.** For every mature note, only the
-  configured `word_field` (Expression) contributes kanji and vocabulary.
-  Definition, Example, Reading, and all other fields contribute nothing.
-  Rationale: generated definitions are written to the Definition field;
-  scanning it would let CompreDef's own output mark unknown kanji known.
-- **SP2 — Configured note type only.** Notes whose model name differs
-  from the configured `note_type` contribute nothing, even if they have
-  a field with the same name.
+- **SP1 — First-field-only extraction, all note types.** Learner
+  proficiency is collection-wide: for every mature note of ANY type,
+  only the FIRST field (conventionally the word / expression / front)
+  contributes kanji and vocabulary. Definition, Example, Reading, and
+  all other fields contribute nothing. Rationale: generated definitions
+  are written to non-first fields; scanning them would let CompreDef's
+  own output mark unknown kanji known. History: up to v1.0.9 the
+  snapshot was gated on a single configured note type, which silently
+  discarded ~99% of one user's collection.
+- **SP2 — No note-type gating.** Notes are never filtered by model. The
+  generation dialogs keep their own single-type targeting; knowledge
+  does not.
 - **SP3 — Schema-proof data access.** The collection may only be read
   via `mw.col.db.all()` plus the public `mw.col.models` API. Raw SQL
   must never name Anki's internal tables except `notes` and `cards`
@@ -71,9 +75,9 @@ The learner-knowledge snapshot MUST satisfy:
 | Sanity check | Specs covered |
 |---|---|
 | S1 no legacy `models`-table SQL (AST scan of shipped sources) | SP3 |
-| S2 Expression-only, single model | SP1 |
-| S3 decoy model with same field name ignored | SP1, SP2 |
-| S4 misconfigurations degrade quietly | SP6 |
+| S2 first-field-only, single layout | SP1 |
+| S3 mixed layouts across types; non-first kanji excluded | SP1, SP2 |
+| S4 empty/malformed rows skipped; works with empty config | SP6 |
 | S5 DB failure warns visibly, exactly once | SP5 |
 | S6 one scan per session; reset rebuilds once | SP4 |
 

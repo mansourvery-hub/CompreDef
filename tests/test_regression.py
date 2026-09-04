@@ -1590,8 +1590,8 @@ def test_package_relative_imports() -> None:
     sys.meta_path.insert(0, _BlockSiblingImports())
     try:
         expected = {
-            "anki": ["get_known_kanji_set", "get_known_vocabulary_set",
-                     "init_caches_async", "reset_caches"],
+        "anki": ["get_known_kanji_set", "get_known_vocabulary_set",
+                 "init_caches_async", "reset_caches", "knowledge_status"],
             "core": ["get_provider", "get_generator"],
             "engine": ["DefinitionGenerator"],
             "provider": ["LocalSQLiteProvider", "IndexingError"],
@@ -1629,46 +1629,34 @@ def test_package_relative_imports() -> None:
 
 def test_kanji_extraction_correctness(tmp_root: str) -> None:
     """
-    Known kanji must come ONLY from the configured Expression (word) field
-    of mature notes — never from Definition/Example/other fields. This
-    also proves CompreDef-generated definitions (written to the Definition
-    field) can never pollute the learner's known-kanji set.
+    Known kanji/vocab come ONLY from the FIRST field of mature notes,
+    across ALL note types — never from Definition/Example/other fields.
+    Distinct kanji per field position make leaks attributable, and the
+    mixed layouts simulate several note types at once. This also proves
+    CompreDef-generated definitions (written to non-first fields) can
+    never pollute the learner's known-kanji set.
     """
     import anki
 
-    # Save global state: this test rebinds the fake DB/config and rebuilds
-    # the session snapshot, so everything must be restored afterwards.
+    # Save global state: this test rebinds the fake DB and rebuilds the
+    # session snapshot, so everything must be restored afterwards.
     prev_db_all = aqt.mw.col.db.all
-    prev_configs = dict(aqt.mw.addonManager.configs)
-    prev_models = dict(aqt.mw.col.models.models_dict)
-    prev_next_id = aqt.mw.col.models._next_id
     prev_kanji = set(anki._known_kanji_cache)
     prev_vocab = set(anki._known_vocab_cache)
     prev_ready = anki._caches_ready.is_set()
     import core as _core
     prev_generator = _core._generator
     try:
-        # Use the real config-key resolution (in tests anki.__name__ is
-        # "anki"; in Anki it is "<addon-id>.anki").
-        addon_key = anki._get_root_addon_name()
-        note_type = "KnowledgeTestType"
-        aqt.mw.addonManager.writeConfig(
-            addon_key, {"note_type": note_type, "word_field": "Expression"}
-        )
-        mid = aqt.mw.col.models.add_model(
-            note_type, ["Expression", "Definition", "Example"]
-        )
-
-        # Distinct kanji per field so leaks are attributable:
-        #   Expression -> 漢字 (must be known)
-        #   Definition -> 龍 (simulates a generated definition; must NOT be known)
-        #   Example    -> 虎 (must NOT be known)
-        # Rows are (mid, flds) exactly as the real query returns them.
         SEP = "\x1f"
         rows = [
-            (mid, SEP.join(["漢字", "plain def", "plain ex"])),
-            (mid, SEP.join(["plain word", "龍の定義", "plain ex"])),
-            (mid, SEP.join(["plain word", "plain def", "虎の例文"])),
+            # 3-field layout (word / definition / example)
+            (SEP.join(["漢字", "plain def", "plain ex"]),),
+            (SEP.join(["plain", "龍の定義", "plain"]),),
+            (SEP.join(["plain", "plain", "虎の例文"]),),
+            # 2-field layout (front / back) — a different note type
+            (SEP.join(["語彙", "解釈"]),),
+            # 1-field layout (cloze-like single field)
+            ("日本語",),
         ]
         aqt.mw.col.db.all = lambda q, p=(): list(rows)
 
@@ -1676,7 +1664,9 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         known = anki.get_known_kanji_set()
         vocab = anki.get_known_vocabulary_set()
 
-        check("kanji: Expression kanji is known", "漢" in known and "字" in known)
+        check("kanji: first-field kanji is known",
+              {"漢", "字", "語", "彙", "日", "本"} <= known,
+              f"known={sorted(known)}")
         check(
             "kanji: Definition-only kanji is NOT known",
             "龍" not in known,
@@ -1688,8 +1678,8 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             f"known={sorted(known)}",
         )
         check(
-            "kanji: known set is exactly the Expression kanji",
-            known == {"漢", "字"},
+            "kanji: known set is exactly the first-field kanji",
+            known == {"漢", "字", "語", "彙", "日", "本"},
             f"known={sorted(known)}",
         )
         check(
@@ -1697,17 +1687,20 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             "龍" not in known and "虎" not in known,
         )
         check(
-            "kanji: known vocab comes from the Expression field only",
-            "漢字" in vocab and "龍の定義" not in vocab and "虎の例文" not in vocab,
+            "kanji: known vocab comes from first fields only",
+            vocab == {"漢字", "plain", "語彙", "日本語"},
             f"vocab={sorted(vocab)}",
+        )
+        status = anki.knowledge_status()
+        check(
+            "kanji: status reports a ready all-types snapshot",
+            status["ready"] and status["mature_notes_scanned"] == 5
+            and status["scope"] == "all note types, first field only"
+            and status["last_error"] is None,
+            f"status={status}",
         )
     finally:
         aqt.mw.col.db.all = prev_db_all
-        aqt.mw.addonManager.configs.clear()
-        aqt.mw.addonManager.configs.update(prev_configs)
-        aqt.mw.col.models.models_dict.clear()
-        aqt.mw.col.models.models_dict.update(prev_models)
-        aqt.mw.col.models._next_id = prev_next_id
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:
@@ -1723,31 +1716,20 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
     (renamed to 'notetypes'). The query failed, the error was swallowed,
     and every user got 0 known kanji. This test simulates the new schema
     by rejecting ANY query that names the legacy table, then asserts the
-    snapshot still builds correctly from the Expression field.
+    snapshot still builds correctly.
     """
     import anki
     import sqlite3 as _sqlite3
 
     prev_db_all = aqt.mw.col.db.all
-    prev_configs = dict(aqt.mw.addonManager.configs)
-    prev_models = dict(aqt.mw.col.models.models_dict)
-    prev_next_id = aqt.mw.col.models._next_id
     prev_kanji = set(anki._known_kanji_cache)
     prev_vocab = set(anki._known_vocab_cache)
     prev_ready = anki._caches_ready.is_set()
     import core as _core
     prev_generator = _core._generator
     try:
-        addon_key = anki._get_root_addon_name()
-        note_type = "SchemaProofType"
-        aqt.mw.addonManager.writeConfig(
-            addon_key, {"note_type": note_type, "word_field": "Expression"}
-        )
-        mid = aqt.mw.col.models.add_model(
-            note_type, ["Expression", "Definition"]
-        )
         SEP = "\x1f"
-        rows = [(mid, SEP.join(["漢字", "龍の定義"]))]
+        rows = [(SEP.join(["漢字", "龍の定義"]),)]
 
         def strict_all(query, params=()):
             # New-schema Anki: there is no 'models' table at all.
@@ -1765,16 +1747,11 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
             f"known={sorted(known)}",
         )
         check(
-            "schema: Definition kanji still excluded under new schema",
+            "schema: non-first-field kanji still excluded under new schema",
             "龍" not in known,
         )
     finally:
         aqt.mw.col.db.all = prev_db_all
-        aqt.mw.addonManager.configs.clear()
-        aqt.mw.addonManager.configs.update(prev_configs)
-        aqt.mw.col.models.models_dict.clear()
-        aqt.mw.col.models.models_dict.update(prev_models)
-        aqt.mw.col.models._next_id = prev_next_id
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:

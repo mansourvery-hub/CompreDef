@@ -138,20 +138,22 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def fresh_state() -> None:
-    """Resets the session snapshot and the fake Anki world."""
+    """Resets the session snapshot and the fake Anki world.
+
+    Knowledge no longer reads add-on config, so no config setup is
+    needed — the first field of every mature note counts, any type.
+    """
     anki_mod._known_kanji_cache = set()
     anki_mod._known_vocab_cache = set()
     anki_mod._caches_ready.clear()
     anki_mod._db_warned = False
+    anki_mod._last_rows_scanned = 0
+    anki_mod._last_words_kept = 0
+    anki_mod._last_error = None
     MW.col.models = FakeModels()
     MW.col.db = FakeDB()
     MW.addonManager.configs.clear()
     MW._tooltips.clear()
-
-
-def configure(note_type: str = "T", word_field: str = "Expression") -> None:
-    MW.addonManager.configs[anki_mod._get_root_addon_name()] = {
-        "note_type": note_type, "word_field": word_field}
 
 
 SEP = "\x1f"
@@ -203,81 +205,69 @@ def s1_no_legacy_models_table_sql() -> None:
 
 
 def s2_expression_only_single_model() -> None:
-    """Kanji/vocab come only from the Expression field (one model)."""
+    """Kanji/vocab come only from first fields (one layout)."""
     fresh_state()
-    configure()
-    mid = MW.col.models.add("T", ["Expression", "Definition", "Example"])
     MW.col.db.rows = [
-        (mid, SEP.join(["漢字", "plain", "plain"])),
-        (mid, SEP.join(["plain", "龍の定義", "plain"])),
-        (mid, SEP.join(["plain", "plain", "虎の例文"])),
+        (SEP.join(["漢字", "plain", "plain"]),),
+        (SEP.join(["plain", "龍の定義", "plain"]),),
+        (SEP.join(["plain", "plain", "虎の例文"]),),
     ]
     known = anki_mod.get_known_kanji_set()
     vocab = anki_mod.get_known_vocabulary_set()
-    check("S2: Expression kanji known", known == {"漢", "字"},
+    check("S2: first-field kanji known", known == {"漢", "字"},
           f"got {sorted(known)}")
     check("S2: Definition/Example kanji excluded",
           "龍" not in known and "虎" not in known)
-    check("S2: vocab is the Expression text only", vocab == {"漢字", "plain"},
-          f"got {sorted(vocab)}")
+    check("S2: vocab is first-field text only",
+          vocab == {"漢字", "plain"}, f"got {sorted(vocab)}")
 
 
 def s3_other_models_ignored() -> None:
-    """Notes whose model is not the configured type contribute nothing,
-    even when they share a field literally named 'Expression'."""
+    """All note types count: mixed 3-/2-/1-field layouts, first field of
+    each contributes, non-first kanji never do."""
     fresh_state()
-    configure(note_type="Target")
-    t_mid = MW.col.models.add("Target", ["Expression", "Definition"])
-    d_mid = MW.col.models.add("Decoy", ["Expression", "Back"])
     MW.col.db.rows = [
-        (t_mid, SEP.join(["漢字", "x"])),
-        (d_mid, SEP.join(["虎", "x"])),
+        (SEP.join(["漢字", "plain", "plain"]),),
+        (SEP.join(["語彙", "解釈"]),),
+        ("日本語",),
+        (SEP.join(["plain", "龍", "虎"]),),
     ]
     known = anki_mod.get_known_kanji_set()
-    check("S3: decoy-model Expression ignored", known == {"漢", "字"},
+    vocab = anki_mod.get_known_vocabulary_set()
+    check("S3: every type's first field counts",
+          known == {"漢", "字", "語", "彙", "日", "本"},
           f"got {sorted(known)}")
+    check("S3: non-first kanji excluded across layouts",
+          "龍" not in known and "虎" not in known)
+    check("S3: vocab spans layouts",
+          vocab == {"漢字", "plain", "語彙", "日本語"},
+          f"got {sorted(vocab)}")
 
 
 def s4_misconfiguration_degrades_quietly() -> None:
-    """Missing config/model/field/mid/row content => empty set, no crash."""
-    cases = {
-        "no config": lambda: None,
-        "unknown note_type": lambda: configure(note_type="Ghost"),
-        "missing word_field": lambda: (
-            configure(),
-            MW.col.models.add("T", ["Front", "Back"]),
-        ),
-    }
-    for label, setup in cases.items():
-        fresh_state()
-        setup()
-        try:
-            known = anki_mod.get_known_kanji_set()
-            ok = known == set()
-        except Exception as e:  # noqa: BLE001
-            ok, known = False, f"raised {e!r}"
-        check(f"S4: {label} yields empty set without crashing", ok,
-              f"got {sorted(known) if isinstance(known, set) else known}")
-
+    """Empty first fields and malformed rows are skipped without crashing.
+    Note: knowledge no longer depends on add-on config at all, so even an
+    empty/missing config must yield a working snapshot."""
     fresh_state()
-    configure()
-    MW.col.models.add("T", ["Expression"])
-    MW.col.db.rows = [(999, SEP.join(["漢字"])),  # unknown mid
-                      (101 - 100, "not-a-blob-at-all")]  # malformed row
+    MW.col.db.rows = [
+        (SEP.join(["", "漢字"]),),   # empty first field: skipped
+        ("   ",),                     # whitespace-only: skipped
+        (SEP.join(["漢字", "x"]),),
+        "not-a-tuple-but-a-string",   # malformed row shape
+        (None,),                      # null blob
+    ]
     try:
         known = anki_mod.get_known_kanji_set()
-        ok = known == set()
+        ok = known == {"漢", "字"}
     except Exception as e:  # noqa: BLE001
         ok, known = False, f"raised {e!r}"
-    check("S4: unknown mid / malformed rows skipped", ok,
+    check("S4: bad rows skipped, good rows kept", ok,
           f"got {sorted(known) if isinstance(known, set) else known}")
 
 
 def s5_db_failure_is_visible_once() -> None:
     """A DB failure surfaces via print+tooltip exactly once per session."""
     fresh_state()
-    configure()
-    MW.col.models.add("T", ["Expression"])
     MW.col.db.fail_with = Exception("boom")
     known = anki_mod.get_known_kanji_set()
     check("S5: failure yields empty set", known == set())
@@ -292,9 +282,7 @@ def s5_db_failure_is_visible_once() -> None:
 def s6_snapshot_built_once() -> None:
     """Repeated reads reuse the snapshot; reset triggers one rebuild."""
     fresh_state()
-    configure()
-    mid = MW.col.models.add("T", ["Expression"])
-    MW.col.db.rows = [(mid, "漢字")]
+    MW.col.db.rows = [("漢字",)]
     for _ in range(5):
         anki_mod.get_known_kanji_set()
         anki_mod.get_known_vocabulary_set()

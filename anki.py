@@ -11,13 +11,10 @@ _known_vocab_cache: Set[str] = set()
 _caches_ready = threading.Event()
 _build_lock = threading.Lock()
 _db_warned = False
-
-def _get_root_addon_name() -> str:
-    """Retrieves the root add-on package name for config access."""
-    if not mw or not hasattr(mw, "addonManager"):
-        return ""
-    # We are in 'compredef.anki', we want 'compredef'
-    return __name__.split('.')[0]
+# Last-build diagnostics (read via knowledge_status() in the Debug Console)
+_last_rows_scanned = 0
+_last_words_kept = 0
+_last_error: Optional[str] = None
 
 def _warn_db_error(msg: str) -> None:
     """
@@ -26,7 +23,8 @@ def _warn_db_error(msg: str) -> None:
     from a genuine beginner collection — the v1.0.5 'JOIN models' bug
     proved this must be loud. Warns once per session to avoid spam.
     """
-    global _db_warned
+    global _db_warned, _last_error
+    _last_error = msg
     print(f"CompreDef: {msg}")
     if _db_warned:
         return
@@ -39,54 +37,39 @@ def _warn_db_error(msg: str) -> None:
 
 def _fetch_learned_note_fields() -> list:
     """
-    Fetches the Expression field of every mature note of the configured
-    note type. Returns a list of (word_text,) already extracted.
+    Returns the first-field text of every mature note, across ALL note
+    types. Learner proficiency is collection-wide: a user with vocabulary
+    spread over many decks and note types must not have their knowledge
+    gated on a single configured type.
+
+    Only the first field is used — conventionally the word / expression /
+    front across note types. Every other field is ignored, so definitions
+    (including CompreDef's own generated ones), examples, readings, and
+    notes can never pollute the known set.
 
     Schema-proof by design: the query touches ONLY the 'notes' and
-    'cards' tables (stable across Anki versions) and resolves each note's
-    model via the public mw.col.models API. It must NEVER reference the
-    legacy 'models' table by name — that table was renamed to 'notetypes'
-    in Anki 23.10+, so 'JOIN models' fails with 'no such table' on modern
-    Anki and silently yields an empty knowledge set.
+    'cards' tables (stable across Anki versions). It must NEVER reference
+    the legacy 'models' table by name — renamed to 'notetypes' in Anki
+    23.10+, so 'JOIN models' fails with 'no such table' on modern Anki
+    and silently yields an empty knowledge set.
     """
     try:
         if not mw or not mw.col:
             return []
 
-        # 1. Configured note type and word field
-        root_name = _get_root_addon_name()
-        config = mw.addonManager.getConfig(root_name) or {}
-        note_type_name = config.get("note_type")
-        word_field_name = config.get("word_field")
-
-        if not note_type_name or not word_field_name:
-            return []
-
-        # 2. Mature notes: (mid, flds). The mid identifies the note's
-        # model without any assumption about Anki's internal table names.
         rows = mw.col.db.all(
-            "SELECT mid, flds FROM notes "
+            "SELECT flds FROM notes "
             "WHERE id IN (SELECT nid FROM cards WHERE ivl >= 21)"
         ) or []
+        global _last_rows_scanned
+        _last_rows_scanned = len(rows)
 
-        # 3. Resolve mid -> Expression-field index once per model, keeping
-        # only notes whose model IS the configured note type.
-        index_by_mid: dict = {}
         out = []
         for row in rows:
-            mid, flds_blob = row[0], row[1]
-            if mid not in index_by_mid:
-                index_by_mid[mid] = _expression_index(mid, note_type_name,
-                                                      word_field_name)
-            field_index = index_by_mid[mid]
-            if field_index is None:
+            blob = row[0] if isinstance(row, (list, tuple)) else row
+            if not blob or not isinstance(blob, str):
                 continue
-            if not flds_blob or not isinstance(flds_blob, str):
-                continue
-            fields = flds_blob.split(_FIELD_SEP)
-            if field_index >= len(fields):
-                continue
-            word_text = fields[field_index].strip()
+            word_text = blob.split(_FIELD_SEP, 1)[0].strip()
             if word_text:
                 out.append(word_text)
         return out
@@ -94,29 +77,9 @@ def _fetch_learned_note_fields() -> list:
         _warn_db_error(f"DB error while fetching learned notes: {e}")
         return []
 
-def _expression_index(mid: int, note_type_name: str,
-                      word_field_name: str) -> Optional[int]:
-    """
-    Returns the index of the configured word field for the model 'mid',
-    or None if that model is not the configured note type or lacks the
-    field. Model lookup goes through mw.col.models (public API), never
-    raw SQL against Anki's internal tables.
-    """
-    try:
-        model = mw.col.models.get(mid)
-    except Exception:
-        return None
-    if not model or model.get("name") != note_type_name:
-        return None
-    for i, f in enumerate(model.get("flds", [])):
-        name = f.get("name") if isinstance(f, dict) else f
-        if name == word_field_name:
-            return i
-    return None
-
 def _build_caches() -> None:
     """Internal worker to build the session knowledge snapshot."""
-    global _known_kanji_cache, _known_vocab_cache
+    global _known_kanji_cache, _known_vocab_cache, _last_words_kept
     with _build_lock:
         if _caches_ready.is_set():
             return
@@ -124,10 +87,10 @@ def _build_caches() -> None:
         known_kanji: Set[str] = set()
         known_words: Set[str] = set()
 
-        # _fetch_learned_note_fields already returns ONLY the configured
-        # Expression field text — kanji from Definition/Example fields can
-        # never reach the known set (and generated definitions written to
-        # the Definition field can never pollute it).
+        # _fetch_learned_note_fields already returns ONLY first-field
+        # text — kanji from definitions (including CompreDef's own
+        # generated ones), examples, readings, and notes can never reach
+        # the known set.
         for word_text in _fetch_learned_note_fields():
             if not word_text or not isinstance(word_text, str):
                 continue
@@ -136,7 +99,12 @@ def _build_caches() -> None:
 
         _known_kanji_cache = known_kanji
         _known_vocab_cache = known_words
+        _last_words_kept = len(known_words)
         _caches_ready.set()
+        print(f"CompreDef: learner snapshot built: "
+              f"{len(known_kanji)} kanji / {len(known_words)} words "
+              f"from {_last_rows_scanned} mature notes "
+              f"(all note types, first field only)")
 
 def init_caches_async() -> None:
     """Triggers asynchronous build of learner knowledge snapshot during startup."""
@@ -156,6 +124,29 @@ def get_known_vocabulary_set() -> Set[str]:
 
 def reset_caches() -> None:
     """Manual refresh of the knowledge snapshot."""
+    global _last_rows_scanned, _last_words_kept, _last_error
+    _last_rows_scanned = 0
+    _last_words_kept = 0
+    _last_error = None
     _caches_ready.clear()
     init_caches_async()
+
+
+def knowledge_status() -> dict:
+    """
+    One-shot diagnostics for the Debug Console: what the snapshot was
+    built from and what it holds. Example:
+        import importlib
+        m = importlib.import_module("1619602654.anki")
+        print(m.knowledge_status())
+    """
+    return {
+        "ready": _caches_ready.is_set(),
+        "known_kanji": len(_known_kanji_cache),
+        "known_words": len(_known_vocab_cache),
+        "mature_notes_scanned": _last_rows_scanned,
+        "words_kept": _last_words_kept,
+        "scope": "all note types, first field only",
+        "last_error": _last_error,
+    }
 
