@@ -30,6 +30,10 @@
 - **At the END of every code-change session**, build the installable package so the user can test locally:
   `./scripts/build.sh` → produces `dist/CompreDef.ankiaddon`
   (runs the regression suite first, then packages + verifies. No git side effects — use `./scripts/release.sh` for actual releases.)
+  **NEW:** `build.sh` now ends with `[4/4] Auto local install` — the freshly built
+  `.ankiaddon` is automatically unzipped to the local Anki profile
+  (`~/.local/share/Anki2/addons21/1619602654/`), so the user only needs one
+  restart (the script preserves `user_files/`).
 - The suite guards the project's historical bugs (plain-text definitions replacing rich Yomitan HTML, furigana polluting kanji scores, ladder ordering, reference-title filtering, ZIP/folder parity, stale SQLite caches, Tab-to-Generate overwrites). Exit code 0 = safe to commit; any FAIL = fix the regression first.
 - It runs on both system Python and Anki's bundled Python (no Anki/PyQt required — `aqt` is stubbed automatically). Real-dictionary smoke tests self-skip when the dictionaries are absent.
 - If you intentionally change rendering behavior, bump `RENDERER_VERSION` in `parser.py` so users' SQLite caches invalidate cleanly, and update the affected test expectations in the same commit.
@@ -48,10 +52,30 @@ released all the way to AnkiWeb:
 ./scripts/ci.sh        # tests → commit → push → version bump (patch +1)
                        #   → GitHub Release (dist/CompreDef.ankiaddon attached)
                        #   → CI uploads to AnkiWeb (workflow watches + verifies)
+                       #   → auto local install (for instant single-restart testing)
 ```
 
 Use `./scripts/ci.sh --no-release` for intermediate work; every *finished*
 session must still end with a full `./scripts/ci.sh` (or `./scripts/release.sh vX.Y.Z`).
+
+## 9. Local Auto-Install Mandate (NEW — for immediate testing)
+- **ALWAYS** auto-install the freshly built add-on into the local Anki
+  profile as the **very last step** of any build/ci/release, **after**
+  tests, packaging, and (for ci/release) GitHub + AnkiWeb upload:
+  `./scripts/install_local.sh` → unzips `dist/CompreDef.ankiaddon` to
+  `~/.local/share/Anki2/addons21/1619602654/` (Linux),
+  `~/Library/Application Support/Anki2/addons21/1619602654/` (macOS),
+  `%APPDATA%/Anki2/addons21/1619602654` (Windows), preserving `user_files/`.
+  The user then only needs **one** Anki restart (not two) to see the change.
+- `scripts/build.sh` already does this as `[4/4] Auto local install`.
+  `scripts/ci.sh` does it as `[5/5]` and `scripts/release.sh` as `[6/6]` —
+  all are non-fatal (build/release still succeed even if local Anki is not
+  found). **Future agents must keep this as the final step** — do not
+  remove it, and ensure any new pipeline script also ends with
+  `./scripts/install_local.sh`.
+- The GitHub Actions workflow (`.github/workflows/upload-to-ankiweb.yml`)
+  runs on `ubuntu-latest` where no local Anki exists, so it does **not**
+  do a local install — the rule above is for **local** agent runs only.
 
 **The user's test loop (memorize this):**
 1. Restart Anki → update check fires.

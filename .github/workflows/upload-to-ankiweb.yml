@@ -1,4 +1,9 @@
 name: Upload to AnkiWeb
+# NOTE for future agents: This workflow runs on GitHub's ubuntu-latest
+# where no local Anki profile exists, so it does NOT do a local install.
+# The local auto-install mandate (AGENTS.md §9) is fulfilled by the *local*
+# scripts: scripts/build.sh [4/4], scripts/ci.sh [5/5], scripts/release.sh [6/6]
+# all end with ./scripts/install_local.sh — keep that as the final step.
 on:
   release:
     types: [published]

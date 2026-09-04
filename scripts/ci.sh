@@ -18,10 +18,10 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-echo "=== [1/4] Running regression tests ==="
+echo "=== [1/5] Running regression tests ==="
 python3 tests/test_regression.py
 
-echo "=== [2/4] Committing and pushing changes ==="
+echo "=== [2/5] Committing and pushing changes ==="
 git add .
 if git diff-index --quiet HEAD --; then
     echo "No changes to commit"
@@ -35,7 +35,7 @@ if [ "$1" = "--no-release" ]; then
     exit 0
 fi
 
-echo "=== [3/4] Determining next version ==="
+echo "=== [3/5] Determining next version ==="
 # Auto-bump the patch component: v1.0.2 -> v1.0.3
 CURRENT="$(tr -d '[:space:]' < VERSION 2>/dev/null || echo v1.0.0)"
 CURRENT_NUM="${CURRENT#v}"
@@ -45,5 +45,12 @@ PATCH="$(echo "$CURRENT_NUM" | cut -d. -f3)"
 NEXT_NUM="${MAJOR}.${MINOR}.$((PATCH + 1))"
 echo "Version: $CURRENT -> v$NEXT_NUM"
 
-echo "=== [4/4] Releasing (GitHub Release + AnkiWeb upload) ==="
+echo "=== [4/5] Releasing (GitHub Release + AnkiWeb upload) ==="
 ./scripts/release.sh "v$NEXT_NUM"
+
+echo "=== [5/5] Auto local install (final step, for immediate testing) ==="
+if ./scripts/install_local.sh 2>&1; then
+    echo "Auto local install: OK — restart Anki once"
+else
+    echo "Auto local install: FAILED (non-fatal — AnkiWeb update still works)"
+fi

@@ -23,7 +23,7 @@ trap 'echo ""; echo "!!! build.sh FAILED at: $BASH_COMMAND (line $LINENO)"' ERR
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-echo "=== [1/3] Running regression tests ==="
+echo "=== [1/4] Running regression tests ==="
 # Stream live output AND capture it, so failures can be re-summarized.
 TEST_LOG="$(mktemp)"
 if python3 tests/test_regression.py 2>&1 | tee "$TEST_LOG"; then
@@ -36,7 +36,7 @@ else
     exit 1
 fi
 
-echo "=== [2/3] Packaging ready-to-install .ankiaddon ==="
+echo "=== [2/4] Packaging ready-to-install .ankiaddon ==="
 mkdir -p dist
 rm -f dist/CompreDef.ankiaddon
 
@@ -63,7 +63,7 @@ with zipfile.ZipFile("dist/CompreDef.ankiaddon", "w", compression=zipfile.ZIP_DE
                 print(f"  Added {full_path}")
 PYEOF
 
-echo "=== [3/3] Verifying .ankiaddon structure ==="
+echo "=== [3/4] Verifying .ankiaddon structure ==="
 python3 - <<'PYEOF'
 import zipfile, json, os
 
@@ -97,3 +97,14 @@ echo "======================================================================"
 echo "Built: dist/CompreDef.ankiaddon"
 echo "Install via: Anki → Tools → Add-ons → Install from file..."
 echo "======================================================================"
+
+# --- Auto local install (last step, never fails the build) ---
+if [[ -f "dist/CompreDef.ankiaddon" ]]; then
+    echo ""
+    echo "=== [4/4] Auto local install (for immediate testing) ==="
+    if ./scripts/install_local.sh 2>&1; then
+        echo "Auto local install: OK"
+    else
+        echo "Auto local install: FAILED (non-fatal — build is still OK, install manually via Anki)"
+    fi
+fi

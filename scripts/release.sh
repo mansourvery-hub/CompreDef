@@ -45,7 +45,7 @@ fi
 echo "$TAG" > VERSION
 echo "Target Release: $TAG (Add-on version: $NUMERIC_VER)"
 
-echo "=== [1/5] Updating manifest.json ==="
+echo "=== [1/6] Updating manifest.json ==="
 python3 -c "
 import json
 manifest_path = 'manifest.json'
@@ -63,11 +63,11 @@ with open(manifest_path, 'w', encoding='utf-8') as f:
 "
 
 # Tests + packaging + verification, all in the shared build script
-echo "=== [2/5] Building .ankiaddon (tests + package + verify) ==="
+echo "=== [2/6] Building .ankiaddon (tests + package + verify) ==="
 ./scripts/build.sh
 ANKIADDON_OUT="dist/CompreDef.ankiaddon"
 
-echo "=== [3/5] Committing changes & pushing to GitHub ==="
+echo "=== [3/6] Committing changes & pushing to GitHub ==="
 # Stage EVERYTHING (source, tests, docs, meta). A hardcoded subset went
 # stale after the module refactor — new files (provider.py, renderer.py,
 # ...) were never staged, the commit found nothing, and the pipeline died.
@@ -90,7 +90,7 @@ fi
 git tag -a "$TAG" -m "Release $TAG"
 git push origin "$TAG"
 
-echo "=== [4/5] Creating GitHub Release with .ankiaddon attachment ==="
+echo "=== [4/6] Creating GitHub Release with .ankiaddon attachment ==="
 if gh release view "$TAG" >/dev/null 2>&1; then
     echo "Updating existing GitHub release $TAG..."
     gh release upload "$TAG" "$ANKIADDON_OUT" --clobber
@@ -108,7 +108,7 @@ else
 Already installed from AnkiWeb? Just restart Anki twice (update check → install → restart) and the new version is active."
 fi
 
-echo "=== [5/5] Waiting for AnkiWeb upload workflow ==="
+echo "=== [5/6] Waiting for AnkiWeb upload workflow ==="
 # The release 'published' event triggers .github/workflows/upload-to-ankiweb.yml,
 # which pushes the .ankiaddon to AnkiWeb. Surface its result here so a failed
 # upload is never silently missed (it failed silently once already).
@@ -136,3 +136,10 @@ echo "SUCCESS: CompreDef $TAG released — GitHub + AnkiWeb"
 echo "User test loop: restart Anki → update → restart Anki → test"
 echo "Release URL: $(gh release view "$TAG" --json url -q .url)"
 echo "======================================================================"
+
+echo "=== [6/6] Auto local install (final step, for immediate testing) ==="
+if ./scripts/install_local.sh 2>&1; then
+    echo "Auto local install: OK — restart Anki once to see $TAG locally (no AnkiWeb wait)"
+else
+    echo "Auto local install: FAILED (non-fatal — AnkiWeb update still works, install manually)"
+fi
