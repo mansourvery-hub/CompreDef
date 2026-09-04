@@ -963,6 +963,28 @@ class ConfigDialog(QDialog):
         if not saved_dicts and self.config.get("dictionary_folder"):
             # Auto-detect from legacy single folder path
             saved_dicts = find_dictionary_folders(self.config["dictionary_folder"])
+        # Recovery: if config was clobbered to [] by the v1.0.20 race but DB still
+        # has indexed dictionaries, restore them so user doesn't need to re-import.
+        if not saved_dicts:
+            try:
+                from .provider import LocalSQLiteProvider
+                import os as _os
+                _addon_dir = _os.path.dirname(_os.path.abspath(__file__))
+                _cache_dir = _os.path.join(_addon_dir, "user_files", "cache")
+                _db_path = _os.path.join(_cache_dir, "dictionaries.db")
+                if _os.path.isfile(_db_path):
+                    import sqlite3
+                    _conn = sqlite3.connect(_db_path)
+                    try:
+                        _rows = _conn.execute("SELECT path FROM dictionaries").fetchall()
+                        _db_paths = [r[0] for r in _rows if r[0] and _os.path.exists(r[0])]
+                        if _db_paths:
+                            saved_dicts = _db_paths
+                            print(f"CompreDef: recovered {len(_db_paths)} dictionaries from DB after config was empty (v1.0.20 bug)")
+                    finally:
+                        _conn.close()
+            except Exception:
+                pass
 
         # Restore disabled set (paths normalized the same way as _add_dict_path)
         self.disabled_dicts = {

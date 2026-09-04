@@ -226,6 +226,32 @@ def fetch_yomitan_definitions(
 
     # Response: {"fields": [{"expression": "...", "reading": "...", "glossary": "<div>..."}]}
     fields = data.get("fields") if isinstance(data, dict) else None
+    # Fallback for single kanji like "口": Yomitan may store it as kanji entry, not term.
+    # If term search returned nothing and the query is a single kanji, retry as kanji.
+    if (not isinstance(fields, list) or not fields) and len(word) == 1:
+        import re
+        if re.match(r"[\u4e00-\u9fff]", word):
+            k_payload = {
+                "text": word,
+                "type": "kanji",
+                "markers": ["character", "glossary"],
+                "maxEntries": max_entries,
+                "includeMedia": False,
+            }
+            k_data = _post_json("/ankiFields", k_payload, timeout=timeout, base_url=effective_url)
+            if k_data is not None:
+                k_fields = k_data.get("fields") if isinstance(k_data, dict) else None
+                if isinstance(k_fields, list) and k_fields:
+                    fields = k_fields
+                # Also try /kanjiEntries as last resort if ankiFields kanji still empty
+                if not isinstance(fields, list) or not fields:
+                    k2 = _post_json("/kanjiEntries", {"character": word}, timeout=timeout, base_url=effective_url)
+                    if isinstance(k2, dict) and k2.get("character") == word:
+                        # Convert kanjiEntries format to a fake ankiFields glossary
+                        defs = k2.get("definitions") or k2.get("defintions") or []
+                        if isinstance(defs, list) and defs:
+                            glos = "<div class=\"yomitan-glossary\">" + "<br>".join(str(d) for d in defs) + "</div>"
+                            fields = [{"character": word, "glossary": glos}]
     if not isinstance(fields, list) or not fields:
         with _word_lock:
             _word_cache[cache_key] = (_now(), [])

@@ -232,10 +232,13 @@ def on_editor_generate_definition(editor) -> None:
         return
 
     # Early validation: without any dictionary configured nothing can be generated
-    # When Yomitan is the selected source, local dictionaries are not required
+    # When Yomitan is the selected source, local dictionaries are not required.
+    # When local is selected but Yomitan fallback is enabled (default), we still
+    # allow generation — engine will try Yomitan as fail-safe.
     _src = str(config.get("dictionary_source") or "local").strip().lower()
     _is_yomitan_src = _src in ("yomitan", "yomitan_api", "api")
-    if not _is_yomitan_src and not dictionaries and not dictionary_folder:
+    _yomitan_fallback_enabled = config.get("yomitan_fallback") is not False
+    if not _is_yomitan_src and not dictionaries and not dictionary_folder and not _yomitan_fallback_enabled:
         tooltip(
             "CompreDef: No dictionaries configured.\nSet them under Tools -> Add-ons -> CompreDef -> Config.",
             parent=editor.parentWindow,
@@ -581,7 +584,8 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
     # Early validation: without any dictionary configured nothing can be generated
     _src2 = str(config.get("dictionary_source") or "local").strip().lower()
     _is_yomitan_src2 = _src2 in ("yomitan", "yomitan_api", "api")
-    if not _is_yomitan_src2 and not dictionaries and not dictionary_folder:
+    _yomitan_fallback_enabled2 = config.get("yomitan_fallback") is not False
+    if not _is_yomitan_src2 and not dictionaries and not dictionary_folder and not _yomitan_fallback_enabled2:
         tooltip(
             "CompreDef: No dictionaries configured.\nSet them under Tools -> Add-ons -> CompreDef -> Config.",
             parent=browser,
