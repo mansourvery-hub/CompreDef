@@ -42,7 +42,7 @@ import urllib
 ADDR = "127.0.0.1"
 PORT = 19633
 PROCESS_STARTUP_WAIT = 5
-YOMITAN_RESPONSE_TIMEOUT = 2.0
+YOMITAN_RESPONSE_TIMEOUT = 8.0
 
 YOMITAN_API_NATIVE_MESSAGING_VERSION = 1
 BLACKLISTED_PATHS = ["favicon.ico"]
@@ -64,6 +64,10 @@ def ensure_single_instance() -> None:
         with open(crowbarfile_path, "r") as crowbarfile:
             os.kill(int(crowbarfile.read()), signal.SIGTERM)
             wait_time = PROCESS_STARTUP_WAIT
+    except FileNotFoundError:
+        pass  # normal first run, no previous instance
+    except ProcessLookupError:
+        pass  # stale crowbar, previous process already dead
     except Exception:
         error_log(traceback.format_exc())
 

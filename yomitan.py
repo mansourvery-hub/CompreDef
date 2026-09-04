@@ -11,8 +11,10 @@ by caching per-word results and short-circuiting when Yomitan is unavailable.
 
 Performance contract (user explicitly asked to think carefully):
 - Runs only in background threads (mw.taskman.run_in_background already).
-- Short timeout (2.5s) so a single missing Yomitan does not stall bulk jobs.
-- Negative availability cache (30s) so 100 bulk notes don't each wait 2.5s when
+- Timeout 10s (must exceed bridge's 8s Yomitan wait); when the browser is
+  closed the connection is refused instantly, so bulk jobs don't stall —
+  only a slow-but-alive Yomitan ever uses the full window.
+- Negative availability cache (30s) so 100 bulk notes don't each wait when
   the browser is closed — after the first ECONNREFUSED we skip the rest.
 - Per-word cache (5 min) so repeated lookups for the same term are instant.
 - Lazy health check: no separate /serverVersion ping on every generate; the
@@ -38,7 +40,7 @@ else:
 # Configuration
 # ---------------------------------------------------------------------------
 YOMITAN_URL = "http://127.0.0.1:19633"
-YOMITAN_TIMEOUT = 2.5  # seconds per request — must stay short
+YOMITAN_TIMEOUT = 10.0  # must exceed bridge YOMITAN_RESPONSE_TIMEOUT (8s); cold first query can take seconds
 YOMITAN_MAX_ENTRIES = 8  # enough to let ladder scoring see a good candidate
 _WORD_CACHE_TTL = 300.0  # seconds
 _NEGATIVE_CACHE_TTL = 30.0  # seconds after a failure, skip Yomitan quickly
