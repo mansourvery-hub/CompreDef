@@ -7,6 +7,7 @@ to the user's known vocabulary and kanji.
 
 from aqt import mw
 from aqt.qt import QMenu
+from aqt import gui_hooks
 from .gui import show_config_dialog, show_knowledge_dialog
 from .editor_browser import setup_editor_browser_hooks
 from . import anki
@@ -43,4 +44,26 @@ if mw:
     mw.addonManager.setConfigAction(__name__, show_config_dialog)
     setup_editor_browser_hooks()
     _add_tools_menu_entry()
+
+
+def _on_profile_opened() -> None:
+    """
+    Builds the learner-knowledge snapshot as soon as the profile (and
+    thus the collection) opens. Add-ons load BEFORE the profile, so the
+    init_caches_async() call above finds mw.col None and deliberately
+    does nothing — this hook is what starts the real build.
+    """
+    try:
+        anki.init_caches_async()
+    except Exception as e:
+        # Must never break profile loading
+        print(f"CompreDef: knowledge build on profile open failed: {e}")
+
+
+# profile_did_open fires right after the collection loads (aqt/main.py),
+# once per profile open. The hasattr guard keeps compatibility should a
+# future Anki rename/remove the hook — the snapshot then builds lazily on
+# the first generation instead.
+if hasattr(gui_hooks, "profile_did_open"):
+    gui_hooks.profile_did_open.append(_on_profile_opened)
 

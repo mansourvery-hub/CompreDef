@@ -57,6 +57,14 @@ The learner-knowledge snapshot MUST satisfy:
   field, unknown `mid`, and malformed rows yield an empty set without
   raising.
 
+- **SP7 — No snapshot before the collection opens.** Add-ons load
+  BEFORE the profile: at startup `mw.col` is None. A build in that
+  moment would snapshot an EMPTY collection and mark it ready for the
+  whole session (the v1.0.10/11 "0 known kanji" regression). The build
+  must abort while `mw.col` is None; the `profile_did_open` hook starts
+  the real build once the profile opens (with a lazy first-getter
+  fallback if the hook is absent).
+
 ## Use cases
 
 - **U1 — Triage "0 known kanji".** Distinguish: no mature cards vs.
@@ -80,6 +88,7 @@ The learner-knowledge snapshot MUST satisfy:
 | S4 empty/malformed rows skipped; works with empty config | SP6 |
 | S5 DB failure warns visibly, exactly once | SP5 |
 | S6 one scan per session; reset rebuilds once | SP4 |
+| S7 no ready snapshot without an open collection | SP7 |
 
 Behavioral twins of S2/S3/S6 also live in `tests/test_regression.py`
 (`test_kanji_extraction_correctness`,

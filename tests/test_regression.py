@@ -1710,6 +1710,62 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             anki._caches_ready.clear()
         _core._generator = prev_generator
 
+def test_snapshot_waits_for_open_collection() -> None:
+    """
+    The v1.0.10/11 production bug: add-ons load BEFORE the profile
+    opens, so mw.col was None at startup. The async build then snapshotted
+    an EMPTY collection and marked it ready for the whole session —
+    every user saw 0 known kanji with no error. The build must abort (and
+    stay NOT-ready) until a collection exists; the profile_did_open hook
+    then builds the real snapshot.
+    """
+    import anki
+
+    prev_col = aqt.mw.col
+    prev_kanji = set(anki._known_kanji_cache)
+    prev_vocab = set(anki._known_vocab_cache)
+    prev_ready = anki._caches_ready.is_set()
+    import core as _core
+    prev_generator = _core._generator
+    try:
+        SEP = "\x1f"
+        # Startup moment: collection not open yet.
+        aqt.mw.col = None
+        anki.reset_caches()
+        anki._build_caches()          # direct call: the worker itself
+        check("col-gate: no snapshot without an open collection",
+              not anki._caches_ready.is_set(),
+              "snapshot marked ready while mw.col was None")
+        check("col-gate: init_caches_async is a no-op without collection",
+              anki.init_caches_async() is None)
+        check("col-gate: empty-set stays empty after gated build",
+              anki.get_known_kanji_set() == set())
+        check("col-gate: still not ready (nothing to build from)",
+              not anki._caches_ready.is_set(),
+              "gated build must not mark ready")
+
+        # Profile opens: collection becomes available — now it builds.
+        import types
+        aqt.mw.col = types.SimpleNamespace(
+            db=types.SimpleNamespace(
+                all=lambda q, p=(): [(SEP.join(["漢字", "def"]),)]
+            )
+        )
+        anki._build_caches()
+        known = anki.get_known_kanji_set()
+        check("col-gate: snapshot builds once collection opens",
+              anki._caches_ready.is_set() and known == {"漢", "字"},
+              f"known={sorted(known)}")
+    finally:
+        aqt.mw.col = prev_col
+        anki._known_kanji_cache = prev_kanji
+        anki._known_vocab_cache = prev_vocab
+        if prev_ready:
+            anki._caches_ready.set()
+        else:
+            anki._caches_ready.clear()
+        _core._generator = prev_generator
+
 def test_knowledge_summary_text() -> None:
     """The knowledge dialog's content source: counts, lists, scope."""
     import anki
@@ -1828,6 +1884,7 @@ def main() -> int:
         test_disabled_dictionaries_skipped(tmp_root)
         test_kanji_extraction_correctness(tmp_root)
         test_knowledge_survives_new_schema(tmp_root)
+        test_snapshot_waits_for_open_collection()
         test_knowledge_summary_text()
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()

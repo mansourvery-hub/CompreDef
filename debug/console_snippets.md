@@ -24,6 +24,9 @@ Interpretation (see also `status["last_error"]`):
   query hit a renamed table.
 - `words_kept: 0` with scanned notes present → every mature note has
   an empty first field (unusual — inspect a few notes manually).
+- `mature_notes_scanned: 0` with mature cards present AND `ready: true`
+  → the snapshot was built before the collection opened (pre-v1.0.12
+  bug); update the add-on.
 
 ## U2 — Does the set match my level?
 

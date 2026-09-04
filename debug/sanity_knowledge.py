@@ -294,6 +294,19 @@ def s6_snapshot_built_once() -> None:
           MW.col.db.calls == 2, f"calls={MW.col.db.calls}")
 
 
+def s7_waits_for_open_collection() -> None:
+    """No collection open => snapshot must stay NOT-ready (v1.0.10/11
+    bug: built empty at startup and marked ready for the whole session)."""
+    fresh_state()
+    MW.col = None  # add-ons load before the profile opens
+    anki_mod._build_caches()
+    ok_ready = not anki_mod._caches_ready.is_set()
+    known = anki_mod.get_known_kanji_set()
+    check("S7: no ready snapshot without an open collection",
+          ok_ready and known == set(),
+          f"ready={anki_mod._caches_ready.is_set()} known={sorted(known)}")
+
+
 def main() -> int:
     print("=" * 70)
     print("CompreDef learner-knowledge sanity checks (on-demand, not CI)")
@@ -304,6 +317,7 @@ def main() -> int:
     s4_misconfiguration_degrades_quietly()
     s5_db_failure_is_visible_once()
     s6_snapshot_built_once()
+    s7_waits_for_open_collection()
     print("=" * 70)
     total = RESULTS["pass"] + RESULTS["fail"]
     print(f"RESULT: {RESULTS['pass']}/{total} sane, "

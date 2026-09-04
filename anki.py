@@ -83,6 +83,15 @@ def _build_caches() -> None:
     with _build_lock:
         if _caches_ready.is_set():
             return
+        if not mw or not mw.col:
+            # Collection not open yet: add-ons load BEFORE the profile,
+            # so at startup mw.col is None. Building now would snapshot
+            # an EMPTY collection and mark it ready for the whole
+            # session — the v1.0.10/11 '0 known kanji' regression.
+            # Leave the snapshot unbuilt; the profile_did_open hook
+            # (or a first getter call once the collection exists)
+            # builds the real one.
+            return
 
         known_kanji: Set[str] = set()
         known_words: Set[str] = set()
@@ -107,9 +116,18 @@ def _build_caches() -> None:
               f"(all note types, first field only)")
 
 def init_caches_async() -> None:
-    """Triggers asynchronous build of learner knowledge snapshot during startup."""
+    """
+    Triggers the asynchronous snapshot build — but ONLY once a
+    collection is actually open. At add-on load time mw.col is None
+    (the profile has not opened yet); scheduling a build then would
+    snapshot an EMPTY collection and mark it ready for the whole
+    session. __init__.py re-invokes this from the profile_did_open
+    hook, so the real build starts the moment the profile opens.
+    """
     if not mw or not hasattr(mw, "taskman"):
         return
+    if not mw.col:
+        return  # profile not open yet; profile_did_open re-triggers
     mw.taskman.run_in_background(_build_caches)
 
 def get_known_kanji_set() -> Set[str]:
