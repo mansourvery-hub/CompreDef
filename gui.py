@@ -746,29 +746,54 @@ class ConfigDialog(QDialog):
                     print(f"CompreDef: Yomitan bridge install failed:\n{err}")
                     tooltip(f"Yomitan bridge install failed — see console", parent=self)
                     return
-                # Summarize per-browser
+                # Clear Yomitan negative cache so Test retries immediately
+                try:
+                    if __package__:
+                        from .yomitan import clear_yomitan_cache
+                    else:
+                        from yomitan import clear_yomitan_cache
+                    clear_yomitan_cache()
+                except Exception:
+                    pass
+                # Summarize per-browser (exclude _bridge)
                 if isinstance(results, dict) and results:
-                    ok = [b for b, (s, _) in results.items() if s]
-                    fail = [(b, m) for b, (s, m) in results.items() if not s]
+                    # _bridge is the HTTP server, not a browser
+                    bridge_ok, bridge_msg = results.get("_bridge", (False, "")) if "_bridge" in results else (False, "")
+                    browser_results = {k: v for k, v in results.items() if not k.startswith("_")}
+                    ok = [b for b, (s, _) in browser_results.items() if s]
+                    fail = [(b, m) for b, (s, m) in browser_results.items() if not s]
                     if ok:
-                        msg = f"✓ Bridge installed for: {', '.join(ok)}. Restart browser, then click Test."
-                        self.yomitan_status_label.setText(msg + (" Restart browser now." if ok else ""))
+                        if bridge_ok:
+                            msg = f"✓ Bridge installed for: {', '.join(ok)} and started ({bridge_msg}). Click Test — should turn green (if Yomitan API enabled, else enable it, no restart needed for Test)."
+                        else:
+                            msg = f"✓ Bridge installed for: {', '.join(ok)}. Restart browser, then enable Yomitan → Settings → Advanced → General → Enable Yomitan API, then click Test."
+                            if bridge_msg:
+                                msg += f" (bridge start: {bridge_msg})"
+                        self.yomitan_status_label.setText(msg)
                         self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
                         print(f"CompreDef: Yomitan bridge install results: {results}")
-                        tooltip(f"Yomitan bridge installed for {', '.join(ok)} — restart browser and enable Yomitan API", parent=self)
+                        tooltip(f"Yomitan bridge installed — {bridge_msg}", parent=self)
                     if fail:
                         print(f"CompreDef: Yomitan bridge partial failures: {fail}")
                         if not ok:
-                            self.yomitan_status_label.setText(f"✗ Bridge install failed for all browsers: {fail}")
+                            self.yomitan_status_label.setText(f"✗ Bridge install failed for all browsers: {fail} | bridge: {bridge_msg}")
                             self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                    if not ok and not fail and bridge_ok:
+                        # Only bridge started, browsers may have failed but bridge is running for Test
+                        self.yomitan_status_label.setText(f"✓ Bridge started ({bridge_msg}). Click Test.")
+                        self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
                 else:
                     self.yomitan_status_label.setText("✗ Bridge install returned no results — see console")
                     self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
-                # Auto-test after install
+                # Auto-test after install (give bridge a moment)
                 try:
-                    self._on_test_yomitan()
+                    from aqt.qt import QTimer
+                    QTimer.singleShot(1200, self._on_test_yomitan)
                 except Exception:
-                    pass
+                    try:
+                        self._on_test_yomitan()
+                    except Exception:
+                        pass
             except Exception as e:
                 import traceback
                 self.yomitan_status_label.setText(f"✗ Install error: {e}")
