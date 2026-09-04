@@ -1195,6 +1195,11 @@ class ConfigDialog(QDialog):
             self.dict_list.item(i).data(role)
             for i in range(self.dict_list.count())
         ]
+        # Never clobber Local ladder when Yomitan is selected — the list is
+        # disabled but still holds the Local dictionaries. Preserve them.
+        _is_yomitan = self.source_combo.currentData() == "yomitan"
+        if _is_yomitan and not ordered_dicts and isinstance(self.config.get("dictionaries"), list) and self.config["dictionaries"]:
+            ordered_dicts = list(self.config["dictionaries"])
 
         updated_config = {
             **self._collect_type_config(),
@@ -1240,12 +1245,38 @@ class ConfigDialog(QDialog):
                 self.dict_list.item(i).data(role)
                 for i in range(self.dict_list.count())
             ]
-            # Never clobber a populated ladder with an empty one during
-            # the initial Yomitan/Local toggle race (v1.0.20 bug).
-            if not ordered_dicts and isinstance(self.config.get("dictionaries"), list) and self.config["dictionaries"]:
+            # Never clobber Local ladder when Yomitan is selected or during
+            # the initial toggle race (v1.0.20 bug). Preserve previous config.
+            _is_yomitan_now = False
+            try:
+                _is_yomitan_now = self.source_combo.currentData() == "yomitan"
+            except Exception:
+                pass
+            if (not ordered_dicts and isinstance(self.config.get("dictionaries"), list) and self.config["dictionaries"]) or (_is_yomitan_now and not ordered_dicts):
                 # If the UI list is empty but config still has dictionaries, keep them
-                # (happens only during the early _on_source_changed save before _load_config).
-                ordered_dicts = list(self.config["dictionaries"])
+                # (Yomitan mode disables the list but should not delete Local dicts).
+                if isinstance(self.config.get("dictionaries"), list) and self.config["dictionaries"]:
+                    ordered_dicts = list(self.config["dictionaries"])
+                else:
+                    # Last resort: try DB recovery even for save
+                    try:
+                        from .provider import LocalSQLiteProvider
+                        import os as _os2
+                        _addon_dir2 = _os2.path.dirname(_os2.path.abspath(__file__))
+                        _cache_dir2 = _os2.path.join(_addon_dir2, "user_files", "cache")
+                        _db_path2 = _os2.path.join(_cache_dir2, "dictionaries.db")
+                        if _os2.path.isfile(_db_path2):
+                            import sqlite3
+                            _conn2 = sqlite3.connect(_db_path2)
+                            try:
+                                _rows2 = _conn2.execute("SELECT path FROM dictionaries").fetchall()
+                                _db_paths2 = [r[0] for r in _rows2 if r[0] and _os2.path.exists(r[0])]
+                                if _db_paths2:
+                                    ordered_dicts = _db_paths2
+                            finally:
+                                _conn2.close()
+                    except Exception:
+                        pass
             mw.addonManager.writeConfig(self.addon_name, {
                 **self._collect_type_config(),
                 "dictionaries": ordered_dicts,
