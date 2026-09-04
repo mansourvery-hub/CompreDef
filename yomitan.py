@@ -6,20 +6,13 @@ to fetch beautiful Yomitan HTML directly when CompreDef has no local dictionary
 result. This is a fail-safe: if the local ladder yields nothing, we ask Yomitan
 instead of returning None.
 
-NOTE: the per-definition split experiment (/termEntries, one entry per
-definition so the ladder returns ONLY the best single definition) lives on the
-`yomitan-single-def` branch. Master intentionally stays on the proven
-/ankiFields path until the branch version is verified live.
-
 No second index is built — Yomitan owns the dictionaries. CompreDef stays fast
 by caching per-word results and short-circuiting when Yomitan is unavailable.
 
 Performance contract (user explicitly asked to think carefully):
 - Runs only in background threads (mw.taskman.run_in_background already).
-- Timeout 10s (must exceed bridge's 8s Yomitan wait); when the browser is
-  closed the connection is refused instantly, so bulk jobs don't stall —
-  only a slow-but-alive Yomitan ever uses the full window.
-- Negative availability cache (30s) so 100 bulk notes don't each wait when
+- Short timeout (2.5s) so a single missing Yomitan does not stall bulk jobs.
+- Negative availability cache (30s) so 100 bulk notes don't each wait 2.5s when
   the browser is closed — after the first ECONNREFUSED we skip the rest.
 - Per-word cache (5 min) so repeated lookups for the same term are instant.
 - Lazy health check: no separate /serverVersion ping on every generate; the
@@ -43,7 +36,7 @@ else:
 # Configuration
 # ---------------------------------------------------------------------------
 YOMITAN_URL = "http://127.0.0.1:19633"
-YOMITAN_TIMEOUT = 10.0  # must exceed bridge YOMITAN_RESPONSE_TIMEOUT (8s); cold first query can take seconds
+YOMITAN_TIMEOUT = 2.5  # seconds per request — must stay short
 YOMITAN_MAX_ENTRIES = 8  # enough to let ladder scoring see a good candidate
 _WORD_CACHE_TTL = 300.0  # seconds
 _NEGATIVE_CACHE_TTL = 30.0  # seconds after a failure, skip Yomitan quickly
@@ -235,22 +228,24 @@ def fetch_yomitan_definitions(
     # Build ankiFields request — this is Yomitan's rendered HTML path
     # so CompreDef gets the beautiful glossary without re-implementing rendering.
     # We request reading+expression markers to allow reading disambiguation.
-    af_payload = {
+    payload = {
         "text": word,
         "type": "term",
         "markers": ["expression", "reading", "glossary"],
         "maxEntries": max_entries,
         "includeMedia": False,
     }
-    af_data = _post_json("/ankiFields", af_payload, timeout=timeout, base_url=effective_url)
-    if af_data is None:
+
+    data = _post_json("/ankiFields", payload, timeout=timeout, base_url=effective_url)
+    if data is None:
         # Network / Yomitan not running — cache empty result briefly to avoid
         # hammering in bulk (word cache with empty list)
         with _word_lock:
             _word_cache[cache_key] = (_now(), [])
         return []
+
     # Response: {"fields": [{"expression": "...", "reading": "...", "glossary": "<div>..."}]}
-    fields = af_data.get("fields") if isinstance(af_data, dict) else None
+    fields = data.get("fields") if isinstance(data, dict) else None
     # Fallback for single kanji like "口": Yomitan may store it as kanji entry, not term.
     # If term search returned nothing and the query is a single kanji, retry as kanji.
     if (not isinstance(fields, list) or not fields) and len(word) == 1:
