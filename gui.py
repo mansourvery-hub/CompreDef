@@ -136,7 +136,7 @@ class ConfigDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("CompreDef Configuration")
-        self.resize(550, 520)
+        self.resize(600, 650)
 
         self.addon_name = _get_addon_name()
         self.config: Dict[str, Any] = mw.addonManager.getConfig(self.addon_name) or {}
@@ -233,38 +233,45 @@ class ConfigDialog(QDialog):
 
         # Buttons on the side for reordering and management
         buttons_vbox = QVBoxLayout()
+        btn_min_width = 160
 
         self.add_zip_btn = QPushButton("Add Zip Archive...")
         self.add_zip_btn.setToolTip("Select a Yomitan dictionary .zip file")
+        self.add_zip_btn.setMinimumWidth(btn_min_width)
         self.add_zip_btn.clicked.connect(self._on_add_zip)
         buttons_vbox.addWidget(self.add_zip_btn)
 
         self.add_dict_btn = QPushButton("Add Folder...")
         self.add_dict_btn.setToolTip("Select a single unzipped dictionary folder")
+        self.add_dict_btn.setMinimumWidth(btn_min_width)
         self.add_dict_btn.clicked.connect(self._on_add_dictionary)
         buttons_vbox.addWidget(self.add_dict_btn)
 
         self.add_folder_btn = QPushButton("Scan Folder...")
         self.add_folder_btn.setToolTip("Scan a parent folder to automatically find and add all dictionary archives (.zip) and subfolders")
+        self.add_folder_btn.setMinimumWidth(btn_min_width)
         self.add_folder_btn.clicked.connect(self._on_scan_folder)
         buttons_vbox.addWidget(self.add_folder_btn)
 
-        buttons_vbox.addSpacing(10)
+        buttons_vbox.addSpacing(15)
 
         self.move_up_btn = QPushButton("Move Up ↑")
         self.move_up_btn.setToolTip("Move selected dictionary earlier in ladder (tried earlier)")
+        self.move_up_btn.setMinimumWidth(btn_min_width)
         self.move_up_btn.clicked.connect(self._on_move_up)
         buttons_vbox.addWidget(self.move_up_btn)
 
         self.move_down_btn = QPushButton("Move Down ↓")
         self.move_down_btn.setToolTip("Move selected dictionary later in ladder (more advanced)")
+        self.move_down_btn.setMinimumWidth(btn_min_width)
         self.move_down_btn.clicked.connect(self._on_move_down)
         buttons_vbox.addWidget(self.move_down_btn)
 
-        buttons_vbox.addSpacing(10)
+        buttons_vbox.addSpacing(15)
 
         self.remove_btn = QPushButton("Remove")
         self.remove_btn.setToolTip("Remove selected dictionary from ladder")
+        self.remove_btn.setMinimumWidth(btn_min_width)
         self.remove_btn.clicked.connect(self._on_remove_dictionary)
         buttons_vbox.addWidget(self.remove_btn)
 
@@ -274,6 +281,7 @@ class ConfigDialog(QDialog):
             "Use this after replacing a dictionary's files on disk.\n"
             "Runs in the background with progress."
         )
+        self.reindex_btn.setMinimumWidth(btn_min_width)
         self.reindex_btn.clicked.connect(self._on_reindex_dictionary)
         buttons_vbox.addWidget(self.reindex_btn)
 
