@@ -125,10 +125,36 @@ def _post_json(path: str, payload: dict, timeout: float, base_url: Optional[str]
                 _set_last_error(f"Yomitan returned invalid JSON on {path}: {je}")
                 print(f"CompreDef Yomitan: invalid JSON {path}: {je}")
                 return {}
+    except urllib.error.HTTPError as e:
+        # HTTPError is a subclass of URLError but contains a valid response body.
+        # For 502 (Yomitan not connected) we want to surface the JSON error, not treat as network failure.
+        try:
+            body = e.read().decode("utf-8") if hasattr(e, "read") else ""
+            data = json.loads(body) if body else {}
+            # 502 from bridge means Yomitan not connected — don't mark as network unavailable for Test
+            if e.code == 502:
+                msg = data.get("error") if isinstance(data, dict) else str(data)
+                if not msg:
+                    msg = f"Yomitan not connected (HTTP 502) at {url}{path}"
+                _set_last_error(msg)
+                print(f"CompreDef Yomitan: {msg}")
+                # Return the data so caller can see the error, but also cache as empty for ankiFields
+                return data
+            # Other HTTP errors are treated as network failure
+            _mark_availability(False)
+            reason = getattr(e, "reason", str(e))
+            msg = f"Yomitan HTTP {e.code} at {url}{path}: {reason}"
+            _set_last_error(msg)
+            print(f"CompreDef Yomitan: {msg} ({e})")
+            return None
+        except Exception as je:
+            _mark_availability(False)
+            _set_last_error(f"Yomitan HTTP {e.code} read failed: {je}")
+            return None
     except urllib.error.URLError as e:
         _mark_availability(False)
         reason = getattr(e, "reason", str(e))
-        msg = f"Yomitan not reachable at {url}{path}: {reason}. Is browser open + Yomitan API enabled + install_yomitan_api.py run?"
+        msg = f"Yomitan not reachable at {url}{path}: {reason}. Is browser open + Yomitan API enabled + bridge installed? Click 'Install / Repair Bridge' then restart browser."
         _set_last_error(msg)
         print(f"CompreDef Yomitan: {msg} ({e})")
         return None

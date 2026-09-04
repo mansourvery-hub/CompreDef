@@ -31,6 +31,7 @@ import datetime
 import http.server
 import json
 import os
+import select
 import signal
 import struct
 import sys
@@ -41,6 +42,7 @@ import urllib
 ADDR = "127.0.0.1"
 PORT = 19633
 PROCESS_STARTUP_WAIT = 5
+YOMITAN_RESPONSE_TIMEOUT = 2.0
 
 YOMITAN_API_NATIVE_MESSAGING_VERSION = 1
 BLACKLISTED_PATHS = ["favicon.ico"]
@@ -71,22 +73,43 @@ def ensure_single_instance() -> None:
     time.sleep(wait_time)
 
 def delete_crowbarfile() -> None:
-    os.remove(crowbarfile_path)
+    try:
+        os.remove(crowbarfile_path)
+    except Exception:
+        pass
 
-def get_message() -> dict:
-    raw_length = sys.stdin.buffer.read(4)
-    if not raw_length:
+def get_message(timeout=YOMITAN_RESPONSE_TIMEOUT) -> dict:
+    # Wait for 4-byte length with timeout so HTTP server doesn't hang forever
+    # when Yomitan is not running (browser closed or API disabled).
+    rlist, _, _ = select.select([sys.stdin.buffer], [], [], timeout)
+    if not rlist:
         return None
-    message_length = struct.unpack("@I", raw_length)[0]
-    message = sys.stdin.buffer.read(message_length).decode("utf-8")
-    return json.loads(message)
+    raw_length = sys.stdin.buffer.read(4)
+    if not raw_length or len(raw_length) < 4:
+        return None
+    try:
+        message_length = struct.unpack("@I", raw_length)[0]
+        # Limit to 10MB to avoid DoS
+        if message_length > 10 * 1024 * 1024:
+            return None
+        rlist, _, _ = select.select([sys.stdin.buffer], [], [], timeout)
+        if not rlist:
+            return None
+        message = sys.stdin.buffer.read(message_length).decode("utf-8")
+        return json.loads(message)
+    except Exception:
+        error_log(traceback.format_exc())
+        return None
 
 def send_message(message_content: dict) -> None:
-    encoded_content = json.dumps(message_content).encode("utf-8")
-    encoded_length = struct.pack("@I", len(encoded_content))
-    sys.stdout.buffer.write(encoded_length)
-    sys.stdout.buffer.write(encoded_content)
-    sys.stdout.buffer.flush()
+    try:
+        encoded_content = json.dumps(message_content).encode("utf-8")
+        encoded_length = struct.pack("@I", len(encoded_content))
+        sys.stdout.buffer.write(encoded_length)
+        sys.stdout.buffer.write(encoded_content)
+        sys.stdout.buffer.flush()
+    except Exception:
+        error_log(traceback.format_exc())
 
 def send_response(request_handler, status_code: int, content_type: str, data: str) -> None:
     request_handler.send_response(status_code)
@@ -96,7 +119,10 @@ def send_response(request_handler, status_code: int, content_type: str, data: st
     request_handler.send_header("Access-Control-Allow-Headers", "*")
     request_handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
     request_handler.end_headers()
-    request_handler.wfile.write(bytes(data, "utf-8"))
+    try:
+        request_handler.wfile.write(bytes(data, "utf-8"))
+    except Exception:
+        pass
 
 def handle_invalid_method(request_handler) -> None:
     request_handler.send_error(405, str(request_handler.command) + " method not allowed, only POST is accepted")
@@ -109,7 +135,10 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         path = parsed_url.path[1:]
         params = urllib.parse.parse_qs(parsed_url.query)
         content_length = int(self.headers["Content-Length"] or 0)
-        body = self.rfile.read(content_length).decode("utf-8")
+        try:
+            body = self.rfile.read(content_length).decode("utf-8") if content_length else ""
+        except Exception:
+            body = ""
 
         if path in BLACKLISTED_PATHS:
             send_response(self, 400, "", "")
@@ -119,10 +148,21 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             send_response(self, 200, "application/json", json.dumps({"version": YOMITAN_API_NATIVE_MESSAGING_VERSION}))
             return
 
-        send_message({"action": path, "params": params, "body": body})
-        yomitan_response = get_message()
-
-        send_response(self, yomitan_response["responseStatusCode"], "application/json", json.dumps(yomitan_response["data"], ensure_ascii = False))
+        # For all other paths, try to talk to Yomitan via native messaging
+        # If Yomitan is not running/connected, return a helpful 502 instead of hanging.
+        try:
+            send_message({"action": path, "params": params, "body": body})
+            yomitan_response = get_message(timeout=YOMITAN_RESPONSE_TIMEOUT)
+            if yomitan_response is None or not isinstance(yomitan_response, dict):
+                send_response(self, 502, "application/json", json.dumps({"error": "Yomitan not connected (browser closed or API disabled). Ensure browser is open, Yomitan API enabled, and bridge installed."}))
+                return
+            send_response(self, yomitan_response.get("responseStatusCode", 200), "application/json", json.dumps(yomitan_response.get("data"), ensure_ascii = False))
+        except Exception:
+            error_log(traceback.format_exc())
+            try:
+                send_response(self, 500, "application/json", json.dumps({"error": "bridge error"}))
+            except Exception:
+                pass
 
     do_GET = handle_invalid_method
     do_HEAD = handle_invalid_method
@@ -304,6 +344,30 @@ def _manifest_install_file(manifest: str, path: str) -> None:
     with open(os.path.join(path, NAME + ".json"), "w", encoding="utf-8") as f:
         f.write(manifest)
 
+def _try_start_bridge(script_path: str) -> tuple[bool, str]:
+    """Tries to start the HTTP bridge in background so Test works without browser restart."""
+    import subprocess
+    import time
+    import socket
+    try:
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+            subprocess.Popen([sys.executable, "-u", script_path],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=creationflags, close_fds=True)
+        else:
+            subprocess.Popen([sys.executable, "-u", script_path],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
+        time.sleep(0.9)
+        try:
+            with socket.create_connection(("127.0.0.1", 19633), timeout=1.0):
+                return (True, "bridge started, listening on 127.0.0.1:19633 (restart browser for Yomitan dictionaries)")
+        except Exception as se:
+            return (False, f"bridge launched but not listening yet ({se}); restart browser may be needed")
+    except Exception as e:
+        return (False, f"failed to start bridge: {e}")
+
 def install_bridge(additional_extension_ids=None) -> dict:
     """Installs the Yomitan bridge for all detected browsers.
 
@@ -373,6 +437,20 @@ def install_bridge(additional_extension_ids=None) -> dict:
                             results[browser] = (False, f"registry failed: {re}")
         except Exception as e:
             results[browser] = (False, f"unexpected: {e}")
+
+    # Try to start the HTTP bridge so Test turns green without browser restart
+    try:
+        script_path = _ensure_bridge_script()
+        started, msg = _try_start_bridge(script_path)
+        results["_bridge"] = (started, msg)
+        # Clear any stale crowbar error that would confuse next launch
+        try:
+            import time as _t
+            _t.sleep(0.2)
+        except Exception:
+            pass
+    except Exception as e:
+        results["_bridge"] = (False, f"bridge start failed: {e}")
 
     return results
 
