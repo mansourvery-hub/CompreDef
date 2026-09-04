@@ -1591,7 +1591,8 @@ def test_package_relative_imports() -> None:
     try:
         expected = {
         "anki": ["get_known_kanji_set", "get_known_vocabulary_set",
-                 "init_caches_async", "reset_caches", "knowledge_status"],
+                 "init_caches_async", "reset_caches", "knowledge_status",
+                 "knowledge_summary_text"],
             "core": ["get_provider", "get_generator"],
             "engine": ["DefinitionGenerator"],
             "provider": ["LocalSQLiteProvider", "IndexingError"],
@@ -1709,6 +1710,42 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             anki._caches_ready.clear()
         _core._generator = prev_generator
 
+def test_knowledge_summary_text() -> None:
+    """The knowledge dialog's content source: counts, lists, scope."""
+    import anki
+
+    prev_db_all = aqt.mw.col.db.all
+    prev_kanji = set(anki._known_kanji_cache)
+    prev_vocab = set(anki._known_vocab_cache)
+    prev_ready = anki._caches_ready.is_set()
+    import core as _core
+    prev_generator = _core._generator
+    try:
+        SEP = "\x1f"
+        aqt.mw.col.db.all = lambda q, p=(): [
+            (SEP.join(["漢字", "def"]),),
+            (SEP.join(["語彙", "def"]),),
+        ]
+        anki.reset_caches()
+        text = anki.knowledge_summary_text()
+        check("summary: shows kanji count", "Known kanji: 4" in text, text)
+        check("summary: shows word count", "Known words: 2" in text, text)
+        check("summary: lists the kanji",
+              "漢" in text and "語" in text, text)
+        check("summary: shows scope", "all note types" in text, text)
+        short = anki.knowledge_summary_text(max_kanji=2, max_words=1)
+        check("summary: truncates long lists with a remainder",
+              "more" in short, short)
+    finally:
+        aqt.mw.col.db.all = prev_db_all
+        anki._known_kanji_cache = prev_kanji
+        anki._known_vocab_cache = prev_vocab
+        if prev_ready:
+            anki._caches_ready.set()
+        else:
+            anki._caches_ready.clear()
+        _core._generator = prev_generator
+
 def test_knowledge_survives_new_schema(tmp_root: str) -> None:
     """
     The v1.0.5 production bug: the knowledge query referenced the legacy
@@ -1791,6 +1828,7 @@ def main() -> int:
         test_disabled_dictionaries_skipped(tmp_root)
         test_kanji_extraction_correctness(tmp_root)
         test_knowledge_survives_new_schema(tmp_root)
+        test_knowledge_summary_text()
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()
         test_tab_generate_decisions()

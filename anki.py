@@ -150,3 +150,33 @@ def knowledge_status() -> dict:
         "last_error": _last_error,
     }
 
+
+def knowledge_summary_text(max_kanji: int = 2000,
+                           max_words: int = 100) -> str:
+    """
+    Human-readable snapshot summary for the knowledge dialog and the
+    Debug Console. Pure stdlib logic, covered by the regression suite.
+    """
+    known = get_known_kanji_set()
+    vocab = get_known_vocabulary_set()
+    status = knowledge_status()
+    kanji_list = "".join(sorted(known))
+    if len(kanji_list) > max_kanji:
+        kanji_list = (kanji_list[:max_kanji] +
+                      f"… (+{len(known) - max_kanji} more)")
+    words = sorted(vocab)
+    words_shown = ", ".join(words[:max_words])
+    if len(words) > max_words:
+        words_shown += f", … (+{len(words) - max_words} more)"
+    lines = [
+        f"Known kanji: {len(known)}",
+        f"Known words: {len(vocab)}",
+        f"Scope: {status['scope']}",
+        f"Mature notes scanned: {status['mature_notes_scanned']}",
+    ]
+    if status["last_error"]:
+        lines.append(f"Last error: {status['last_error']}")
+    lines += ["", "Kanji:", kanji_list or "(none)", "",
+              "Words (sample):", words_shown or "(none)"]
+    return "\n".join(lines)
+

@@ -30,10 +30,12 @@ from aqt.qt import (
     QAbstractItemView,
     QLabel,
     QGroupBox,
+    QTextEdit,
     Qt,
 )
 
 from .core import get_provider
+from .anki import knowledge_summary_text
 from .utils import (
     find_dictionary_folders,
     is_zip_dictionary,
@@ -715,4 +717,38 @@ class ConfigDialog(QDialog):
 def show_config_dialog() -> None:
     """Displays the configuration dialog."""
     dialog = ConfigDialog(parent=mw.app.activeWindow() if mw and mw.app else None)
+    dialog.exec()
+
+
+def show_knowledge_dialog() -> None:
+    """Displays a read-only view of the learner-knowledge snapshot."""
+    dialog = QDialog(parent=mw.app.activeWindow() if mw and mw.app else None)
+    dialog.setWindowTitle("CompreDef Learner Knowledge")
+    dialog.resize(520, 480)
+    layout = QVBoxLayout()
+    dialog.setLayout(layout)
+    hint = QLabel(
+        "Session snapshot of your Japanese proficiency, used for scoring. "
+        "Restart Anki to rebuild it."
+    )
+    hint.setWordWrap(True)
+    layout.addWidget(hint)
+    view = QTextEdit()
+    view.setReadOnly(True)
+    try:
+        view.setPlainText(knowledge_summary_text())
+    except Exception:
+        import traceback
+        view.setPlainText(
+            "CompreDef: could not build knowledge summary:\n"
+            + traceback.format_exc()
+        )
+    layout.addWidget(view)
+    if hasattr(QDialogButtonBox, "StandardButton"):
+        close_flag = QDialogButtonBox.StandardButton.Close
+    else:
+        close_flag = QDialogButtonBox.Close
+    button_box = QDialogButtonBox(close_flag)
+    button_box.rejected.connect(dialog.reject)
+    layout.addWidget(button_box)
     dialog.exec()

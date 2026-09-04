@@ -7,7 +7,7 @@ to the user's known vocabulary and kanji.
 
 from aqt import mw
 from aqt.qt import QMenu
-from .gui import show_config_dialog
+from .gui import show_config_dialog, show_knowledge_dialog
 from .editor_browser import setup_editor_browser_hooks
 from . import anki
 
@@ -28,6 +28,8 @@ def _add_tools_menu_entry() -> None:
         action.triggered.connect(lambda _: show_config_dialog())
         # Separate visually from Anki's own entries
         tools_menu.insertSeparator(action)
+        knowledge_action = tools_menu.addAction("CompreDef Learner Knowledge...")
+        knowledge_action.triggered.connect(lambda _: show_knowledge_dialog())
     except Exception as e:
         # Menu injection must never break Anki startup
         print(f"CompreDef: Failed to add Tools menu entry: {e}")
