@@ -1213,6 +1213,25 @@ class ConfigDialog(QDialog):
                     "reading_field": mapping.get("reading_field", ""),
                     "definition_field": def_f,
                 }
+        # Never clobber existing targets with empty during early saves
+        # (dialog opened but types not yet loaded, or Yomitan toggle race).
+        # This was the "had to redo Note Types" bug after v1.0.20.
+        if not targets and isinstance(self.config.get("targets"), dict) and self.config["targets"]:
+            prev_targets = self.config["targets"]
+            # Sanity: only preserve if it looks like a valid targets dict
+            if isinstance(prev_targets, dict) and any(isinstance(v, dict) and v.get("word_field") and v.get("definition_field") for v in prev_targets.values()):
+                targets = {str(k): dict(v) for k, v in prev_targets.items() if isinstance(v, dict)}
+        # Also handle legacy single-type configs that were migrated to targets
+        if not targets and self.config.get("note_type") and self.config.get("word_field") and self.config.get("definition_field"):
+            # Preserve legacy single-type if we have nothing else
+            _legacy_type = str(self.config["note_type"])
+            targets = {
+                _legacy_type: {
+                    "word_field": str(self.config.get("word_field") or ""),
+                    "reading_field": str(self.config.get("reading_field") or ""),
+                    "definition_field": str(self.config.get("definition_field") or ""),
+                }
+            }
         first_name = next(iter(targets), "")
         first = targets.get(first_name, {})
         return {

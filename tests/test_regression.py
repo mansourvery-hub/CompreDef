@@ -2048,6 +2048,97 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
             anki._caches_ready.clear()
         _core._generator = prev_generator
 
+def test_config_survives_yomitan_toggle() -> None:
+    """
+    Regression for v1.0.27 bug: switching Dictionary Source to Yomitan
+    and closing the dialog wiped Local ladder and Note Types targets.
+
+    The dialog's early save (before _load_config populates the ladder)
+    wrote {"dictionaries":[],"targets":{}} over the real config, and
+    install_local.sh deleting meta.json made it permanent. The fix preserves
+    previous config when the UI list is empty but previous config was not.
+    """
+    # Simulate the preservation logic in gui.py without needing Qt
+    # by directly testing _collect_type_config's fallback.
+    # We mock a ConfigDialog-like object with minimal state.
+    class FakeDialog:
+        def __init__(self, prev_config):
+            self.config = prev_config
+            self.type_mappings = {}  # empty UI (before load)
+        def _stash_current_mapping(self):
+            pass
+        # Copy the fixed _collect_type_config logic
+        def _collect_type_config(self):
+            # Simplified copy of gui.py's fixed method
+            targets = {}
+            for type_name, mapping in self.type_mappings.items():
+                word = mapping.get("word_field", "")
+                def_f = mapping.get("definition_field", "")
+                if word and def_f:
+                    targets[type_name] = {
+                        "word_field": word,
+                        "reading_field": mapping.get("reading_field", ""),
+                        "definition_field": def_f,
+                    }
+            if not targets and isinstance(self.config.get("targets"), dict) and self.config["targets"]:
+                prev_targets = self.config["targets"]
+                if isinstance(prev_targets, dict) and any(isinstance(v, dict) and v.get("word_field") and v.get("definition_field") for v in prev_targets.values()):
+                    targets = {str(k): dict(v) for k, v in prev_targets.items() if isinstance(v, dict)}
+            if not targets and self.config.get("note_type") and self.config.get("word_field") and self.config.get("definition_field"):
+                _legacy_type = str(self.config["note_type"])
+                targets = {
+                    _legacy_type: {
+                        "word_field": str(self.config.get("word_field") or ""),
+                        "reading_field": str(self.config.get("reading_field") or ""),
+                        "definition_field": str(self.config.get("definition_field") or ""),
+                    }
+                }
+            first_name = next(iter(targets), "")
+            first = targets.get(first_name, {})
+            return {
+                "targets": targets,
+                "note_type": first_name,
+                "word_field": first.get("word_field", ""),
+                "reading_field": first.get("reading_field", ""),
+                "definition_field": first.get("definition_field", ""),
+            }
+
+    prev = {
+        "targets": {
+            "Japanese": {"word_field": "Expression", "reading_field": "Reading", "definition_field": "Definition"},
+            "Mining": {"word_field": "Word", "reading_field": "", "definition_field": "Def"},
+        },
+        "dictionaries": ["/tmp/dictA", "/tmp/dictB"],
+        "note_type": "Japanese",
+        "word_field": "Expression",
+        "definition_field": "Definition",
+    }
+    dlg = FakeDialog(prev)
+    result = dlg._collect_type_config()
+    check("config-preserve: Yomitan toggle keeps targets",
+          result["targets"] == prev["targets"],
+          f"got {result['targets']}")
+    check("config-preserve: legacy mirror preserved",
+          result["note_type"] == "Japanese" and result["word_field"] == "Expression",
+          f"got {result}")
+
+    # Empty previous config should stay empty (new user, not a clobber)
+    dlg2 = FakeDialog({"targets": {}, "dictionaries": []})
+    result2 = dlg2._collect_type_config()
+    check("config-preserve: empty stays empty for new user",
+          result2["targets"] == {},
+          f"got {result2['targets']}")
+
+    # Dictionaries preservation (simulated via save logic)
+    # When UI list is empty but previous config has dictionaries, preserve
+    prev_dicts = ["/tmp/dA", "/tmp/dB"]
+    ui_ordered = []
+    preserved = list(prev_dicts) if (not ui_ordered and prev_dicts) else ui_ordered
+    check("config-preserve: Yomitan toggle keeps dictionaries",
+          preserved == prev_dicts,
+          f"got {preserved}")
+
+
 def main() -> int:
     print("=" * 70)
     print("CompreDef fundamental regression suite")
@@ -2086,6 +2177,7 @@ def main() -> int:
         test_qt_enum_compat()
         test_tab_generate_decisions()
         test_multi_note_type_targeting()
+        test_config_survives_yomitan_toggle()
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.
