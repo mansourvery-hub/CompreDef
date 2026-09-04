@@ -261,8 +261,17 @@ class ConfigDialog(QDialog):
         self.yomitan_url_edit.setText(str(self.config.get("yomitan_url") or "http://127.0.0.1:19633"))
         self.yomitan_url_edit.setToolTip("Yomitan API bridge URL (default 127.0.0.1:19633). Change only if you edited yomitan_api.py ADDR/PORT.")
         yomitan_layout.addWidget(self.yomitan_url_edit, stretch=1)
+        self.yomitan_install_btn = _size_button(QPushButton("Install / Repair Bridge"))
+        self.yomitan_install_btn.setToolTip(
+            "One-click install of the Yomitan bridge (native messaging host).\n"
+            "Writes the manifest for Chrome/Firefox/Brave/Edge so Yomitan's\n"
+            "'Enable Yomitan API' actually exposes http://127.0.0.1:19633.\n"
+            "No terminal needed — just click, then restart browser."
+        )
+        self.yomitan_install_btn.clicked.connect(self._on_install_yomitan_bridge)
+        yomitan_layout.addWidget(self.yomitan_install_btn)
         self.yomitan_test_btn = _size_button(QPushButton("Test"))
-        self.yomitan_test_btn.setToolTip("Ping Yomitan API (/serverVersion). Browser must be open + Yomitan API enabled.")
+        self.yomitan_test_btn.setToolTip("Ping Yomitan API (/serverVersion). Browser must be open + Yomitan API enabled + bridge installed.")
         self.yomitan_test_btn.clicked.connect(self._on_test_yomitan)
         yomitan_layout.addWidget(self.yomitan_test_btn)
         ladder_layout.addWidget(self.yomitan_settings_widget)
@@ -630,9 +639,9 @@ class ConfigDialog(QDialog):
         if is_yomitan:
             self.yomitan_status_label.setText(
                 "Yomitan mode: live dictionaries from browser (no indexing needed).\n"
-                "Requires Yomitan API bridge: run 'python install_yomitan_api.py' once\n"
-                "and enable Yomitan → Settings → Advanced → General → Enable Yomitan API.\n"
-                "Without it the Test below will stay red — browser must be open."
+                "Click 'Install / Repair Bridge' once (no terminal), restart browser,\n"
+                "then enable Yomitan → Settings → Advanced → General → Enable Yomitan API.\n"
+                "After that 'Test' should turn green."
             )
         # Grey out local ladder when Yomitan is active (still visible for reference)
         for w in (self.dict_list, self.add_zip_btn, self.add_dict_btn, self.add_folder_btn,
@@ -690,7 +699,7 @@ class ConfigDialog(QDialog):
                     msg = (
                         f"✗ Yomitan not reachable at {url} ({err}).\n"
                         f"Browser must be open, Yomitan → Settings → Advanced → General → Enable Yomitan API must be ON,\n"
-                        f"and you must run 'python install_yomitan_api.py' once (from yomitan-api repo) for your browser.\n"
+                        f"and click 'Install / Repair Bridge' above once (no terminal) then restart browser.\n"
                         f"Without that bridge CompreDef cannot see Yomitan's dictionaries — switch to Local if you don't want the extra step."
                     )
                     self.yomitan_status_label.setText(msg)
@@ -707,6 +716,73 @@ class ConfigDialog(QDialog):
         except Exception:
             # Fallback synchronous for tests
             task()
+
+    def _on_install_yomitan_bridge(self) -> None:
+        """One-click install of the Yomitan native host — no terminal needed."""
+        self.yomitan_status_label.setText("Installing Yomitan bridge ...")
+        self.yomitan_status_label.setStyleSheet("color: gray; font-size: 11px;")
+        try:
+            self._save_config_now()
+        except Exception:
+            pass
+        def task():
+            try:
+                if __package__:
+                    from .yomitan_installer import install_bridge
+                else:
+                    from yomitan_installer import install_bridge
+                results = install_bridge()
+                return (results, None)
+            except Exception as e:
+                import traceback
+                return (None, traceback.format_exc())
+
+        def on_done(future):
+            try:
+                results, err = future.result()
+                if err:
+                    self.yomitan_status_label.setText(f"✗ Install failed: {err}")
+                    self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                    print(f"CompreDef: Yomitan bridge install failed:\n{err}")
+                    tooltip(f"Yomitan bridge install failed — see console", parent=self)
+                    return
+                # Summarize per-browser
+                if isinstance(results, dict) and results:
+                    ok = [b for b, (s, _) in results.items() if s]
+                    fail = [(b, m) for b, (s, m) in results.items() if not s]
+                    if ok:
+                        msg = f"✓ Bridge installed for: {', '.join(ok)}. Restart browser, then click Test."
+                        self.yomitan_status_label.setText(msg + (" Restart browser now." if ok else ""))
+                        self.yomitan_status_label.setStyleSheet("color: green; font-size: 11px;")
+                        print(f"CompreDef: Yomitan bridge install results: {results}")
+                        tooltip(f"Yomitan bridge installed for {', '.join(ok)} — restart browser and enable Yomitan API", parent=self)
+                    if fail:
+                        print(f"CompreDef: Yomitan bridge partial failures: {fail}")
+                        if not ok:
+                            self.yomitan_status_label.setText(f"✗ Bridge install failed for all browsers: {fail}")
+                            self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                else:
+                    self.yomitan_status_label.setText("✗ Bridge install returned no results — see console")
+                    self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                # Auto-test after install
+                try:
+                    self._on_test_yomitan()
+                except Exception:
+                    pass
+            except Exception as e:
+                import traceback
+                self.yomitan_status_label.setText(f"✗ Install error: {e}")
+                self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
+                print(traceback.format_exc())
+
+        try:
+            mw.taskman.run_in_background(task, on_done)
+        except Exception:
+            # Fallback synchronous
+            res = task()
+            class FakeFuture:
+                def result(self): return res
+            on_done(FakeFuture())
 
     def _on_item_changed(self, item: QListWidgetItem) -> None:
         """Handles checkbox toggles to update disabled_dicts set."""

@@ -285,9 +285,10 @@ def on_editor_generate_definition(editor) -> None:
                             print(f"CompreDef: Yomitan lookup failed for '{word_text}': {err}")
                             tooltip(
                                 f"CompreDef: Yomitan not reachable.\n{err}\n"
-                                f"Fix: run 'python install_yomitan_api.py' once and enable\n"
+                                f"Fix: In CompreDef config → Dictionary Source → Yomitan API →\n"
+                                f"click 'Install / Repair Bridge', restart browser, and enable\n"
                                 f"Yomitan → Settings → Advanced → General → Enable Yomitan API.\n"
-                                f"Or switch back to Local dictionaries in CompreDef config.",
+                                f"Or switch back to Local dictionaries.",
                                 parent=editor.parentWindow,
                             )
                             return
