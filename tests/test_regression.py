@@ -114,7 +114,16 @@ class _FakeAddonManager:
     def __init__(self):
         self.configs = {}
     def getConfig(self, name):
-        return self.configs.get(name, {})
+        # yomitan_fallback stays disabled for ALL tests: the suite must be
+        # hermetic. On a dev machine with live Yomitan running, the engine's
+        # fail-safe would otherwise query the real bridge during tests that
+        # expect None ("missing word", "all dictionaries disabled"), because
+        # the aqt stub's empty config enables the fallback by default.
+        if name not in self.configs:
+            return {"yomitan_fallback": False}
+        cfg = dict(self.configs[name])
+        cfg.setdefault("yomitan_fallback", False)
+        return cfg
     def writeConfig(self, name, config):
         self.configs[name] = config
 
@@ -2139,6 +2148,112 @@ def test_config_survives_yomitan_toggle() -> None:
           f"got {preserved}")
 
 
+def test_yomitan_bridge_sw_keepalive() -> None:
+    """
+    Regression for the 2026-09-04 "Yomitan completely dead" incident.
+
+    Root cause (verified live on Chrome 151 + Yomitan 26.8.24.0): Yomitan's
+    MV3 service worker owns the native-messaging port. ~30s after
+    connectNative the SW suspends, Chrome closes both pipes, and the old
+    bridge became a ZOMBIE: still listening on port 19633, stdin dead, so
+    every /ankiFields returned 502 forever and no new launch could bind.
+
+    The bundled BRIDGE_SCRIPT must therefore:
+    1. Ping the port periodically (KEEPALIVE_INTERVAL < 30s SW idle timer)
+       so port.onMessage keeps firing and the SW never suspends.
+    2. Watch stdin from a reader thread and, on EOF, SHUT THE HOST DOWN so
+       the process exits and frees port 19633 (anti-zombie self-heal).
+    3. Match replies by a per-request nonce so keepalive echoes can never
+       be mis-paired with a real HTTP request's reply.
+    4. Never kill a browser-launched bridge from the installer (v1.0.34
+       incident) — only bare-cmdline standalone orphans.
+    5. Keep the bridge's Yomitan wait (YOMITAN_RESPONSE_TIMEOUT) below the
+       Anki-side fetch timeout in yomitan.py (nested timeouts).
+    """
+    import yomitan_installer as installer
+
+    src = installer.BRIDGE_SCRIPT
+
+    # 1. Keepalive: interval must be strictly under the 30s SW idle timer.
+    m = re.search(r"KEEPALIVE_INTERVAL\s*=\s*([0-9.]+)", src)
+    check("bridge: keepalive interval configured",
+          m is not None, "KEEPALIVE_INTERVAL not found")
+    if m:
+        check("bridge: keepalive fires under 30s SW idle timer",
+              0 < float(m.group(1)) < 30.0,
+              f"got {m.group(1)}")
+    check("bridge: keepalive thread started",
+          "_keepalive_loop, daemon=True" in src.replace(" ", "").replace("\n", "")
+          or "threading.Thread(target=_keepalive_loop" in src,
+          "keepalive thread not launched")
+    check("bridge: keepalive sends a port message (resets SW idle timer)",
+          re.search(r'_raw_send\(\{"action": "keepalive"', src) is not None,
+          "no keepalive ping found")
+
+    # 2. Anti-zombie: a stdin reader thread must trigger host shutdown on EOF.
+    check("bridge: stdin reader thread exists",
+          "target=_stdin_reader" in src, "no _stdin_reader thread")
+    check("bridge: reader clears connected state on EOF",
+          re.search(r"_yomitan_connected\.clear\(\)", src) is not None,
+          "EOF does not clear connection state")
+    check("bridge: reader shuts the HTTP server down on EOF",
+          re.search(r"def _stdin_reader.*?_shutdown_host\(\)", src, re.S) is not None,
+          "reader thread does not call _shutdown_host()")
+    check("bridge: _shutdown_host stops the HTTP server",
+          re.search(r"def _shutdown_host.*?httpd\.shutdown\(\)", src, re.S) is not None,
+          "_shutdown_host missing or does not call httpd.shutdown()")
+    check("bridge: port is closed on exit (frees 19633)",
+          "server_close()" in src, "no server_close() on exit path")
+
+    # 3. Nonce pairing: every request carries a unique nonce in params.
+    check("bridge: requests carry a nonce",
+          '"_cd": nonce' in src, "no nonce in request frame")
+    check("bridge: replies matched by nonce",
+          re.search(r"params\.get\(\"_cd\"\)", src) is not None,
+          "reader does not extract nonce from echoed params")
+
+    # 4. Browser-launched guard: the killer must skip chrome-extension:// procs.
+    inst_src = open(os.path.join(REPO_ROOT, "yomitan_installer.py"), encoding="utf-8").read()
+    check("installer: _is_browser_launched guard exists",
+          "def _is_browser_launched" in inst_src,
+          "no browser-launched guard in killer")
+    check("installer: killer checks the guard before killing",
+          re.search(r"not _is_browser_launched\(pid\)", inst_src) is not None,
+          "killer does not check _is_browser_launched")
+    check("installer: guard treats unreadable cmdline as browser-launched",
+          re.search(r"Unreadable.*?return True", inst_src, re.S) is not None
+          or "assume browser-launched" in inst_src,
+          "guard does not err on the side of not killing")
+
+    # 5. Nested timeouts: bridge wait must stay under Anki fetch timeout.
+    m = re.search(r"YOMITAN_RESPONSE_TIMEOUT\s*=\s*([0-9.]+)", src)
+    bridge_wait = float(m.group(1)) if m else 0.0
+    m2 = re.search(r"YOMITAN_TIMEOUT\s*=\s*([0-9.]+)",
+                   open(os.path.join(REPO_ROOT, "yomitan.py"), encoding="utf-8").read())
+    anki_wait = float(m2.group(1)) if m2 else 0.0
+    check("bridge: bridge wait < Anki fetch timeout (nested)",
+          0 < bridge_wait < anki_wait,
+          f"bridge={bridge_wait}s anki={anki_wait}s")
+
+    # 6. 502 must be reported only via the connected-state check (so a
+    # dying SW between request and reply still fails within the timeout,
+    # never hangs the HTTP thread forever).
+    check("bridge: HTTP path checks connection before sending",
+          re.search(r"if not _yomitan_connected\.is_set\(\)", src) is not None,
+          "no connection pre-check in do_POST")
+
+    # 7. The script must compile.
+    import ast
+    try:
+        ast.parse(src)
+        ok = True
+        err = ""
+    except SyntaxError as e:
+        ok = False
+        err = str(e)
+    check("bridge: BRIDGE_SCRIPT parses as valid Python", ok, err)
+
+
 def main() -> int:
     print("=" * 70)
     print("CompreDef fundamental regression suite")
@@ -2178,6 +2293,7 @@ def main() -> int:
         test_tab_generate_decisions()
         test_multi_note_type_targeting()
         test_config_survives_yomitan_toggle()
+        test_yomitan_bridge_sw_keepalive()
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.
