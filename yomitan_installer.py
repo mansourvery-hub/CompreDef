@@ -22,8 +22,33 @@ import sys
 import re
 
 # ---------------------------------------------------------------------------
-# Bridge script content (exact copy of yomitan_api.py from yomitan-api repo)
+# Bridge script content (yomitan_api.py, based on yomidevs/yomitan-api with
+# CompreDef's MV3 service-worker fixes — see KEEPALIVE notes below).
 # This is written to user_files/yomitan_bridge/yomitan_api.py on install.
+#
+# WHY THIS IS NOT A VANILLA UPSTREAM COPY ANYMORE:
+# Upstream's host blocks reading stdin and never keeps Yomitan's MV3 service
+# worker (SW) alive. On Chrome 151 we verified live that the SW suspends
+# ~30s after connectNative, Chrome closes both pipes, and the host process
+# turns into a ZOMBIE holding port 19633 while every /ankiFields returns 502
+# ("Yomitan completely dead" incident, 2026-09-04). Our additions:
+#   1. Keepalive thread — pings the native port every 20s. Per Chrome docs
+#      (Chrome 105/110/114 rules), receiving a message on the port resets
+#      the SW's 30-second idle timer, so the SW (and the port) stay alive
+#      for as long as Chrome runs. Yomitan's SW just posts the ping back.
+#   2. Reader thread owns stdin — a background thread blocks on stdin. On
+#      EOF (SW suspended / Chrome quit) it fails all pending requests and
+#      cleanly shuts the HTTP server down, so the host EXITS and frees port
+#      19633 for the next SW cold start (which re-launches the host). No
+#      more zombie port-holder.
+#   3. Nonce pairing — every request carries a unique "_cd" nonce in
+#      params; Yomitan echoes params back in its reply. Pending requests
+#      match replies by nonce, so keepalive echoes and stale replies can
+#      never be mis-paired with an HTTP request's response.
+#   4. Timeout bump — YOMITAN_RESPONSE_TIMEOUT 2.0 -> 8.0s: a cold first
+#      query after browser start legitimately takes seconds (SW boot +
+#      dictionary DB open). Anki-side fetch timeout must exceed this
+#      (yomitan.py uses 10s).
 # ---------------------------------------------------------------------------
 BRIDGE_SCRIPT = r'''#!/usr/bin/env -S python3 -u
 
@@ -31,10 +56,10 @@ import datetime
 import http.server
 import json
 import os
-import select
 import signal
 import struct
 import sys
+import threading
 import time
 import traceback
 import urllib
@@ -43,6 +68,11 @@ ADDR = "127.0.0.1"
 PORT = 19633
 PROCESS_STARTUP_WAIT = 5
 YOMITAN_RESPONSE_TIMEOUT = 2.0
+
+# SW idle timer is 30s (Chrome docs). Ping well under it, with margin for
+# scheduling jitter. Each ping fires port.onMessage in Yomitan's service
+# worker, which resets the idle timer (Chrome 105/110/114 rules).
+KEEPALIVE_INTERVAL = 20.0
 
 YOMITAN_API_NATIVE_MESSAGING_VERSION = 1
 BLACKLISTED_PATHS = ["favicon.ico"]
@@ -54,7 +84,7 @@ def error_log(message: str, error: str = "") -> None:
     try:
         utc_time = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
         with open(script_path + "/error.log", "a", encoding = "utf8") as log_file:
-            log_file.write(utc_time + ", " + str(message).replace("\r", r"\r").replace("\n", r"\n") + ", " + str(error).replace("\r", r"\r").replace("\n", r"\n") + "\n")
+            log_file.write(utc_time + ", " + str(message).replace("\r", r"\r").replace("\n", r"\n") + ", " + str(error).replace("\r", r"\r").replace("\n", r"\n").replace("\n", r"\n") + "\n")
     except Exception:
         pass
 
@@ -78,38 +108,126 @@ def delete_crowbarfile() -> None:
     except Exception:
         pass
 
-def get_message(timeout=YOMITAN_RESPONSE_TIMEOUT) -> dict:
-    # Wait for 4-byte length with timeout so HTTP server doesn't hang forever
-    # when Yomitan is not running (browser closed or API disabled).
-    rlist, _, _ = select.select([sys.stdin.buffer], [], [], timeout)
-    if not rlist:
-        return None
-    raw_length = sys.stdin.buffer.read(4)
-    if not raw_length or len(raw_length) < 4:
-        return None
-    try:
-        message_length = struct.unpack("@I", raw_length)[0]
-        # Limit to 10MB to avoid DoS
-        if message_length > 10 * 1024 * 1024:
-            return None
-        rlist, _, _ = select.select([sys.stdin.buffer], [], [], timeout)
-        if not rlist:
-            return None
-        message = sys.stdin.buffer.read(message_length).decode("utf-8")
-        return json.loads(message)
-    except Exception:
-        error_log(traceback.format_exc())
-        return None
+# ---------------------------------------------------------------------------
+# Yomitan connection state, shared between the reader/keepalive threads and
+# the HTTP request threads.
+# ---------------------------------------------------------------------------
+_stdin_lock = threading.Lock()      # serializes ALL stdin reads
+_stdout_lock = threading.Lock()     # serializes ALL stdout writes
+_yomitan_connected = threading.Event()  # set while stdin is alive (port open)
 
-def send_message(message_content: dict) -> None:
+_pending_lock = threading.Lock()
+_pending: dict = {}                 # nonce -> threading.Event
+_responses: dict = {}               # nonce -> reply dict or None (timeout)
+
+def _raw_send(message_content: dict) -> bool:
+    """Writes one native-messaging frame to stdout. Returns False if the
+    pipe is broken (SW suspended / Chrome quit) — callers must then treat
+    Yomitan as disconnected."""
     try:
         encoded_content = json.dumps(message_content).encode("utf-8")
         encoded_length = struct.pack("@I", len(encoded_content))
-        sys.stdout.buffer.write(encoded_length)
-        sys.stdout.buffer.write(encoded_content)
-        sys.stdout.buffer.flush()
+        with _stdout_lock:
+            sys.stdout.buffer.write(encoded_length)
+            sys.stdout.buffer.write(encoded_content)
+            sys.stdout.buffer.flush()
+        return True
     except Exception:
         error_log(traceback.format_exc())
+        return False
+
+def _stdin_reader() -> None:
+    """Thread: the ONLY consumer of stdin. Reads frames until EOF.
+
+    EOF means the SW suspended and closed the port (or Chrome quit) —
+    once that happens no reply can ever arrive, so we fail every pending
+    request and shut the whole host down. This is what prevents the
+    zombie-host-holding-port-19633 failure mode.
+    """
+    while True:
+        try:
+            raw_length = sys.stdin.buffer.read(4)
+        except Exception:
+            break
+        if not raw_length or len(raw_length) < 4:
+            break  # EOF: port closed
+        try:
+            message_length = struct.unpack("@I", raw_length)[0]
+            if message_length > 10 * 1024 * 1024:
+                continue  # refuse oversized frames, keep reading
+            message = sys.stdin.buffer.read(message_length).decode("utf-8")
+            reply = json.loads(message)
+        except Exception:
+            error_log(traceback.format_exc())
+            continue
+        if not isinstance(reply, dict):
+            continue
+        # Route by echoed nonce; unknown nonce replies (e.g. keepalive
+        # echoes) are dropped instead of mis-paired.
+        params = reply.get("params")
+        nonce = None
+        if isinstance(params, dict):
+            nonce = params.get("_cd")
+        if nonce is not None:
+            with _pending_lock:
+                ev = _pending.get(nonce)
+                if ev is not None:
+                    _responses[nonce] = reply
+                    ev.set()
+
+    # stdin EOF — Yomitan is gone. Fail everything pending, mark the host
+    # dead so HTTP callers return 502 instead of hanging, and shut down the
+    # HTTP server so this process EXITS and frees port 19633 for the next
+    # browser launch (this is the anti-zombie guarantee).
+    _yomitan_connected.clear()
+    with _pending_lock:
+        for ev in _pending.values():
+            ev.set()
+    _shutdown_host()
+
+def _keepalive_loop() -> None:
+    """Thread: pings Yomitan's service worker every KEEPALIVE_INTERVAL.
+
+    Receiving a message on the native port resets the SW's 30s idle timer
+    (Chrome 105/110/114 lifecycle rules), preventing the suspend that
+    otherwise closes our pipes ~30s after connectNative. Yomitan's SW
+    replies with action "keepalive" + 400 (unknown action), which the
+    reader drops as an unknown nonce. If the pipe is broken we stop —
+    the reader thread will have already begun host shutdown.
+    """
+    while True:
+        time.sleep(KEEPALIVE_INTERVAL)
+        if not _yomitan_connected.is_set():
+            return
+        if not _raw_send({"action": "keepalive", "params": {"_cd": "keepalive"}, "body": ""}):
+            return
+
+def send_message(message_content: dict) -> bool:
+    """Public send kept for source compatibility with upstream layout;
+    reports pipe health."""
+    return _raw_send(message_content)
+
+def request_yomitan(action: str, params: dict, body: str, timeout: float) -> dict:
+    """Sends one request to Yomitan and waits for its nonce-matched reply.
+
+    Returns the reply dict, or None on timeout / disconnection.
+    """
+    nonce = f"{time.time_ns()}-{threading.get_ident()}"
+    frame = {"action": action, "params": {**params, "_cd": nonce}, "body": body}
+    ev = threading.Event()
+    with _pending_lock:
+        _pending[nonce] = ev
+
+    if not _raw_send(frame):
+        with _pending_lock:
+            _pending.pop(nonce, None)
+        return None
+
+    ev.wait(timeout + 0.5)
+    with _pending_lock:
+        _pending.pop(nonce, None)
+        reply = _responses.pop(nonce, None)
+    return reply
 
 def send_response(request_handler, status_code: int, content_type: str, data: str) -> None:
     request_handler.send_response(status_code)
@@ -128,6 +246,8 @@ def handle_invalid_method(request_handler) -> None:
     request_handler.send_error(405, str(request_handler.command) + " method not allowed, only POST is accepted")
     request_handler.send_header("Allow", "POST")
     request_handler.end_headers()
+
+httpd = None
 
 class RequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
@@ -148,12 +268,14 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             send_response(self, 200, "application/json", json.dumps({"version": YOMITAN_API_NATIVE_MESSAGING_VERSION}))
             return
 
-        # For all other paths, try to talk to Yomitan via native messaging
-        # If Yomitan is not running/connected, return a helpful 502 instead of hanging.
+        # Full-chain endpoints (yomitanVersion/termEntries/ankiFields/...)
+        # require the browser half: SW alive + Yomitan answering via stdin.
         try:
-            send_message({"action": path, "params": params, "body": body})
-            yomitan_response = get_message(timeout=YOMITAN_RESPONSE_TIMEOUT)
-            if yomitan_response is None or not isinstance(yomitan_response, dict):
+            if not _yomitan_connected.is_set():
+                send_response(self, 502, "application/json", json.dumps({"error": "Yomitan not connected (browser closed or API disabled). Ensure browser is open, Yomitan API enabled, and bridge installed."}))
+                return
+            yomitan_response = request_yomitan(path, params, body, YOMITAN_RESPONSE_TIMEOUT)
+            if yomitan_response is None:
                 send_response(self, 502, "application/json", json.dumps({"error": "Yomitan not connected (browser closed or API disabled). Ensure browser is open, Yomitan API enabled, and bridge installed."}))
                 return
             send_response(self, yomitan_response.get("responseStatusCode", 200), "application/json", json.dumps(yomitan_response.get("data"), ensure_ascii = False))
@@ -173,13 +295,34 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     do_TRACE = handle_invalid_method
     do_PATCH = handle_invalid_method
 
+def _shutdown_host() -> None:
+    """Stops the HTTP server so serve_forever() returns and the process
+    exits, releasing port 19633 for the next launch."""
+    global httpd
+    try:
+        if httpd is not None:
+            httpd.shutdown()
+    except Exception:
+        error_log(traceback.format_exc())
+
 try:
     ensure_single_instance()
-    httpd = http.server.HTTPServer((ADDR, PORT), RequestHandler)
+    httpd = http.server.ThreadingHTTPServer((ADDR, PORT), RequestHandler)
+    _yomitan_connected.set()
+    threading.Thread(target=_stdin_reader, daemon=True).start()
+    threading.Thread(target=_keepalive_loop, daemon=True).start()
     httpd.serve_forever()
     delete_crowbarfile()
 except Exception:
     error_log(traceback.format_exc())
+    delete_crowbarfile()
+finally:
+    # Belt-and-braces: the process must never linger with a dead port.
+    try:
+        if httpd is not None:
+            httpd.server_close()
+    except Exception:
+        pass
 '''
 
 NAME = "yomitan_api"
@@ -344,6 +487,27 @@ def _manifest_install_file(manifest: str, path: str) -> None:
     with open(os.path.join(path, NAME + ".json"), "w", encoding="utf-8") as f:
         f.write(manifest)
 
+def _is_browser_launched(pid: int) -> bool:
+    """True if the process was launched by the browser via native messaging.
+
+    The browser appends the caller origin to argv, e.g.
+        yomitan_api.py chrome-extension://likgccmbimhjbgkjambclfkhldnlhbnn/
+    A standalone bridge has a bare cmdline with no origin argument.
+    We must NEVER kill browser-launched instances (v1.0.34 incident:
+    a killer matching on yomitan_api.py alone murdered a live connection).
+    Zombie browser-launched hosts are reclaimed by the crowbar takeover in
+    ensure_single_instance() when the next instance starts — not by us.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read().decode(errors="ignore")
+    except Exception:
+        # Unreadable (already dead, or not Linux) — assume browser-launched
+        # so we err on the side of NOT killing.
+        return True
+    return "chrome-extension://" in cmd or "moz-extension://" in cmd
+
+
 def _kill_standalone_bridge() -> str:
     """Kills any standalone bridge we previously autostarted.
 
@@ -351,6 +515,9 @@ def _kill_standalone_bridge() -> str:
     /ankiFields returns 502 and — worse — the browser-launched bridge
     cannot bind (Address already in use). After removing autostart we must
     clean up orphans from older versions.
+
+    ONLY bare-cmdline (standalone) processes are killed; browser-launched
+    ones are left to the crowbar takeover (see _is_browser_launched).
     """
     import subprocess
     killed = []
@@ -372,14 +539,14 @@ def _kill_standalone_bridge() -> str:
                     try:
                         with open(f"/proc/{pid}/cmdline", "rb") as f:
                             cmd = f.read().decode(errors="ignore")
-                        if "yomitan_api.py" in cmd:
+                        if "yomitan_api.py" in cmd and not _is_browser_launched(pid):
                             os.kill(pid, 15)
                             killed.append(pid)
                     except Exception:
                         continue
             except Exception:
                 pass
-            # Fallback: kill by cmdline scan
+            # Fallback: kill by cmdline scan (standalone only)
             if not killed:
                 try:
                     out = subprocess.run(
@@ -389,9 +556,12 @@ def _kill_standalone_bridge() -> str:
                     for line in out.stdout.splitlines():
                         line = line.strip()
                         if line.isdigit():
+                            pid = int(line)
                             try:
-                                os.kill(int(line), 15)
-                                killed.append(int(line))
+                                if _is_browser_launched(pid):
+                                    continue
+                                os.kill(pid, 15)
+                                killed.append(pid)
                             except Exception:
                                 continue
                 except Exception:
