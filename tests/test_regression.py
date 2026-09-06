@@ -1699,6 +1699,24 @@ def test_scope_deck_filtering() -> None:
         check("scope: empty config is empty scope",
               compredef_scope.is_scope_empty({}) and
               compredef_scope.get_scope_decks({}) == [])
+
+        # 4. SIBLING-DECK case (v1.1.2 production confusion): note in
+        #    Japanese::Sibling vs scope=Japanese::Vocab (another child)
+        #    — same parent, NOT covered; note_deck_names reveals it.
+        sibling = col.decks.add("Japanese::Sibling")
+        col.db.notes[104] = {"flds": "x", "dids": [sibling], "mid": mid_jp}
+        leaf_cfg = {"scope_decks": ["Japanese::Vocab"]}
+        check("scope: sibling deck is NOT covered by leaf selection",
+              not compredef_scope.note_in_scope(N(104), leaf_cfg, col))
+        check("scope: sibling deck IS covered by parent selection",
+              compredef_scope.note_in_scope(
+                  N(104), {"scope_decks": ["Japanese"]}, col))
+        names = compredef_scope.note_deck_names(N(104), col)
+        check("scope: note_deck_names reveals the blocking deck",
+              names == ["Japanese::Sibling"],
+              f"got {names}")
+        check("scope: note_deck_names empty for unsaved notes",
+              compredef_scope.note_deck_names(N(0), col) == [])
     finally:
         _restore_collection_state(scope_state)
 
@@ -2019,7 +2037,7 @@ def test_package_relative_imports() -> None:
             "scoring": ["calculate_kanji_score", "is_reference_title"],
             "scope": ["get_scope_decks", "expand_scope_names",
                       "note_in_scope", "implied_note_types", "scope_dids",
-                      "is_scope_empty"],
+                      "is_scope_empty", "note_deck_names"],
             "utils": ["extract_clean_word", "extract_base_text",
                       "parse_furigana_field", "resolve_ladder_paths"],
             "parser": ["get_single_dictionary", "RENDERER_VERSION",

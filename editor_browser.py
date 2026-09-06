@@ -52,8 +52,12 @@ from .utils import parse_furigana_field, extract_clean_word, resolve_ladder_path
 # Dual-context sibling import (see core.py for why both forms are needed).
 if __package__:
     from .scope import note_in_scope as _scope_note_in_scope
+    from .scope import note_deck_names as _scope_note_deck_names
+    from .scope import SCOPE_CONFIG_KEY as _SCOPE_KEY
 else:
     from scope import note_in_scope as _scope_note_in_scope
+    from scope import note_deck_names as _scope_note_deck_names
+    from scope import SCOPE_CONFIG_KEY as _SCOPE_KEY
 
 
 def _get_addon_name() -> str:
@@ -258,6 +262,83 @@ def _resolve_editor_note(editor) -> Optional[Any]:
 _generation_in_flight = set()  # note ids currently being generated
 
 
+def _offer_add_to_scope(note, editor) -> None:
+    """
+    Out-of-scope quick fix: explains WHY the note is blocked (which deck
+    it lives in vs. what Scope covers) and offers a one-click "add this
+    deck & retry".
+
+    The v1.1.2 support case: the note was in a SIBLING deck (…::
+    anki-japanese-template) while Scope held a leaf (…::My New Japanese
+    Deck). The old tooltip blamed the note TYPE, hiding the real cause.
+    """
+    note_decks = _scope_note_deck_names(note)
+    scope = (mw.addonManager.getConfig(_get_addon_name()) or {}).get(_SCOPE_KEY) or [] \
+        if mw and hasattr(mw, "addonManager") else []
+
+    deck_txt = ", ".join(note_decks) if note_decks else "(new note — no cards yet)"
+    scope_txt = ", ".join(scope) if scope else "(none)"
+    msg = (
+        f"This note's deck is not in the CompreDef Scope:\n\n"
+        f"Note is in: {deck_txt}\n"
+        f"Scope covers: {scope_txt}\n\n"
+        f"Add this deck to the Scope and generate now?"
+    )
+    try:
+        from aqt.utils import askUserDialog  # type: ignore
+        btns = ["Add deck & Generate", "Open Scope…", "Cancel"]
+        parent_w = editor.parentWindow if editor is not None else None
+        diag = askUserDialog(msg, btns, parent=parent_w,
+                              title="CompreDef — outside Scope")
+        # ButtonedDialog.run() returns the clicked button's string.
+        result = diag.run()
+    except Exception:
+        # Cross-version fallback: plain tooltip with guidance.
+        tooltip(
+            f"CompreDef: note deck ({deck_txt}) is outside the Scope ({scope_txt}).\n"
+            "Add the deck via Tools → CompreDef Scope.",
+            parent=editor.parentWindow if editor else None,
+        )
+        return
+
+    if result == "Add deck & Generate" and note_decks:
+        # Extend the scope with the note's deck(s) — parent decks are
+        # fine too; expand_scope_names deduplicates children later.
+        try:
+            addon = _get_addon_name()
+            cfg = mw.addonManager.getConfig(addon) or {}
+            new_scope = list(cfg.get(_SCOPE_KEY) or [])
+            for d in note_decks:
+                if d not in new_scope:
+                    new_scope.append(d)
+            cfg[_SCOPE_KEY] = new_scope
+            mw.addonManager.writeConfig(addon, cfg)
+            # Knowledge must rebuild for the new deck to count.
+            try:
+                from .anki import reset_caches as _reset
+            except Exception:
+                try:
+                    from anki import reset_caches as _reset  # type: ignore
+                except Exception:
+                    _reset = None
+            if _reset:
+                try:
+                    _reset()
+                except Exception:
+                    pass
+        except Exception:
+            print(f"CompreDef: add-to-scope failed:\n{traceback.format_exc()}")
+            return
+        # Retry generation with the updated config.
+        on_editor_generate_definition(editor)
+    elif result == "Open Scope…":
+        try:
+            from .gui import show_scope_dialog
+        except Exception:
+            from gui import show_scope_dialog  # type: ignore
+        show_scope_dialog()
+
+
 def on_editor_generate_definition(editor) -> None:
     """
     Action callback triggered when user clicks the CompreDef editor toolbar button.
@@ -278,15 +359,12 @@ def on_editor_generate_definition(editor) -> None:
     dictionary_folder = config.get("dictionary_folder", "")
 
     # Field mapping comes from the note's own type (multi-type 'targets'
-    # when configured, legacy single-type otherwise). Unconfigured types
-    # simply do not participate in generation.
+    # when configured, legacy single-type otherwise). The Scope gate
+    # decides membership; when it blocks, the quick-fix dialog explains
+    # the deck mismatch and can add the deck on the spot.
     fields = resolve_fields_for_note(note, config)
     if fields is None:
-        tooltip(
-            f"Note type '{_get_note_type_name(note)}' is outside the CompreDef Scope.\n"
-            "Pick its deck under Tools -> CompreDef Configuration -> Scope.",
-            parent=editor.parentWindow,
-        )
+        _offer_add_to_scope(note, editor)
         return
     word_field = fields["word_field"]
     reading_field = fields["reading_field"]

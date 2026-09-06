@@ -287,6 +287,36 @@ def is_scope_empty(config: Optional[Dict[str, Any]]) -> bool:
     return not get_scope_decks(config)
 
 
+def note_deck_names(note: Any, col: Any = None) -> List[str]:
+    """Returns the human deck names holding this note's cards (for the
+    out-of-scope quick-fix: show the user WHICH deck blocked the note).
+
+    Unsaved notes (no cards) yield []. Never raises.
+    """
+    try:
+        if col is None:
+            try:
+                from aqt import mw  # type: ignore
+
+                col = mw.col if mw is not None else None
+            except Exception:
+                return []
+        if col is None:
+            return []
+        dids = note_dids(col, getattr(note, "id", None))
+        if not dids:
+            return []
+        names = _did_to_name(col)
+        out: List[str] = []
+        for d in dids:
+            n = names.get(d)
+            if n and n not in out:
+                out.append(n)
+        return out
+    except Exception:
+        return []
+
+
 def note_in_scope(
     note: Any, config: Optional[Dict[str, Any]], col: Any = None
 ) -> bool:

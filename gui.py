@@ -150,6 +150,29 @@ def _find_best_field_match(fields: List[str], keywords: List[str], fallback: str
     return fallback
 
 
+def _indent_deck_name(name: str, all_names: List[str]) -> tuple:
+    """Returns (display_name, has_children) for hierarchical display.
+
+    Subdecks get indented one level per '::' so the tree structure is
+    visible in a flat list; decks that contain children get a marker so
+    users see that checking them covers everything below (the v1.1.2
+    confusion: a leaf was checked while the note lived in a SIBLING
+    deck — invisible in a flat list).
+    """
+    depth = name.count("::")
+    indent = "    " * depth
+    base = name.rsplit("::", 1)[-1]
+    prefix = "My Life Decks::"  # user-friendly: don't repeat full path
+    disp = f"{indent}{base}"
+    if depth > 0:
+        # Show the parent chain compactly for siblings clarity
+        disp = f"{indent}{base}"
+    has_children = any(
+        n != name and n.startswith(name + "::") for n in all_names
+    )
+    return disp, has_children
+
+
 class ScopeDialog(QDialog):
     """
     Stand-alone Scope picker — also the inline engine behind the
@@ -180,7 +203,8 @@ class ScopeDialog(QDialog):
         hint = QLabel(
             "Only cards in checked decks count — for definition generation "
             "<b>and</b> for word / kanji knowledge.<br>"
-            "A selected deck includes all its subdecks (<span style='color:gray'>A → A::* </span>). "
+            "Checking a deck covers it <b>and all of its subdecks</b>, but "
+            "<b>not sibling decks</b> — check the shared parent to cover a whole branch. "
             "Empty scope disables everything."
         )
         hint.setTextFormat(Qt.TextFormat.RichText if hasattr(Qt, "TextFormat") else 1)  # type: ignore
@@ -210,14 +234,22 @@ class ScopeDialog(QDialog):
         self.deck_list.setMinimumHeight(260)
         self.deck_list.setToolTip("Check decks to include them in the Scope.")
         role = _user_role()
+        all_names = [n for n, _ in deck_counts]
         for name, count in deck_counts:
-            item = QListWidgetItem(f"{name}  —  {count:,} cards")
+            disp, has_children = _indent_deck_name(name, all_names)
+            # Tristate display: label parents so the subdeck rule is visible.
+            suffix = "  ▸ covers all subdecks" if has_children else ""
+            label = f"{disp}  —  {count:,} cards{suffix}"
+            item = QListWidgetItem(label)
             item.setFlags(item.flags() | _user_checkable_flag())
             item.setCheckState(
                 Qt.CheckState.Checked if name in selected
                 else Qt.CheckState.Unchecked
             )
+            # Full name in tooltip + role data (display is truncated).
             item.setData(role, name)
+            item.setToolTip(f"{name}\n({count:,} cards)"
+                            + ("\nChecking this covers ALL of its subdecks too." if has_children else ""))
             # Dim empty decks slightly
             if count == 0:
                 item.setForeground(Qt.GlobalColor.gray if hasattr(Qt, "GlobalColor") else item.foreground())  # type: ignore
@@ -254,6 +286,7 @@ class ScopeDialog(QDialog):
         role = _user_role()
         for i in range(self.deck_list.count()):
             item = self.deck_list.item(i)
+            # Match against the FULL name (display is truncated/indented).
             name = str(item.data(role) or "")
             item.setHidden(bool(needle) and needle not in name.lower())
 
@@ -369,7 +402,8 @@ class ConfigDialog(QDialog):
         scope_hint = QLabel(
             "Only cards in checked decks count — for definition generation "
             "<b>and</b> for word / kanji knowledge.<br>"
-            "A deck includes all its subdecks (<span style='color:gray'>A → A::* </span>). "
+            "Checking a deck covers it <b>and all of its subdecks</b>, but "
+            "<b>not sibling decks</b> — check the shared parent to cover a whole branch. "
             "Empty scope disables everything."
         )
         # RichText where available
@@ -863,16 +897,21 @@ class ConfigDialog(QDialog):
         """Fills the inline Scope checklist from `self.scope_decks`."""
         deck_counts = self._deck_card_counts()
         role = _user_role()
+        all_names = [n for n, _ in deck_counts]
         self.scope_deck_list.blockSignals(True)
         self.scope_deck_list.clear()
         for name, count in deck_counts:
-            item = QListWidgetItem(f"{name}  —  {count:,} cards")
+            disp, has_children = _indent_deck_name(name, all_names)
+            suffix = "  ▸ covers all subdecks" if has_children else ""
+            item = QListWidgetItem(f"{disp}  —  {count:,} cards{suffix}")
             item.setFlags(item.flags() | _user_checkable_flag())
             item.setCheckState(
                 Qt.CheckState.Checked if name in self.scope_decks
                 else Qt.CheckState.Unchecked
             )
             item.setData(role, name)
+            item.setToolTip(f"{name}\n({count:,} cards)"
+                            + ("\nChecking this covers ALL of its subdecks too." if has_children else ""))
             if count == 0:
                 try:
                     item.setForeground(Qt.GlobalColor.gray)  # type: ignore
