@@ -1717,6 +1717,50 @@ def test_scope_deck_filtering() -> None:
               f"got {names}")
         check("scope: note_deck_names empty for unsaved notes",
               compredef_scope.note_deck_names(N(0), col) == [])
+
+        # 5. ADD-WINDOW resolution (v1.1.3 "Add deck does nothing" bug):
+        #    unsaved notes scope-check against the deck the window will
+        #    add to — DeckChooser when reachable, else col curDeck.
+        class _FakeChooser:
+            def __init__(self, did):
+                self.selected_deck_id = did
+
+        class _FakeEditor:
+            def __init__(self, did):
+                self.deck_chooser = _FakeChooser(did)
+
+        # curDeck points at French (out of scope)…
+        class _CfgCol:
+            pass
+        cfg_col = _CfgCol()
+        cfg_col.decks = col.decks
+        cfg_col.db = col.db
+        cfg_col.models = col.models
+        cfg_col.get_config = lambda key, default=None: fr  # curDeck
+
+        unsaved_jp = N(0, "JP Mining Note")
+        # a) editor's DeckChooser pointing at an in-scope deck → in scope
+        check("scope: add-window chooser deck decides scope (in-scope deck)",
+              compredef_scope.note_in_scope(
+                  unsaved_jp, cfg, cfg_col, editor=_FakeEditor(jp)))
+        # b) chooser pointing OUT of scope → out (even for implied type)
+        check("scope: add-window chooser deck decides scope (out-of-scope deck)",
+              not compredef_scope.note_in_scope(
+                  unsaved_jp, cfg, cfg_col, editor=_FakeEditor(fr)))
+        # c) no editor → curDeck fallback (French → out)
+        check("scope: curDeck fallback used for unsaved notes",
+              not compredef_scope.note_in_scope(unsaved_jp, cfg, cfg_col))
+        # d) resolve_deck_for_note mirrors the same results
+        check("scope: resolve_deck_for_note reads the chooser",
+              compredef_scope.resolve_deck_for_note(
+                  unsaved_jp, cfg_col, editor=_FakeEditor(jp)) == ["Japanese"])
+        check("scope: resolve_deck_for_note falls back to curDeck",
+              compredef_scope.resolve_deck_for_note(unsaved_jp, cfg_col)
+              == ["French"])
+        # e) saved notes ignore the editor entirely (cards win)
+        check("scope: saved note ignores editor chooser",
+              compredef_scope.note_in_scope(
+                  N(101), cfg, cfg_col, editor=_FakeEditor(fr)))
     finally:
         _restore_collection_state(scope_state)
 
@@ -2037,7 +2081,8 @@ def test_package_relative_imports() -> None:
             "scoring": ["calculate_kanji_score", "is_reference_title"],
             "scope": ["get_scope_decks", "expand_scope_names",
                       "note_in_scope", "implied_note_types", "scope_dids",
-                      "is_scope_empty", "note_deck_names"],
+                      "is_scope_empty", "note_deck_names",
+                      "resolve_deck_for_note"],
             "utils": ["extract_clean_word", "extract_base_text",
                       "parse_furigana_field", "resolve_ladder_paths"],
             "parser": ["get_single_dictionary", "RENDERER_VERSION",

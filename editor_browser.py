@@ -120,16 +120,18 @@ def _get_note_type_name(note) -> str:
     return ""
 
 
-def _note_in_scope(note, config: Dict[str, Any]) -> bool:
+def _note_in_scope(note, config: Dict[str, Any], editor: Any = None) -> bool:
     """
     Scope gate shared by every generation path (editor button, bulk,
     Tab-to-Generate): True only when the note has a card in one of the
     user's Scope decks (subdecks included). An empty scope is
-    fail-closed (False). Never raises — a scope-check failure must not
-    break editing; it only skips generation for this note.
+    fail-closed (False). Unsaved Add-window notes are checked against
+    the deck the window will add to (editor's DeckChooser / curDeck).
+    Never raises — a scope-check failure must not break editing; it
+    only skips generation for this note.
     """
     try:
-        return bool(_scope_note_in_scope(note, config))
+        return bool(_scope_note_in_scope(note, config, editor=editor))
     except Exception:
         print(f"CompreDef: scope check failed:\n{traceback.format_exc()}")
         return False
@@ -196,8 +198,9 @@ def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, 
     deck alone is enough — the "no need to add each note type" promise.
     """
     # Scope gate first: deck membership is the primary filter (fail-fast,
-    # and so auto-inference only fires for in-scope notes).
-    if not _note_in_scope(note, config):
+    # and so auto-inference only fires for in-scope notes). The editor
+    # instance enables Add-window (unsaved note) deck resolution.
+    if not _note_in_scope(note, config, editor=getattr(note, "_cd_editor", None)):
         return None
 
     targets = config.get("targets")
@@ -262,21 +265,102 @@ def _resolve_editor_note(editor) -> Optional[Any]:
 _generation_in_flight = set()  # note ids currently being generated
 
 
+def _add_deck_to_scope_and_reset(deck_names: List[str]) -> bool:
+    """Appends decks to the Scope config and rebuilds knowledge.
+
+    Shared by the quick-fix dialog and the Add-window path. Returns
+    True on success. Never raises.
+    """
+    try:
+        addon = _get_addon_name()
+        cfg = mw.addonManager.getConfig(addon) or {}
+        new_scope = list(cfg.get(_SCOPE_KEY) or [])
+        for d in deck_names:
+            if d and d not in new_scope:
+                new_scope.append(d)
+        cfg[_SCOPE_KEY] = new_scope
+        mw.addonManager.writeConfig(addon, cfg)
+        # Knowledge must rebuild for the new deck to count.
+        try:
+            from .anki import reset_caches as _reset
+        except Exception:
+            try:
+                from anki import reset_caches as _reset  # type: ignore
+            except Exception:
+                _reset = None
+        if _reset:
+            try:
+                _reset()
+            except Exception:
+                pass
+        return True
+    except Exception:
+        print(f"CompreDef: add-to-scope failed:\n{traceback.format_exc()}")
+        return False
+
+
+def _target_deck_for_note(note, editor) -> str:
+    """Resolves the deck a NEW (unsaved) note will land in.
+
+    Saved notes: their own card decks. Add-window notes (id 0, no
+    cards): the window's selected deck — via its DeckChooser when
+    reachable, else the collection's 'curDeck' (the same default
+    Anki's own Add window uses). Returns '' when unknowable.
+    """
+    # Saved note: its cards' decks.
+    try:
+        decks = _scope_note_deck_names(note)
+        if decks:
+            return decks[0]
+    except Exception:
+        pass
+    # Unsaved note: the Add window's deck chooser.
+    try:
+        chooser = getattr(editor, "deck_chooser", None) or \
+            getattr(getattr(editor, "parentWindow", None), "deck_chooser", None)
+        did = getattr(chooser, "selected_deck_id", None)
+        if did and mw and mw.col:
+            name = mw.col.decks.name(int(did))
+            if name and name != "(none)":
+                return name
+    except Exception:
+        pass
+    # Fallback: collection's current deck (Anki's own Add default).
+    try:
+        if mw and mw.col:
+            did = mw.col.get_config("curDeck", default=None)
+            if did:
+                name = mw.col.decks.name(int(did))
+                if name and name != "(none)":
+                    return name
+    except Exception:
+        pass
+    return ""
+
+
 def _offer_add_to_scope(note, editor) -> None:
     """
     Out-of-scope quick fix: explains WHY the note is blocked (which deck
     it lives in vs. what Scope covers) and offers a one-click "add this
     deck & retry".
 
-    The v1.1.2 support case: the note was in a SIBLING deck (…::
+    v1.1.2 support case: the note was in a SIBLING deck (…::
     anki-japanese-template) while Scope held a leaf (…::My New Japanese
-    Deck). The old tooltip blamed the note TYPE, hiding the real cause.
+    Deck). v1.1.3 follow-up case: an ADD-WINDOW note (no cards yet) —
+    its target deck is the window's selected deck, which the old
+    quick-fix could not see, so "Add deck" silently did nothing and the
+    dialog reappeared forever. Both paths now resolve the deck first.
     """
     note_decks = _scope_note_deck_names(note)
+    if not note_decks:
+        # Unsaved Add-window note: check the deck it WILL be added to.
+        target = _target_deck_for_note(note, editor)
+        if target:
+            note_decks = [target]
     scope = (mw.addonManager.getConfig(_get_addon_name()) or {}).get(_SCOPE_KEY) or [] \
         if mw and hasattr(mw, "addonManager") else []
 
-    deck_txt = ", ".join(note_decks) if note_decks else "(new note — no cards yet)"
+    deck_txt = ", ".join(note_decks) if note_decks else "(unknown — no cards yet)"
     scope_txt = ", ".join(scope) if scope else "(none)"
     msg = (
         f"This note's deck is not in the CompreDef Scope:\n\n"
@@ -301,36 +385,19 @@ def _offer_add_to_scope(note, editor) -> None:
         )
         return
 
-    if result == "Add deck & Generate" and note_decks:
-        # Extend the scope with the note's deck(s) — parent decks are
-        # fine too; expand_scope_names deduplicates children later.
-        try:
-            addon = _get_addon_name()
-            cfg = mw.addonManager.getConfig(addon) or {}
-            new_scope = list(cfg.get(_SCOPE_KEY) or [])
-            for d in note_decks:
-                if d not in new_scope:
-                    new_scope.append(d)
-            cfg[_SCOPE_KEY] = new_scope
-            mw.addonManager.writeConfig(addon, cfg)
-            # Knowledge must rebuild for the new deck to count.
-            try:
-                from .anki import reset_caches as _reset
-            except Exception:
-                try:
-                    from anki import reset_caches as _reset  # type: ignore
-                except Exception:
-                    _reset = None
-            if _reset:
-                try:
-                    _reset()
-                except Exception:
-                    pass
-        except Exception:
-            print(f"CompreDef: add-to-scope failed:\n{traceback.format_exc()}")
+    if result == "Add deck & Generate":
+        if not note_decks:
+            # No deck resolvable (deeply headless?): open the picker so
+            # the user can fix it manually instead of a silent no-op.
+            tooltip(
+                "CompreDef: could not determine this note's deck.\n"
+                "Pick decks manually via Tools → CompreDef Scope.",
+                parent=editor.parentWindow if editor else None,
+            )
             return
-        # Retry generation with the updated config.
-        on_editor_generate_definition(editor)
+        if _add_deck_to_scope_and_reset(note_decks):
+            # Retry generation with the updated config.
+            on_editor_generate_definition(editor)
     elif result == "Open Scope…":
         try:
             from .gui import show_scope_dialog
@@ -352,6 +419,12 @@ def on_editor_generate_definition(editor) -> None:
     if note is None:
         tooltip("No note selected in editor.", parent=editor.parentWindow)
         return
+    # Attach the editor so scope/deck resolution can use the Add
+    # window's DeckChooser for unsaved notes (id 0, no cards yet).
+    try:
+        note._cd_editor = editor  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
     config = _get_addon_config()
     dictionaries = config.get("dictionaries", [])
@@ -590,7 +663,8 @@ def _tab_generate_enabled(config: Dict[str, Any]) -> bool:
     return bool(config.get("tab_generate", True))
 
 
-def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any]) -> bool:
+def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any],
+                          editor: Any = None) -> bool:
     """
     Pure decision function for Tab-to-Generate — returns True when leaving
     `unfocused_field` on `note` should kick off automatic generation.
@@ -607,7 +681,8 @@ def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any]) ->
 
     # Scope gate first: out-of-scope notes never auto-generate (this
     # covers both the empty-scope state and notes in other decks).
-    if not _note_in_scope(note, config):
+    # editor enables Add-window deck resolution for unsaved notes.
+    if not _note_in_scope(note, config, editor=editor):
         return False
 
     # Multi-type mode: only fire when the note's type is a configured
@@ -660,7 +735,10 @@ def on_field_unfocus(changed: bool, note, current_field_index: int) -> bool:
             return changed
 
         config = _get_addon_config()
-        if not _should_auto_generate(note, _field_name_at(note, current_field_index), config):
+        if not _should_auto_generate(
+            note, _field_name_at(note, current_field_index), config,
+            editor=_find_editor_for_note(note),
+        ):
             return changed
 
         editor = _find_editor_for_note(note)
@@ -672,6 +750,12 @@ def on_field_unfocus(changed: bool, note, current_field_index: int) -> bool:
         # Reuse the exact same generation path as the toolbar button
         # (validation, single-flight guard, background thread, safe
         # persistence) so Tab and button can never diverge in behaviour.
+        # The editor is attached to the note so resolve_fields_for_note
+        # can resolve the Add window's deck for unsaved notes.
+        try:
+            note._cd_editor = editor  # type: ignore[attr-defined]
+        except Exception:
+            pass
         on_editor_generate_definition(editor)
     except Exception:
         # A hook failure must never break editing; log loudly and move on.

@@ -317,17 +317,62 @@ def note_deck_names(note: Any, col: Any = None) -> List[str]:
         return []
 
 
+def resolve_deck_for_note(note: Any, col: Any = None, editor: Any = None) -> List[str]:
+    """Returns the deck names relevant to a note, Add-window aware.
+
+    Saved notes: their cards' decks (like note_deck_names). Unsaved
+    Add-window notes (id 0, no cards): the deck the window will add the
+    note to — editor's DeckChooser when reachable, else the
+    collection's 'curDeck' (the same default Anki's own Add window
+    uses). This lets the Scope gate and quick-fix work BEFORE the first
+    save, matching the user's mining workflow (generate while adding).
+    Returns [] when nothing is resolvable. Never raises.
+    """
+    try:
+        # Saved note: its cards' decks.
+        decks = note_deck_names(note, col)
+        if decks:
+            return decks
+        # Unsaved: editor's deck chooser (Add window).
+        if editor is not None:
+            chooser = getattr(editor, "deck_chooser", None)
+            if chooser is None:
+                chooser = getattr(getattr(editor, "parentWindow", None),
+                                   "deck_chooser", None)
+            did = getattr(chooser, "selected_deck_id", None)
+            if did and col is not None:
+                did_to_name = _did_to_name(col)
+                name = did_to_name.get(int(did))
+                if name:
+                    return [name]
+        # Fallback: collection's current deck (Anki's Add default).
+        if col is not None:
+            try:
+                did = col.get_config("curDeck", default=None)
+                if did:
+                    did_to_name = _did_to_name(col)
+                    name = did_to_name.get(int(did))
+                    if name:
+                        return [name]
+            except Exception:
+                pass
+        return []
+    except Exception:
+        return []
+
+
 def note_in_scope(
-    note: Any, config: Optional[Dict[str, Any]], col: Any = None
+    note: Any, config: Optional[Dict[str, Any]], col: Any = None, editor: Any = None
 ) -> bool:
     """Returns True when ``note`` belongs to the configured scope.
 
     Membership rule: ANY of the note's cards in a scoped deck (subdecks
-    included). Unsaved notes (no id/cards yet, e.g. the Add window)
-    fall back to the implied-type check so fresh cards of an
-    in-scope type still generate. Empty scope is fail-closed (False).
+    included). Unsaved Add-window notes use the deck the window will
+    add the card to (editor's DeckChooser / curDeck), with an
+    implied-type fallback. Empty scope is fail-closed (False).
     ``col`` may be passed explicitly (tests); otherwise ``mw.col`` is
-    used when available.
+    used when available. ``editor`` enables Add-window deck resolution
+    for unsaved notes.
     """
     scope = get_scope_decks(config)
     if not scope:
@@ -351,11 +396,13 @@ def note_in_scope(
         names = _did_to_name(col)
         # ANY card in scope is enough (one-note-one-card mental model).
         return any(names.get(d) in expanded for d in dids)
-    # No cards (unsaved Add-window note): fall back to the note's type
-    # being one of the types implied by the scoped decks. This keeps the
-    # first card of a brand-new type (never used in the deck before)
-    # out of scope, but that's an edge case — the second card will be
-    # in scope once the type has been used.
+    # No cards (unsaved Add-window note): use the deck the note WILL be
+    # added to (editor's DeckChooser, else curDeck) — mining workflows
+    # generate while adding, before the first save. Falls back to the
+    # implied-type check when neither is resolvable.
+    target = resolve_deck_for_note(note, col, editor=editor)
+    if target:
+        return any(n in expanded for n in target)
     type_name = _note_type_name(note)
     if not type_name:
         return False
