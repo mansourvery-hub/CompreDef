@@ -131,6 +131,51 @@ def _note_in_scope(note, config: Dict[str, Any]) -> bool:
         return False
 
 
+def _infer_field_mapping(note) -> Optional[Dict[str, str]]:
+    """
+    Auto-infers word/reading/definition field names from the note's
+    actual fields. Used as a fallback when a note is inside the Scope
+    but has no explicit entry in `targets` — picking a deck should be
+    enough to enable generation (the user said 'no need to add each
+    note type'). Reuses the same keyword heuristics as the GUI.
+    """
+    try:
+        field_names = list(note.keys())
+    except Exception:
+        return None
+    if not field_names:
+        return None
+    # Inline lightweight version of gui's keyword match to avoid import
+    # cycles; keeps editor_browser independent from gui.
+    _WORD_KW = ["word", "expression", "kanji", "front"]
+    _READ_KW = ["furigana", "reading", "kana", "hiragana", "katakana",
+                "yomi", "読み"]
+    _READ_KW2 = ["expression", "word", "front"]
+    _DEF_KW = ["definition", "meaning", "glossary", "translation",
+               "explanation", "sense", "desc"]
+
+    def _best(fields: List[str], kws: List[str]) -> Optional[str]:
+        lows = [f.lower().replace("_", " ").replace("-", " ") for f in fields]
+        for kw in kws:
+            for i, fl in enumerate(lows):
+                if fl == kw.lower():
+                    return fields[i]
+            for i, fl in enumerate(lows):
+                if kw.lower() in fl:
+                    return fields[i]
+        return None
+
+    word = _best(field_names, _WORD_KW)
+    # Prefer dedicated reading field, else word field itself
+    reading = _best(field_names, _READ_KW) or (word or "")
+    remaining = [f for f in field_names if f != word]
+    definition = _best(remaining, _DEF_KW) or _best(field_names, _DEF_KW)
+    if not word or not definition or word == definition:
+        return None
+    return {"word_field": word, "reading_field": reading or "",
+            "definition_field": definition}
+
+
 def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
     Returns {'word_field', 'reading_field', 'definition_field'} for this
@@ -142,10 +187,15 @@ def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, 
     a card in one of the selected Scope decks. Out-of-scope notes (and
     everything, when the scope is empty) yield None.
 
-    Fields absent from the note are not an error here (callers report
-    friendlier messages); only a non-matching type or an out-of-scope
-    note yields None.
+    If the note is inside the Scope but has no explicit entry in
+    `targets`, an auto-inferred mapping is returned so that selecting a
+    deck alone is enough — the "no need to add each note type" promise.
     """
+    # Scope gate first: deck membership is the primary filter (fail-fast,
+    # and so auto-inference only fires for in-scope notes).
+    if not _note_in_scope(note, config):
+        return None
+
     targets = config.get("targets")
     if isinstance(targets, dict) and targets:
         mapping = targets.get(_get_note_type_name(note))
@@ -155,26 +205,31 @@ def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, 
                 "reading_field": str(mapping.get("reading_field", "") or ""),
                 "definition_field": str(mapping.get("definition_field", "") or ""),
             }
-            # A target without a usable word/def pair cannot generate
-            if not resolved["word_field"] or not resolved["definition_field"]:
-                return None
-        else:
-            return None
-    else:
-        # Legacy single-type config: applies only to that one type.
-        legacy_type = str(config.get("note_type", "") or "").strip()
-        if legacy_type and _get_note_type_name(note) != legacy_type:
-            return None
-        resolved = {
-            "word_field": str(config.get("word_field", "") or ""),
-            "reading_field": str(config.get("reading_field", "") or ""),
-            "definition_field": str(config.get("definition_field", "") or ""),
-        }
+            if resolved["word_field"] and resolved["definition_field"]:
+                return resolved
+            # Incomplete mapping but note is in scope → try inference.
+            inferred = _infer_field_mapping(note)
+            return inferred
+        # No entry for this type but type is in scope → infer.
+        return _infer_field_mapping(note)
 
-    # Scope gate: deck membership decides, field mapping only describes.
-    if not _note_in_scope(note, config):
+    # Legacy single-type config: applies only to that one type.
+    legacy_type = str(config.get("note_type", "") or "").strip()
+    if legacy_type and _get_note_type_name(note) != legacy_type:
+        # Legacy gate failed but Scope already passed — for legacy
+        # configs without a Scope we keep the old behaviour, otherwise
+        # allow inference for any in-scope type.
+        if isinstance(config.get("scope_decks"), list) and config.get("scope_decks"):
+            return _infer_field_mapping(note)
         return None
-    return resolved
+    resolved = {
+        "word_field": str(config.get("word_field", "") or ""),
+        "reading_field": str(config.get("reading_field", "") or ""),
+        "definition_field": str(config.get("definition_field", "") or ""),
+    }
+    if resolved["word_field"] and resolved["definition_field"]:
+        return resolved
+    return _infer_field_mapping(note)
 
 
 def _resolve_editor_note(editor) -> Optional[Any]:

@@ -8,7 +8,7 @@ to the user's known vocabulary and kanji.
 from aqt import mw
 from aqt.qt import QMenu
 from aqt import gui_hooks
-from .gui import show_config_dialog, show_knowledge_dialog
+from .gui import show_config_dialog, show_knowledge_dialog, show_scope_dialog
 from .editor_browser import setup_editor_browser_hooks
 from . import anki
 
@@ -24,6 +24,10 @@ def _add_tools_menu_entry() -> None:
         return
     try:
         tools_menu: QMenu = mw.form.menuTools
+        # Primary entry opens directly on the Scope tab (most-used)
+        scope_action = tools_menu.addAction("CompreDef Scope...")
+        scope_action.setShortcut("Ctrl+Shift+S")
+        scope_action.triggered.connect(lambda _: show_scope_dialog())
         action = tools_menu.addAction("CompreDef Configuration...")
         action.setShortcut("Ctrl+Shift+C")
         action.triggered.connect(lambda _: show_config_dialog())

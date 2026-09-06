@@ -321,8 +321,11 @@ def note_in_scope(
         names = _did_to_name(col)
         # ANY card in scope is enough (one-note-one-card mental model).
         return any(names.get(d) in expanded for d in dids)
-    # No cards (unsaved note): fall back to the note's type being one
-    # of the types implied by the scoped decks.
+    # No cards (unsaved Add-window note): fall back to the note's type
+    # being one of the types implied by the scoped decks. This keeps the
+    # first card of a brand-new type (never used in the deck before)
+    # out of scope, but that's an edge case — the second card will be
+    # in scope once the type has been used.
     type_name = _note_type_name(note)
     if not type_name:
         return False
