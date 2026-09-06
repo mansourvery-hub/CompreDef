@@ -36,13 +36,20 @@ from aqt.qt import (
 )
 
 from .core import get_provider
-from .anki import knowledge_summary_text
+from .anki import knowledge_summary_text, reset_caches as _reset_knowledge_caches
 from .utils import (
     find_dictionary_folders,
     is_zip_dictionary,
 )
 from .provider import IndexingError
 from .parser import get_single_dictionary
+from .scope import (
+    SCOPE_CONFIG_KEY,
+    get_scope_decks,
+    get_all_deck_names,
+    implied_note_types,
+    missing_scope_decks,
+)
 
 
 # Cross-version PyQt5/PyQt6 enum helpers
@@ -140,11 +147,110 @@ def _find_best_field_match(fields: List[str], keywords: List[str], fallback: str
     return fallback
 
 
+class ScopeDialog(QDialog):
+    """
+    Secondary picker for the Scope deck selection.
+
+    Kept out of the main dialog on purpose: the main window is already
+    at its space limit, so Scope lives behind a single summary row +
+    this picker (searchable checkable list with per-deck card counts).
+    Returns the checked deck names via selected_decks().
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        deck_counts: List[tuple],
+        selected: List[str],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("CompreDef Scope — Select Decks")
+        self.resize(420, 440)
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        hint = QLabel(
+            "Only cards in checked decks are considered — for definition\n"
+            "generation AND for word/kanji knowledge. A deck includes all\n"
+            "of its subdecks. Empty scope disables everything."
+        )
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter decks...")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.filter_edit)
+
+        self.deck_list = QListWidget()
+        role = _user_role()
+        for name, count in deck_counts:
+            item = QListWidgetItem(f"{name} ({count:,} cards)")
+            item.setFlags(item.flags() | _user_checkable_flag())
+            item.setCheckState(
+                Qt.CheckState.Checked if name in selected
+                else Qt.CheckState.Unchecked
+            )
+            item.setData(role, name)
+            self.deck_list.addItem(item)
+        layout.addWidget(self.deck_list)
+
+        select_row = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: self._set_all(True))
+        select_row.addWidget(select_all_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(lambda: self._set_all(False))
+        select_row.addWidget(clear_btn)
+        select_row.addStretch()
+        layout.addLayout(select_row)
+
+        if hasattr(QDialogButtonBox, "StandardButton"):
+            ok_flag = QDialogButtonBox.StandardButton.Ok
+            cancel_flag = QDialogButtonBox.StandardButton.Cancel
+        else:
+            ok_flag = QDialogButtonBox.Ok
+            cancel_flag = QDialogButtonBox.Cancel
+        button_box = QDialogButtonBox(ok_flag | cancel_flag)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _apply_filter(self, text: str) -> None:
+        """Hides decks not matching the filter (selection preserved)."""
+        needle = text.strip().lower()
+        role = _user_role()
+        for i in range(self.deck_list.count()):
+            item = self.deck_list.item(i)
+            name = str(item.data(role) or "")
+            item.setHidden(bool(needle) and needle not in name.lower())
+
+    def _set_all(self, checked: bool) -> None:
+        """Checks/unchecks every deck, including filter-hidden ones."""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self.deck_list.count()):
+            self.deck_list.item(i).setCheckState(state)
+
+    def selected_decks(self) -> List[str]:
+        """Returns the checked deck names in list order."""
+        role = _user_role()
+        out: List[str] = []
+        for i in range(self.deck_list.count()):
+            item = self.deck_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                out.append(str(item.data(role) or ""))
+        return [n for n in out if n]
+
+
 class ConfigDialog(QDialog):
     """
     Dialog for configuring CompreDef add-on options.
 
-    Allows mapping note types and fields, and ordering dictionaries in the Ladder.
+    Allows picking the Scope decks, mapping note-type fields, and
+    ordering dictionaries in the Ladder.
     """
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -174,6 +280,14 @@ class ConfigDialog(QDialog):
         # skipped during generation. Stored as a set for O(1) toggling.
         self.disabled_dicts: set = set()
 
+        # Scope deck names + per-type field mappings. Both are populated
+        # by _load_config(); pre-initialised here because dictionary
+        # installs during load persist dialog state immediately
+        # (crash-safety) and those early saves read both attributes.
+        self.scope_decks: List[str] = []
+        self.type_mappings: Dict[str, Dict[str, str]] = {}
+        self._active_type: Optional[str] = None
+
         self._init_ui()
         self._load_config()
 
@@ -185,30 +299,72 @@ class ConfigDialog(QDialog):
         main_layout.setSpacing(10)
 
         # -------------------------------------------------------------
-        # Note Types & Field Mappings Group
+        # Scope Group (compact: summary + picker button only)
         # -------------------------------------------------------------
-        mapping_group = QGroupBox("Note Types & Field Mappings")
+        # The main window is at its space limit, so deck selection lives
+        # behind one summary row + a secondary ScopeDialog picker.
+        scope_group = QGroupBox("Scope — Decks CompreDef Considers")
+        scope_layout = QVBoxLayout()
+        scope_group.setLayout(scope_layout)
+
+        self.scope_summary_label = QLabel("Scope: none")
+        self.scope_summary_label.setWordWrap(True)
+        self.scope_summary_label.setToolTip(
+            "Decks CompreDef considers for definition generation AND for\n"
+            "word/kanji knowledge. A deck includes all of its subdecks."
+        )
+        scope_layout.addWidget(self.scope_summary_label)
+
+        self.scope_warning_label = QLabel(
+            "Scope is empty — generation and knowledge are disabled.\n"
+            "Click 'Select Decks...' and pick at least one deck."
+        )
+        self.scope_warning_label.setStyleSheet("color: red; font-size: 11px;")
+        self.scope_warning_label.setWordWrap(True)
+        scope_layout.addWidget(self.scope_warning_label)
+
+        scope_buttons = QHBoxLayout()
+        self.scope_select_btn = QPushButton("Select Decks...")
+        self.scope_select_btn.setMinimumHeight(30)
+        self.scope_select_btn.setToolTip(
+            "Choose which decks CompreDef considers (generation + knowledge)."
+        )
+        self.scope_select_btn.clicked.connect(self._on_select_decks)
+        scope_buttons.addWidget(self.scope_select_btn)
+        self.scope_clear_btn = QPushButton("Clear")
+        self.scope_clear_btn.setMinimumHeight(30)
+        self.scope_clear_btn.setToolTip("Empty the scope (disables everything).")
+        self.scope_clear_btn.clicked.connect(self._on_clear_scope)
+        scope_buttons.addWidget(self.scope_clear_btn)
+        scope_buttons.addStretch()
+        scope_layout.addLayout(scope_buttons)
+
+        main_layout.addWidget(scope_group)
+
+        # -------------------------------------------------------------
+        # Field Mappings Group (types implied by the Scope)
+        # -------------------------------------------------------------
+        mapping_group = QGroupBox("Field Mappings (Note Types In Scope)")
         outer_mapping_layout = QVBoxLayout()
         mapping_group.setLayout(outer_mapping_layout)
 
         intro = QLabel(
-            "Check every note type CompreDef should generate definitions for,\n"
-            "then map its fields below. Unchecked types are ignored."
+            "Note types are implied by the Scope decks above — "
+            "select a type to map its fields below."
         )
         intro.setStyleSheet("color: gray; font-size: 11px;")
         intro.setWordWrap(True)
         outer_mapping_layout.addWidget(intro)
 
-        # Checkable list of all note types (same interaction pattern as
-        # the dictionary ladder: checkbox = enabled, click = configure).
+        # Single-select list of in-scope note types (no checkboxes: deck
+        # membership decides, this list only maps fields per type).
         self.note_types_list = QListWidget()
         # Minimum visible rows even when the dialog is resized small.
-        self.note_types_list.setMinimumHeight(96)
+        self.note_types_list.setMinimumHeight(72)
         self.note_types_list.setToolTip(
-            "Check a note type to make it a generation target.\n"
+            "Note types found in the Scope decks.\n"
             "Select a row to view/edit its field mapping below."
         )
-        self.note_types_list.itemChanged.connect(self._on_type_item_changed)
         self.note_types_list.currentRowChanged.connect(
             lambda _row: self._on_type_selected()
         )
@@ -537,12 +693,165 @@ class ConfigDialog(QDialog):
     # 'definition_field', '_auto': True until user edits anything}}
     # ------------------------------------------------------------------
 
+    def _deck_card_counts(self) -> List[tuple]:
+        """Returns [(deck_name, card_count)] for the Scope picker.
+
+        Counts come from a single GROUP BY query; deck names via the
+        public decks API. Never raises (picker shows zero counts rather
+        than crashing the dialog).
+        """
+        counts: Dict[int, int] = {}
+        try:
+            if mw and mw.col:
+                rows = mw.col.db.all(
+                    "SELECT did, COUNT(*) FROM cards GROUP BY did"
+                ) or []
+                for row in rows:
+                    try:
+                        counts[int(row[0])] = int(row[1])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+        except Exception:
+            counts = {}
+        name_to_did: Dict[str, int] = {}
+        try:
+            if mw and mw.col and getattr(mw.col, "decks", None):
+                decks = mw.col.decks
+                if hasattr(decks, "all_names_and_ids"):
+                    for entry in decks.all_names_and_ids() or []:
+                        if isinstance(entry, dict):
+                            n, i = entry.get("name"), entry.get("id")
+                        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                            n = next((p for p in entry if isinstance(p, str)), None)
+                            i = next((p for p in entry if isinstance(p, int)), None)
+                        else:
+                            n, i = getattr(entry, "name", None), getattr(entry, "id", None)
+                        if n is not None and i is not None:
+                            try:
+                                name_to_did[str(n)] = int(i)
+                            except (TypeError, ValueError):
+                                continue
+                elif hasattr(decks, "all"):
+                    for d in decks.all() or []:
+                        if isinstance(d, dict) and d.get("name") is not None:
+                            try:
+                                name_to_did[str(d["name"])] = int(d["id"])
+                            except (TypeError, ValueError, KeyError):
+                                continue
+        except Exception:
+            pass
+        if not name_to_did:
+            # Fall back to raw scope/config names so the picker never
+            # opens empty when the decks API is momentarily unavailable.
+            try:
+                names = get_all_deck_names(mw.col if mw else None)
+            except Exception:
+                names = []
+            return [(n, 0) for n in sorted(set(names) | set(self.scope_decks))]
+        return [
+            (name, counts.get(did, 0))
+            for name, did in sorted(name_to_did.items())
+        ]
+
+    def _refresh_scope_label(self) -> None:
+        """Updates the Scope summary row + empty-scope warning."""
+        if not self.scope_decks:
+            self.scope_summary_label.setText("Scope: none")
+            self.scope_warning_label.setVisible(True)
+            return
+        self.scope_summary_label.setText(
+            f"Scope: {len(self.scope_decks)} deck(s): "
+            + ", ".join(self.scope_decks)
+        )
+        try:
+            all_names = get_all_deck_names(mw.col if mw else None)
+            missing = missing_scope_decks(all_names, self.scope_decks)
+        except Exception:
+            missing = []
+        if missing:
+            self.scope_warning_label.setText(
+                "Missing decks (renamed or deleted?): " + ", ".join(missing)
+            )
+            self.scope_warning_label.setVisible(True)
+        else:
+            self.scope_warning_label.setVisible(False)
+
+    def _refresh_implied_types(self, select_first: bool = False) -> None:
+        """Rebuilds the type list from the decks in scope.
+
+        Saved mappings (including out-of-scope ones) are preserved in
+        self.type_mappings; newly implied types without a mapping are
+        seeded for auto-match when their row is selected.
+        """
+        try:
+            implied = implied_note_types(mw.col if mw else None, self.scope_decks)
+        except Exception:
+            implied = []
+        for name in implied:
+            if name not in self.type_mappings:
+                self.type_mappings[name] = {
+                    "word_field": "", "reading_field": "",
+                    "definition_field": "", "_auto": True,
+                }
+        role = _user_role()
+        self.note_types_list.blockSignals(True)
+        self.note_types_list.clear()
+        for name in implied:
+            item = QListWidgetItem(name)
+            item.setData(role, name)
+            self.note_types_list.addItem(item)
+        self.note_types_list.blockSignals(False)
+        if select_first and self.note_types_list.count():
+            self.note_types_list.setCurrentRow(0)
+        elif self._active_type:
+            # Keep the previously edited row selected when it is still
+            # implied; otherwise fall back to the first row.
+            for row in range(self.note_types_list.count()):
+                if str(self.note_types_list.item(row).data(role)) == self._active_type:
+                    self.note_types_list.setCurrentRow(row)
+                    break
+
+    def _on_select_decks(self) -> None:
+        """Opens the Scope picker; applies the new deck selection."""
+        dialog = ScopeDialog(
+            parent=self,
+            deck_counts=self._deck_card_counts(),
+            selected=list(self.scope_decks),
+        )
+        if dialog.exec():
+            self.scope_decks = dialog.selected_decks()
+            self._refresh_scope_label()
+            self._refresh_implied_types()
+            # Persist immediately (same crash-safety as dictionaries):
+            # a crash must not revert the deck choice.
+            try:
+                self._save_config_now()
+            except Exception:
+                pass
+
+    def _on_clear_scope(self) -> None:
+        """Empties the scope (fail-closed) and persists immediately."""
+        self.scope_decks = []
+        self._refresh_scope_label()
+        self._refresh_implied_types()
+        try:
+            self._save_config_now()
+        except Exception:
+            pass
+
     def _load_type_mappings(self) -> None:
         """
-        Populates the checkable note-type list and restores mappings
-        from config (multi-type 'targets' with legacy fallback).
+        Restores the Scope deck selection and per-type field mappings
+        from config (multi-type 'targets' with legacy fallback), then
+        shows the note types implied by the scoped decks.
+
+        Out-of-scope saved mappings are kept (not deleted) so narrowing
+        the scope never destroys field configuration.
         """
-        self.type_mappings: Dict[str, Dict[str, str]] = {}
+        # Fresh installs start with an EMPTY scope + warning (fail-closed
+        # by user decision): no inference from legacy targets.
+        self.scope_decks = get_scope_decks(self.config)
+        self.type_mappings = {}
         saved_targets = self.config.get("targets")
         if isinstance(saved_targets, dict) and saved_targets:
             for type_name, mapping in saved_targets.items():
@@ -554,7 +863,7 @@ class ConfigDialog(QDialog):
                         "_auto": False,
                     }
         elif self.config.get("note_type"):
-            # Legacy single-type config: one target, fields as configured.
+            # Legacy single-type config: one mapping, fields as configured.
             self.type_mappings[str(self.config["note_type"])] = {
                 "word_field": str(self.config.get("word_field", "") or ""),
                 "reading_field": str(self.config.get("reading_field", "") or ""),
@@ -562,40 +871,8 @@ class ConfigDialog(QDialog):
                 "_auto": False,
             }
 
-        role = _user_role()
-        self.note_types_list.blockSignals(True)
-        self.note_types_list.clear()
-        if mw and mw.col:
-            for name in mw.col.models.all_names():
-                item = QListWidgetItem(name)
-                item.setFlags(item.flags() | _user_checkable_flag())
-                checked = name in self.type_mappings
-                # Qt.CheckState works unscoped (PyQt5) AND scoped (PyQt6)
-                item.setCheckState(
-                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-                )
-                item.setData(role, name)
-                self.note_types_list.addItem(item)
-        self.note_types_list.blockSignals(False)
-
-    def _on_type_item_changed(self, item: QListWidgetItem) -> None:
-        """Checkbox toggled: track mapping edits per type."""
-        role = _user_role()
-        type_name = item.data(role)
-        if not type_name:
-            return
-        is_checked = item.checkState() == Qt.CheckState.Checked
-        if is_checked and type_name not in self.type_mappings:
-            # First check: seed the mapping via auto-match (fields
-            # populate when the row is selected).
-            self.type_mappings[type_name] = {
-                "word_field": "", "reading_field": "",
-                "definition_field": "", "_auto": True,
-            }
-        elif not is_checked and type_name in self.type_mappings:
-            # Unchecking removes the mapping immediately (re-checking
-            # re-runs auto-match; the user said 'not this type').
-            del self.type_mappings[type_name]
+        self._refresh_scope_label()
+        self._refresh_implied_types()
 
     def _on_type_selected(self) -> None:
         """A row was selected: load that type's mapping into the form."""
@@ -1284,15 +1561,12 @@ class ConfigDialog(QDialog):
 
     def _load_config(self) -> None:
         """Populates form controls with current configuration values."""
-        # Checkable note-type list + per-type mappings (multi-type mode)
+        # Scope decks + per-type mappings (field mappings imply nothing;
+        # deck membership decides what generates).
         self._load_type_mappings()
-        # Select the first checked type so the field form starts populated
-        for row in range(self.note_types_list.count()):
-            item = self.note_types_list.item(row)
-            checked = item.checkState() == Qt.CheckState.Checked
-            if checked:
-                self.note_types_list.setCurrentRow(row)
-                break
+        # Select the first implied type so the field form starts populated
+        if self.note_types_list.count():
+            self.note_types_list.setCurrentRow(0)
 
         # Load dictionary ladder
         saved_dicts = self.config.get("dictionaries", [])
@@ -1407,6 +1681,9 @@ class ConfigDialog(QDialog):
 
         updated_config = {
             **self._collect_type_config(),
+            # Scope: the single deck selection driving generation AND
+            # knowledge (empty = fail-closed, nothing generates).
+            SCOPE_CONFIG_KEY: list(self.scope_decks),
             "dictionaries": ordered_dicts,
             # Disabled paths: kept in `dictionaries` for order preservation,
             # listed here so generation skips them.
@@ -1433,6 +1710,12 @@ class ConfigDialog(QDialog):
                 reset_provider_cache()
             except Exception:
                 pass
+        # The Scope may have changed: rebuild the knowledge snapshot so
+        # scoring uses the new decks immediately (async, never blocks).
+        try:
+            _reset_knowledge_caches()
+        except Exception:
+            pass
         self.accept()
 
     def _save_config_now(self) -> None:
@@ -1489,6 +1772,7 @@ class ConfigDialog(QDialog):
                 pass
             mw.addonManager.writeConfig(self.addon_name, {
                 **self._collect_type_config(),
+                SCOPE_CONFIG_KEY: list(self.scope_decks),
                 "dictionaries": ordered_dicts,
                 "disabled_dictionaries": sorted(self.disabled_dicts),
                 "tab_generate": self.tab_generate_check.isChecked(),
@@ -1520,9 +1804,10 @@ def show_knowledge_dialog() -> None:
     dialog.setLayout(layout)
     hint = QLabel(
         "Kanji and words from the FIRST FIELD of your MATURE notes\n"
-        "(cards with interval \u2265 21 days), across all note types.\n"
+        "(cards with interval \u2265 21 days) inside your Scope decks.\n"
         "Definitions, examples, and other fields are never counted.\n"
-        "Restart Anki to rebuild the snapshot."
+        "Change decks under CompreDef Configuration -> Scope, then\n"
+        "restart Anki (or re-save the config) to rebuild the snapshot."
     )
     hint.setWordWrap(True)
     layout.addWidget(hint)

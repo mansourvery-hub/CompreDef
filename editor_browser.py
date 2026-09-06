@@ -49,6 +49,12 @@ from aqt.utils import tooltip
 from .core import get_generator
 from .utils import parse_furigana_field, extract_clean_word, resolve_ladder_paths
 
+# Dual-context sibling import (see core.py for why both forms are needed).
+if __package__:
+    from .scope import note_in_scope as _scope_note_in_scope
+else:
+    from scope import note_in_scope as _scope_note_in_scope
+
 
 def _get_addon_name() -> str:
     """
@@ -110,22 +116,35 @@ def _get_note_type_name(note) -> str:
     return ""
 
 
+def _note_in_scope(note, config: Dict[str, Any]) -> bool:
+    """
+    Scope gate shared by every generation path (editor button, bulk,
+    Tab-to-Generate): True only when the note has a card in one of the
+    user's Scope decks (subdecks included). An empty scope is
+    fail-closed (False). Never raises — a scope-check failure must not
+    break editing; it only skips generation for this note.
+    """
+    try:
+        return bool(_scope_note_in_scope(note, config))
+    except Exception:
+        print(f"CompreDef: scope check failed:\n{traceback.format_exc()}")
+        return False
+
+
 def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
     Returns {'word_field', 'reading_field', 'definition_field'} for this
-    note, or None when the note's type is not a configured target.
+    note, or None when the note must not generate.
 
-    Config supports two shapes (the GUI writes both; legacy single-type
-    configs keep working untouched):
-
-    - 'targets': {note_type_name: {'word_field': ..., 'reading_field': ...,
-      'definition_field': ...}} — multi-note-type mode. The note's type
-      name is looked up directly; reading_field may be '' (optional).
-    - Legacy: flat 'note_type' + field names — applies ONLY to notes of
-      that single type, exactly as before.
+    Field mapping still comes from the note's own type (multi-type
+    'targets' when configured, legacy single-type otherwise), but
+    membership is decided by the Scope: the note must additionally have
+    a card in one of the selected Scope decks. Out-of-scope notes (and
+    everything, when the scope is empty) yield None.
 
     Fields absent from the note are not an error here (callers report
-    friendlier messages); only a non-matching type yields None.
+    friendlier messages); only a non-matching type or an out-of-scope
+    note yields None.
     """
     targets = config.get("targets")
     if isinstance(targets, dict) and targets:
@@ -139,18 +158,23 @@ def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, 
             # A target without a usable word/def pair cannot generate
             if not resolved["word_field"] or not resolved["definition_field"]:
                 return None
-            return resolved
-        return None
+        else:
+            return None
+    else:
+        # Legacy single-type config: applies only to that one type.
+        legacy_type = str(config.get("note_type", "") or "").strip()
+        if legacy_type and _get_note_type_name(note) != legacy_type:
+            return None
+        resolved = {
+            "word_field": str(config.get("word_field", "") or ""),
+            "reading_field": str(config.get("reading_field", "") or ""),
+            "definition_field": str(config.get("definition_field", "") or ""),
+        }
 
-    # Legacy single-type config: applies only to that one type.
-    legacy_type = str(config.get("note_type", "") or "").strip()
-    if legacy_type and _get_note_type_name(note) != legacy_type:
+    # Scope gate: deck membership decides, field mapping only describes.
+    if not _note_in_scope(note, config):
         return None
-    return {
-        "word_field": str(config.get("word_field", "") or ""),
-        "reading_field": str(config.get("reading_field", "") or ""),
-        "definition_field": str(config.get("definition_field", "") or ""),
-    }
+    return resolved
 
 
 def _resolve_editor_note(editor) -> Optional[Any]:
@@ -204,8 +228,8 @@ def on_editor_generate_definition(editor) -> None:
     fields = resolve_fields_for_note(note, config)
     if fields is None:
         tooltip(
-            f"Note type '{_get_note_type_name(note)}' is not a configured CompreDef target.\n"
-            "Configure it under Tools -> CompreDef Configuration.",
+            f"Note type '{_get_note_type_name(note)}' is outside the CompreDef Scope.\n"
+            "Pick its deck under Tools -> CompreDef Configuration -> Scope.",
             parent=editor.parentWindow,
         )
         return
@@ -446,6 +470,11 @@ def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any]) ->
       button).
     """
     if not _tab_generate_enabled(config):
+        return False
+
+    # Scope gate first: out-of-scope notes never auto-generate (this
+    # covers both the empty-scope state and notes in other decks).
+    if not _note_in_scope(note, config):
         return False
 
     # Multi-type mode: only fire when the note's type is a configured

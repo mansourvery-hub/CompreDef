@@ -1,10 +1,11 @@
 """
 yomitan.py - Minimal Yomitan API fallback for CompreDef.
 
-Uses Yomitan's native-messaging HTTP bridge (yomitan-api) via POST /termEntries
-(split into SINGLE definitions so the ladder can pick the best one) with
-fallback to /ankiFields for kanji. When CompreDef has no local dictionary
-result, we ask Yomitan instead of returning None.
+Uses Yomitan's native-messaging HTTP bridge (yomitan-api) via POST /ankiFields
+(which returns FULLY RENDERED native Yomitan HTML, split per-dictionary so
+the ladder can pick the best SINGLE definition) with fallback to
+/termEntries for edge cases (e.g. single kanji lookups). When CompreDef has
+no local dictionary result, we ask Yomitan instead of returning None.
 
 No second index is built — Yomitan owns the dictionaries. CompreDef stays fast
 by caching per-word results and short-circuiting when Yomitan is unavailable.
@@ -18,10 +19,12 @@ Performance contract (user explicitly asked to think carefully):
   the browser is closed — after the first ECONNREFUSED we skip the rest.
 - Per-word cache (5 min) so repeated lookups for the same term are instant.
 - Lazy health check: no separate /serverVersion ping on every generate; the
-  termEntries call itself is the probe. Availability is cached from its result.
+  first real call itself is the probe. Availability is cached from its result.
 """
 
+import html
 import json
+import re
 import time
 import threading
 import urllib.request
@@ -189,6 +192,67 @@ def _normalize_reading(reading: str) -> str:
     return re.sub(r"[\s\-・.。_ー()()「」【】]", "", "".join(out))
 
 
+# Matches one per-dictionary item in Yomitan's default Anki glossary template:
+# <ol><li data-dictionary="Dict Name">...</li><li data-dictionary="...">...
+# Inner example/bullet lists never carry data-dictionary, so they can never
+# cause a false split — only top-level per-dictionary items match.
+_LI_DICT_RE = re.compile(
+    r'<li\b[^>]*\bdata-dictionary\s*=\s*"([^"]+)"[^>]*>',
+    flags=re.IGNORECASE,
+)
+# The outer wrapper close; the LAST one in the blob closes the wrapper
+# (nested lists close before it), so rfind-style use is safe.
+_OL_CLOSE_RE = re.compile(r'</ol\s*>', flags=re.IGNORECASE)
+
+
+def split_glossary_by_dictionary(
+    glossary: str,
+) -> List[Tuple[Optional[str], str]]:
+    """Splits an /ankiFields glossary blob into per-dictionary slices.
+
+    Yomitan glues every dictionary's definition into ONE blob (one
+    <li data-dictionary="..."> per dictionary inside an <ol>), so scoring
+    the blob as a whole can never pick a single winner. Each returned slice
+    is a VERBATIM substring of the input — native Yomitan HTML, never
+    stripped or re-rendered — so engine.py can score slices individually
+    and return the winner byte-exact.
+
+    Cheap by design, per the performance contract: a single regex finditer
+    pass, O(n) total; slices run match-start to next-match-start with no
+    tag balancing, so custom templates or missing </li> can't break it.
+
+    Yomitan interleaves each dictionary's scoped <style> block right after
+    its </li>, so a slice naturally carries its own stylesheet (required
+    for the card to render like Yomitan) and never a neighbor's. The
+    attribute-selector CSS ([data-dictionary="..."]) can't false-match
+    _LI_DICT_RE, which requires a literal <li tag open.
+
+    Returns [(dict_title_or_None, html_slice), ...]. Unsplittable input
+    (fewer than 2 markers: single-dictionary results, kanji fallback,
+    custom templates without the marker) returns [(None, glossary)] so
+    callers transparently fall back to whole-blob behavior.
+    """
+    if not glossary or "<li" not in glossary.lower():
+        return [(None, glossary)]
+    matches = list(_LI_DICT_RE.finditer(glossary))
+    if len(matches) < 2:
+        return [(None, glossary)]
+    # End of the last slice: the wrapper's own close (the last </ol> in the
+    # blob — nested lists close before it). The <ol> opener before the first
+    # match is excluded the same way, so no wrapper bytes leak into slices.
+    closes = list(_OL_CLOSE_RE.finditer(glossary))
+    tail_end = len(glossary)
+    if closes and closes[-1].start() > matches[-1].start():
+        tail_end = closes[-1].start()
+    out: List[Tuple[Optional[str], str]] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else tail_end
+        title = html.unescape(m.group(1)).strip() or None
+        out.append((title, glossary[start:end]))
+    return out
+
+
 def _entries_from_term_entries(
     data: object,
     word: str,
@@ -197,11 +261,10 @@ def _entries_from_term_entries(
 ) -> List[DictionaryEntry]:
     """Splits a /termEntries response into SINGLE-definition entries.
 
-    /ankiFields returns one glossary HTML containing ALL dictionaries'
-    definitions glued together, so the ladder can only score the blob as a
-    whole. /termEntries instead returns structured per-dictionary definitions
-    which we render one-by-one — then engine.py scores each and returns only
-    the best single definition.
+    Only used for edge cases where /ankiFields yields nothing splittable
+    (e.g. single kanji lookups): /termEntries returns structured
+    per-dictionary definitions which we render one-by-one — then engine.py
+    scores each and returns only the best single definition.
     """
     # Accept several shapes: {"dictionaryEntries": [...]}, plain list, or
     # {"result": [...]} from different yomitan-api versions.
@@ -291,11 +354,16 @@ def fetch_yomitan_definitions(
     timeout: float = YOMITAN_TIMEOUT,
     base_url: Optional[str] = None,
 ) -> List[DictionaryEntry]:
-    """Fetches definitions from Yomitan, ONE entry per definition.
+    """Fetches definitions from Yomitan with EXACT rendered HTML.
 
-    Primary path is POST /termEntries (structured, per-dictionary) so the
-    ladder can score each definition separately and return only the best
-    single one. Falls back to /ankiFields for kanji lookups.
+    Primary path is POST /ankiFields which returns FULLY RENDERED HTML by
+    Yomitan's JavaScript engine — byte-for-byte identical to what you see in
+    the browser. This is the ONLY path we use for Yomitan mode to guarantee
+    exact HTML output without re-rendering.
+
+    Falls back to /termEntries only for edge cases (e.g. single kanji with
+    no reading information, or when reading filtering is not needed).
+
     Returns [] on any failure — never raises.
 
     Caching:
@@ -326,36 +394,9 @@ def fetch_yomitan_definitions(
     if _is_yomitan_recently_unavailable():
         return []
 
-    # Primary: /termEntries — structured per-definition data.
-    term_data = _post_json("/termEntries", {"term": word}, timeout=timeout, base_url=effective_url)
-    if term_data is None:
-        # Network / Yomitan not running — cache empty result briefly to avoid
-        # hammering in bulk (word cache with empty list)
-        with _word_lock:
-            _word_cache[cache_key] = (_now(), [])
-        return []
-
-    # Bridge-level error dict (e.g. 502 Yomitan not connected) — don't
-    # waste two more round-trips on fallbacks, just fail fast.
-    if isinstance(term_data, dict) and "error" in term_data and "dictionaryEntries" not in term_data:
-        with _word_lock:
-            _word_cache[cache_key] = (_now(), [])
-        return []
-
-    split = _entries_from_term_entries(term_data, word, reading, reading_norm)
-    if split:
-        # Respect max_entries cap (termEntries has no server-side cap)
-        if len(split) > max_entries:
-            split = split[:max_entries]
-        with _word_lock:
-            _word_cache[cache_key] = (_now(), split)
-        return split
-    # NOTE: empty split does NOT return yet — it may mean "term not found"
-    # (e.g. single kanji like 口 stored as kanji entry), so fall through to
-    # the /ankiFields fallback below instead of caching [].
-
-    # Fallback: /ankiFields term query (single glossary blob per headword).
-    # Only used when /termEntries yields nothing splittable.
+    # PRIMARY: /ankiFields — returns FULLY RENDERED HTML by Yomitan's JS engine.
+    # This is byte-for-byte identical to the browser output.
+    # We only use reading marker when provided to avoid irrelevant results.
     af_payload = {
         "text": word,
         "type": "term",
@@ -363,9 +404,43 @@ def fetch_yomitan_definitions(
         "maxEntries": max_entries,
         "includeMedia": False,
     }
+
+    # If reading is provided, we use it to disambiguate homographs
+    if reading_norm:
+        # Add reading to markers so Yomitan uses it in rendering
+        af_payload["markers"].append("reading")
+
     af_data = _post_json("/ankiFields", af_payload, timeout=timeout, base_url=effective_url)
+
     # Response: {"fields": [{"expression": "...", "reading": "...", "glossary": "<div>..."}]}
     fields = af_data.get("fields") if isinstance(af_data, dict) else None
+
+    if not isinstance(fields, list) or not fields:
+        # Fallback: /termEntries for edge cases (single kanji without reading, etc.)
+        # This path uses structured data and Python re-rendering, but only as fallback.
+        term_data = _post_json("/termEntries", {"term": word}, timeout=timeout, base_url=effective_url)
+        if term_data is None:
+            with _word_lock:
+                _word_cache[cache_key] = (_now(), [])
+            return []
+
+        # Bridge-level error dict
+        if isinstance(term_data, dict) and "error" in term_data and "dictionaryEntries" not in term_data:
+            with _word_lock:
+                _word_cache[cache_key] = (_now(), [])
+            return []
+
+        split = _entries_from_term_entries(term_data, word, reading, reading_norm)
+        if split:
+            if len(split) > max_entries:
+                split = split[:max_entries]
+            with _word_lock:
+                _word_cache[cache_key] = (_now(), split)
+            return split
+
+        with _word_lock:
+            _word_cache[cache_key] = (_now(), [])
+        return []
     # Fallback for single kanji like "口": Yomitan may store it as kanji entry, not term.
     # If term search returned nothing and the query is a single kanji, retry as kanji.
     if (not isinstance(fields, list) or not fields) and len(word) == 1:
@@ -422,14 +497,21 @@ def fetch_yomitan_definitions(
         expr = field.get("expression")
         term = str(expr).strip() if expr and isinstance(expr, str) and expr.strip() else word
 
-        # Yomitan glossary is already beautiful HTML — store as-is
-        result.append(DictionaryEntry(
-            word=term,
-            reading=reading,
-            definition=glossary,
-            dictionary_title="Yomitan",
-            dictionary_path="yomitan://api",
-        ))
+        # Glossary is FULLY RENDERED HTML by Yomitan's JS engine — but it
+        # glues ALL dictionaries into one blob (<ol><li data-dictionary>…).
+        # Split into per-dictionary slices (verbatim substrings, never
+        # re-rendered) so engine.py scores each slice and returns only the
+        # single winning definition in native Yomitan HTML.
+        for dict_title, slice_html in split_glossary_by_dictionary(glossary):
+            if not slice_html or not slice_html.strip():
+                continue
+            result.append(DictionaryEntry(
+                word=term,
+                reading=reading,
+                definition=slice_html,
+                dictionary_title=dict_title or "Yomitan",
+                dictionary_path="yomitan://api",
+            ))
 
     # Cache result (even if empty)
     with _word_lock:

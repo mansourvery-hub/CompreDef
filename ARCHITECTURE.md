@@ -27,10 +27,15 @@ Implementation (provider.py -> LocalSQLiteProvider)
 ```
 
 ### Key Modules
+- `scope.py`: Deck-based Scope — the single deck selection driving
+  BOTH generation eligibility and knowledge. Deck names (subdecks
+  included); a note is in scope when ANY of its cards sits in a scoped
+  deck; empty scope is fail-closed.
 - `gui.py`, `editor_browser.py`: Anki-specific UI and hook logic. The
-  config GUI manages multiple note types ("targets": each checked type
-  keeps its own word/reading/definition field mapping); generation
-  paths resolve fields per note via `resolve_fields_for_note`.
+  config GUI offers a compact Scope row + deck picker dialog; per-type
+  field mappings ("targets") are kept only for types implied by the
+  scoped decks. Generation paths resolve fields per note via
+  `resolve_fields_for_note` plus the Scope gate.
 - `core.py`: Application wiring and singleton management.
 - `engine.py`: Implements the Dictionary Ladder algorithm.
 - `scoring.py`: Kanji comprehension scoring and reference filtering.
@@ -38,7 +43,7 @@ Implementation (provider.py -> LocalSQLiteProvider)
 - `renderer.py`: Renders Yomitan structured content to HTML.
 - `utils.py`: Shared text cleaning and dictionary discovery utilities.
 - `anki.py`: Safe Anki database interaction for known-kanji extraction
-  (first field of every mature note, all note types; on-demand
+  (first field of every mature note INSIDE the Scope decks; on-demand
   diagnostics and the snapshot spec live in `debug/`).- `models.py`: Shared data structures (e.g., `DictionaryEntry`).
 
 ## Install-Time Indexing

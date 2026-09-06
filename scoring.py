@@ -11,16 +11,27 @@ else:
     from models import ScoringResult
 
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
+# Pipe separators join child-entry term lists ("(子) 会社員 | 会社組合 | …")
+# and never occur in Japanese prose definitions.
+_LIST_SEP_RE = re.compile(r'[|｜]')
+# Sentence-ending punctuation always means real prose, never a reference.
+_SENTENCE_END_RE = re.compile(r'[。？！]')
 
 def is_reference_title(html_or_text: str) -> bool:
     """
-    Detects entries that are just cross-reference titles.
-    Heuristic: visible text under 10 chars with no sentence punctuation is a reference.
+    Detects entries that are cross-references, not readable definitions:
+    - short titles without punctuation ("会社更生法"), and
+    - long pipe-separated child-entry lists ("(子) 会社員 | 会社組合 | …"):
+      every kanji in them can be known, so without this they score ~1.0
+      and beat the genuine definition (the 会社 incident).
+    Any sentence-ending punctuation (。？！) means real prose and always wins.
     """
     clean_text = extract_base_text(html_or_text)
-    if len(clean_text) >= 10:
+    if _SENTENCE_END_RE.search(clean_text):
         return False
-    return not any(p in clean_text for p in ("。", "、", "：", "，"))
+    if len(clean_text) < 10:
+        return not any(p in clean_text for p in ("、", "：", "，"))
+    return _LIST_SEP_RE.search(clean_text) is not None
 
 def calculate_kanji_score(html_or_text: str, known_kanji: Set[str]) -> ScoringResult:
     """

@@ -4,7 +4,7 @@ db_utils.py - Deprecated compatibility shim for CompreDef.
 The learner-knowledge logic (known kanji / known vocabulary) used to live
 here. That implementation has been retired: the single source of truth is
 now ``anki.py``, which extracts knowledge from the FIRST field of every
-mature note across all note types (never definitions, examples, or other
+mature note inside the Scope decks (never definitions, examples, or other
 fields) and holds it as a per-session snapshot.
 
 This module is kept so any lingering ``import db_utils`` keeps working;

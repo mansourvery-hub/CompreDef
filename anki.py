@@ -1,7 +1,14 @@
 import re
 import threading
 from aqt import mw
-from typing import Set, Optional
+from typing import List, Set, Optional
+
+# Dual-context sibling imports (relative inside Anki's package load,
+# absolute in the top-level test harness — see core.py for why).
+if __package__:
+    from .scope import SCOPE_CONFIG_KEY, get_scope_decks, scope_dids
+else:
+    from scope import SCOPE_CONFIG_KEY, get_scope_decks, scope_dids
 
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
 _FIELD_SEP = '\x1f'
@@ -15,6 +22,7 @@ _db_warned = False
 _last_rows_scanned = 0
 _last_words_kept = 0
 _last_error: Optional[str] = None
+_last_scope_label = ""
 
 def _warn_db_error(msg: str) -> None:
     """
@@ -35,12 +43,36 @@ def _warn_db_error(msg: str) -> None:
     except Exception:
         pass  # headless/test environments have no tooltip; print suffices
 
+def _get_scope_deck_names() -> List[str]:
+    """
+    Reads the user's Scope deck selection from add-on config.
+
+    Returns [] when unconfigured — which the fetch below treats as
+    fail-closed (empty knowledge), never as whole-collection.
+    """
+    try:
+        if not mw or not hasattr(mw, "addonManager"):
+            return []
+        try:
+            name = mw.addonManager.addonFromModule(__name__)
+        except Exception:
+            name = None
+        if not name:
+            name = "1619602654"
+        cfg = mw.addonManager.getConfig(name)
+        return get_scope_decks(cfg if isinstance(cfg, dict) else {})
+    except Exception:
+        return []
+
+
 def _fetch_learned_note_fields() -> list:
     """
-    Returns the first-field text of every mature note, across ALL note
-    types. Learner proficiency is collection-wide: a user with vocabulary
-    spread over many decks and note types must not have their knowledge
-    gated on a single configured type.
+    Returns the first-field text of every mature note INSIDE the Scope.
+
+    Only cards in the user's selected Scope decks (subdecks included)
+    count — a French deck must never inflate Japanese kanji knowledge.
+    An empty scope (or one whose decks are all missing/renamed) is
+    fail-closed and yields no rows at all.
 
     Only the first field is used — conventionally the word / expression /
     front across note types. Every other field is ignored, so definitions
@@ -51,17 +83,41 @@ def _fetch_learned_note_fields() -> list:
     'cards' tables (stable across Anki versions). It must NEVER reference
     the legacy 'models' table by name — renamed to 'notetypes' in Anki
     23.10+, so 'JOIN models' fails with 'no such table' on modern Anki
-    and silently yields an empty knowledge set.
+    and silently yields an empty knowledge set. Deck ids are interpolated
+    as plain integers (they come from Anki's own deck map, so there is no
+    injection surface) to avoid db.all() placeholder-style drift across
+    Anki versions.
     """
+    global _last_scope_label
     try:
         if not mw or not mw.col:
             return []
 
+        scope = _get_scope_deck_names()
+        if not scope:
+            # Fail-closed by design: no scope selected means no knowledge
+            # (the GUI shows a "pick your decks" warning for this state).
+            _last_scope_label = "empty selection (fail-closed)"
+            global _last_rows_scanned
+            _last_rows_scanned = 0
+            return []
+
+        dids = scope_dids(mw.col, scope)
+        _last_scope_label = (
+            f"{len(scope)} deck(s): {', '.join(scope)}"
+            if dids
+            else f"no matching decks for: {', '.join(scope)} (renamed?)"
+        )
+        if not dids:
+            _last_rows_scanned = 0
+            return []
+
+        did_list = ",".join(str(int(d)) for d in sorted(dids))
         rows = mw.col.db.all(
             "SELECT flds FROM notes "
-            "WHERE id IN (SELECT nid FROM cards WHERE ivl >= 21)"
+            "WHERE id IN (SELECT nid FROM cards WHERE ivl >= 21 "
+            f"AND did IN ({did_list}))"
         ) or []
-        global _last_rows_scanned
         _last_rows_scanned = len(rows)
 
         out = []
@@ -113,7 +169,8 @@ def _build_caches() -> None:
         print(f"CompreDef: learner snapshot built: "
               f"{len(known_kanji)} kanji / {len(known_words)} words "
               f"from {_last_rows_scanned} mature notes "
-              f"(mature = ivl >= 21, all note types, first field only)")
+              f"(mature = ivl >= 21, scope [{_last_scope_label}], "
+              f"first field only)")
 
 def init_caches_async() -> None:
     """
@@ -142,10 +199,11 @@ def get_known_vocabulary_set() -> Set[str]:
 
 def reset_caches() -> None:
     """Manual refresh of the knowledge snapshot."""
-    global _last_rows_scanned, _last_words_kept, _last_error
+    global _last_rows_scanned, _last_words_kept, _last_error, _last_scope_label
     _last_rows_scanned = 0
     _last_words_kept = 0
     _last_error = None
+    _last_scope_label = ""
     _caches_ready.clear()
     init_caches_async()
 
@@ -158,13 +216,15 @@ def knowledge_status() -> dict:
         m = importlib.import_module("1619602654.anki")
         print(m.knowledge_status())
     """
+    scope_suffix = f" [{_last_scope_label}]" if _last_scope_label else ""
     return {
         "ready": _caches_ready.is_set(),
         "known_kanji": len(_known_kanji_cache),
         "known_words": len(_known_vocab_cache),
         "mature_notes_scanned": _last_rows_scanned,
         "words_kept": _last_words_kept,
-        "scope": "mature notes only (ivl >= 21), all note types, first field",
+        "scope": "mature notes only (ivl >= 21) in scope decks, "
+        "first field" + scope_suffix,
         "last_error": _last_error,
     }
 

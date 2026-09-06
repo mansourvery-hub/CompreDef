@@ -74,15 +74,71 @@ sys.path.insert(0, REPO_ROOT)
 FAKE_STUB_DIR = os.path.join(tempfile.gettempdir(), "compredef_test_aqt_stub")
 
 
+class _FakeDecks:
+    """Minimal stand-in for mw.col.decks (deck-name Scope support)."""
+    def __init__(self):
+        self.decks = {}  # name -> id
+        self._next_id = 1
+    def add(self, name):
+        if name not in self.decks:
+            self.decks[name] = self._next_id
+            self._next_id += 1
+        return self.decks[name]
+    def all_names_and_ids(self):
+        import types as _types
+        return [_types.SimpleNamespace(name=n, id=i)
+                for n, i in self.decks.items()]
+    def all(self):
+        return [{"name": n, "id": i} for n, i in self.decks.items()]
+
+
 class _FakeCol:
     """Minimal stand-in for mw.col."""
     def __init__(self):
         self.models = _FakeModels()
+        self.decks = _FakeDecks()
         self.db = self._FakeDB()
 
     class _FakeDB:
+        """Routes Scope queries by SQL shape; plain flds rows otherwise.
+
+        Tests populate `notes` as {nid: {"flds": blob, "dids": [...],
+        "mid": int}} for deck-aware paths, or set `flds_rows` for the
+        legacy deck-agnostic shape (returned verbatim for queries that
+        carry no did filter).
+        """
+        def __init__(self):
+            self.flds_rows = []
+            self.notes = {}
+
         def all(self, query, params=()):
-            return []
+            import re as _re
+            ql = (query or "").lower()
+            if "select did from cards where nid" in ql:
+                m = _re.search(r"nid\s*=\s*(\d+)", query or "")
+                nid = int(m.group(1)) if m else None
+                dids = self.notes.get(nid, {}).get("dids", []) \
+                    if nid is not None else []
+                return [(d,) for d in dids]
+            if "select distinct mid from notes" in ql:
+                m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
+                dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
+                    if m else set()
+                out = set()
+                for n in self.notes.values():
+                    if set(n.get("dids", [])) & dids \
+                            and n.get("mid") is not None:
+                        out.add(n["mid"])
+                return [(mm,) for mm in out]
+            if "from notes" in ql and "did in" in ql:
+                m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
+                dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
+                    if m else set()
+                rows = [(n["flds"],) for n in self.notes.values()
+                        if set(n.get("dids", [])) & dids]
+                rows.extend(self.flds_rows)
+                return rows
+            return list(self.flds_rows)
 
     def models_by_name(self, name):
         return self.models.by_name(name)
@@ -153,12 +209,48 @@ aqt.mw = _FakeMW()  # type: ignore[attr-defined]
 import parser as compredef_parser  # noqa: E402
 import generator as compredef_generator  # noqa: E402
 import provider  # noqa: E402
+import scope as compredef_scope  # noqa: E402
 
 # The directory containing the user's real Yomitan dictionaries (used ONLY
 # by the dynamic smoke tests; everything else runs on synthetic fixtures).
 DICTS_DIR = "/home/mohamed/Desktop/Dicts"
 
 RESULTS = {"pass": 0, "fail": 0, "failed_names": []}
+
+
+def _save_collection_state() -> dict:
+    """Snapshots stub collection state (decks/notes/models/config)."""
+    col = aqt.mw.col
+    return {
+        "decks": dict(col.decks.decks),
+        "deck_next": col.decks._next_id,
+        "notes": {k: dict(v) for k, v in col.db.notes.items()},
+        "flds": list(col.db.flds_rows),
+        "models": dict(col.models.models_dict),
+        "model_next": col.models._next_id,
+        "cfg": dict(aqt.mw.addonManager.configs.get("1619602654", {})),
+        "had_cfg": "1619602654" in aqt.mw.addonManager.configs,
+    }
+
+
+def _restore_collection_state(st: dict) -> None:
+    """Restores stub collection state saved by _save_collection_state."""
+    col = aqt.mw.col
+    col.decks.decks = st["decks"]
+    col.decks._next_id = st["deck_next"]
+    col.db.notes = st["notes"]
+    col.db.flds_rows = st["flds"]
+    col.models.models_dict = st["models"]
+    col.models._next_id = st["model_next"]
+    if st["had_cfg"]:
+        aqt.mw.addonManager.configs["1619602654"] = st["cfg"]
+    else:
+        aqt.mw.addonManager.configs.pop("1619602654", None)
+
+
+def _set_scope_config(decks: list) -> None:
+    """Points the stub config at the given Scope decks."""
+    aqt.mw.addonManager.configs["1619602654"] = {"scope_decks": list(decks)}
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -1177,6 +1269,14 @@ def test_tab_generate_decisions() -> None:
 
     eb = importlib.import_module(f"{pkg_name}.editor_browser")
 
+    # Scope wiring: a single "Japanese" deck; the default FakeNote id
+    # maps into it so the decision matrix exercises in-scope notes.
+    scope_state = _save_collection_state()
+    _tab_jp = aqt.mw.col.decks.add("Japanese")
+    aqt.mw.col.decks.add("French")
+    aqt.mw.col.db.notes[123] = {"flds": "x", "dids": [_tab_jp], "mid": 1}
+    _set_scope_config(["Japanese"])
+
     class FakeNote:
         """Mimics anki.notes.Note field access for the decision core."""
 
@@ -1202,6 +1302,7 @@ def test_tab_generate_decisions() -> None:
         "word_field": "Expression",
         "definition_field": "Definition",
         "tab_generate": True,
+        "scope_decks": ["Japanese"],
     }
 
     # 1. Happy path: leaving the word field with an empty definition fires.
@@ -1238,7 +1339,8 @@ def test_tab_generate_decisions() -> None:
     )
 
     # 6. Missing config key defaults ON (historical behaviour).
-    legacy_config = {"word_field": "Expression", "definition_field": "Definition"}
+    legacy_config = {"word_field": "Expression", "definition_field": "Definition",
+                     "scope_decks": ["Japanese"]}
     check(
         "tab: missing key defaults to enabled",
         eb._should_auto_generate(note, "Expression", legacy_config),
@@ -1347,6 +1449,15 @@ def test_tab_generate_decisions() -> None:
     check("tab: early dialog save preserves explicit False",
           early_off["tab_generate"] is False)
 
+    # d) Out-of-scope notes never auto-generate, even with an empty def.
+    fr_note = FakeNote({"Expression": "試験", "Definition": ""}, nid=999)
+    aqt.mw.col.db.notes[999] = {"flds": "x", "dids": [
+        aqt.mw.col.decks.decks["French"]], "mid": 2}
+    check("tab: out-of-scope deck never auto-generates",
+          not eb._should_auto_generate(fr_note, "Expression", base_config))
+
+    _restore_collection_state(scope_state)
+
 
 def test_multi_note_type_targeting() -> None:
     """
@@ -1400,11 +1511,24 @@ def test_multi_note_type_targeting() -> None:
 
     eb = importlib.import_module(f"{pkg_name}.editor_browser")
 
+    # Scope wiring: Japanese deck holds the configured types' cards,
+    # French deck holds everything else.
+    scope_state = _save_collection_state()
+    _multi_jp = aqt.mw.col.decks.add("Japanese")
+    _multi_fr = aqt.mw.col.decks.add("French")
+
+    def _deck_for(type_name: str) -> int:
+        return _multi_jp if type_name in (
+            "JP Mining Note", "Animecards", "Japanese") else _multi_fr
+
     class Note:
         def __init__(self, fields, type_name):
             self._fields = fields
             self.id = hash(type_name) % 10_000
             self._type = type_name
+            aqt.mw.col.db.notes[self.id] = {
+                "flds": "", "dids": [_deck_for(type_name)], "mid": 1,
+            }
 
         def note_type(self):
             return {"name": self._type}
@@ -1430,6 +1554,7 @@ def test_multi_note_type_targeting() -> None:
             },
         },
         "dictionaries": ["/some/dict"],
+        "scope_decks": ["Japanese"],
     }
 
     # 1. Each configured type resolves to its OWN field mapping.
@@ -1458,10 +1583,11 @@ def test_multi_note_type_targeting() -> None:
     r4 = eb.resolve_fields_for_note(Note({"Def": "d"}, "Ghost"), broken)
     check("multi: incomplete mapping is rejected", r4 is None, f"got {r4}")
 
-    # 4. Legacy single-type configs behave exactly as before.
+    # 4. Legacy single-type configs behave exactly as before (plus Scope).
     legacy_config = {"note_type": "Japanese", "word_field": "Expression",
                      "reading_field": "furigana",
-                     "definition_field": "Definition"}
+                     "definition_field": "Definition",
+                     "scope_decks": ["Japanese"]}
     r5 = eb.resolve_fields_for_note(
         Note({"Expression": "x"}, "Japanese"), legacy_config)
     check("multi: legacy config resolves unchanged",
@@ -1489,6 +1615,92 @@ def test_multi_note_type_targeting() -> None:
           eb._should_auto_generate(
               Note({"Expression": "x", "Definition": ""}, "Japanese"),
               "Expression", legacy_config))
+
+    # 6. Scope gate: a configured type outside the Scope decks never
+    #    generates, and an in-scope note with an emptied scope is dead.
+    check("multi: configured type out of scope is rejected",
+          eb.resolve_fields_for_note(
+              Note({"Word": "x", "Furigana": "f", "Definition": "d"},
+                   "JP Mining Note"),
+              {**targets_config, "scope_decks": ["French"]}) is None)
+    check("multi: empty scope rejects everything",
+          eb.resolve_fields_for_note(
+              Note({"Word": "x", "Furigana": "f", "Definition": "d"},
+                   "JP Mining Note"),
+              {**targets_config, "scope_decks": []}) is None)
+
+    _restore_collection_state(scope_state)
+
+
+def test_scope_deck_filtering() -> None:
+    """
+    Deck Scope: subdeck inclusion, ANY-card membership, unsaved-note
+    type fallback, fail-closed empty scope, and missing-deck handling.
+    """
+    scope_state = _save_collection_state()
+    try:
+        col = aqt.mw.col
+        jp = col.decks.add("Japanese")
+        jpv = col.decks.add("Japanese::Vocab")
+        col.decks.add("JapaneseExtended")  # prefix lookalike, NOT a child
+        fr = col.decks.add("French")
+
+        # 1. Expansion: children included, lookalikes excluded.
+        expanded = compredef_scope.expand_scope_names(
+            ["Japanese", "Japanese::Vocab", "JapaneseExtended", "French"],
+            ["Japanese"],
+        )
+        check("scope: deck implies its subdecks",
+              expanded == {"Japanese", "Japanese::Vocab"},
+              f"got {sorted(expanded)}")
+        check("scope: missing decks reported",
+              compredef_scope.missing_scope_decks(["Japanese"], ["Klingon"])
+              == ["Klingon"])
+        check("scope: scope_dids resolves children to ids",
+              compredef_scope.scope_dids(col, ["Japanese"]) == {jp, jpv})
+
+        # 2. Membership via cards (ANY-card rule for multi-deck notes).
+        mid_jp = col.models.add_model(
+            "JP Mining Note", ["Word", "Furigana", "Definition"])
+        mid_fr = col.models.add_model("French Note", ["Mot", "Def"])
+        col.db.notes[101] = {"flds": "x", "dids": [jp], "mid": mid_jp}
+        col.db.notes[102] = {"flds": "x", "dids": [fr], "mid": mid_fr}
+        col.db.notes[103] = {"flds": "x", "dids": [fr, jpv], "mid": mid_jp}
+
+        class N:
+            def __init__(self, nid, tname=""):
+                self.id = nid
+                self._t = tname
+
+            def note_type(self):
+                return {"name": self._t} if self._t else {}
+
+        cfg = {"scope_decks": ["Japanese"]}
+        check("scope: note in scoped deck is in scope",
+              compredef_scope.note_in_scope(N(101), cfg, col))
+        check("scope: subdeck card is in scope",
+              compredef_scope.note_in_scope(N(103), cfg, col))
+        check("scope: French-deck note is out of scope",
+              not compredef_scope.note_in_scope(N(102), cfg, col))
+        check("scope: empty scope is fail-closed",
+              not compredef_scope.note_in_scope(N(101), {"scope_decks": []}, col))
+        check("scope: missing deck matches nothing",
+              not compredef_scope.note_in_scope(
+                  N(101), {"scope_decks": ["Klingon"]}, col))
+
+        # 3. Unsaved notes (no cards yet) fall back to implied types.
+        check("scope: implied types come from scoped decks",
+              compredef_scope.implied_note_types(col, ["Japanese"])
+              == ["JP Mining Note"])
+        check("scope: unsaved note of implied type is in scope",
+              compredef_scope.note_in_scope(N(0, "JP Mining Note"), cfg, col))
+        check("scope: unsaved note of other type is out of scope",
+              not compredef_scope.note_in_scope(N(0, "French Note"), cfg, col))
+        check("scope: empty config is empty scope",
+              compredef_scope.is_scope_empty({}) and
+              compredef_scope.get_scope_decks({}) == [])
+    finally:
+        _restore_collection_state(scope_state)
 
 
 # ---------------------------------------------------------------------------
@@ -1766,7 +1978,8 @@ def test_package_relative_imports() -> None:
     import types
 
     siblings = {"anki", "core", "engine", "provider", "renderer", "models",
-                "scoring", "utils", "parser", "generator", "db_utils"}
+                "scoring", "utils", "parser", "generator", "db_utils",
+                "scope"}
 
     class _BlockSiblingImports(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path, target=None):
@@ -1804,6 +2017,9 @@ def test_package_relative_imports() -> None:
                          "render_structured_content_node"],
             "models": ["DictionaryEntry", "RENDERER_VERSION"],
             "scoring": ["calculate_kanji_score", "is_reference_title"],
+            "scope": ["get_scope_decks", "expand_scope_names",
+                      "note_in_scope", "implied_note_types", "scope_dids",
+                      "is_scope_empty"],
             "utils": ["extract_clean_word", "extract_base_text",
                       "parse_furigana_field", "resolve_ladder_paths"],
             "parser": ["get_single_dictionary", "RENDERER_VERSION",
@@ -1834,36 +2050,47 @@ def test_package_relative_imports() -> None:
 
 def test_kanji_extraction_correctness(tmp_root: str) -> None:
     """
-    Known kanji/vocab come ONLY from the FIRST field of mature notes,
-    across ALL note types — never from Definition/Example/other fields.
-    Distinct kanji per field position make leaks attributable, and the
-    mixed layouts simulate several note types at once. This also proves
-    CompreDef-generated definitions (written to non-first fields) can
-    never pollute the learner's known-kanji set.
+    Known kanji/vocab come ONLY from the FIRST field of mature notes
+    INSIDE the Scope decks — never from Definition/Example/other fields,
+    and never from out-of-scope decks (the French deck must not inflate
+    Japanese knowledge). Distinct kanji per field position make leaks
+    attributable, and the mixed layouts simulate several note types at
+    once. This also proves CompreDef-generated definitions (written to
+    non-first fields) can never pollute the learner's known-kanji set.
     """
     import anki
 
-    # Save global state: this test rebinds the fake DB and rebuilds the
-    # session snapshot, so everything must be restored afterwards.
-    prev_db_all = aqt.mw.col.db.all
+    # Save global state: this test rebinds the fake collection and
+    # rebuilds the session snapshot, so everything must be restored.
     prev_kanji = set(anki._known_kanji_cache)
     prev_vocab = set(anki._known_vocab_cache)
     prev_ready = anki._caches_ready.is_set()
     import core as _core
     prev_generator = _core._generator
+    scope_state = _save_collection_state()
     try:
         SEP = "\x1f"
-        rows = [
-            # 3-field layout (word / definition / example)
-            (SEP.join(["漢字", "plain def", "plain ex"]),),
-            (SEP.join(["plain", "龍の定義", "plain"]),),
-            (SEP.join(["plain", "plain", "虎の例文"]),),
+        col = aqt.mw.col
+        jp = col.decks.add("Japanese")
+        fr = col.decks.add("French")
+        col.db.notes = {
+            # 3-field layout (word / definition / example), in scope
+            1: {"flds": SEP.join(["漢字", "plain def", "plain ex"]),
+                "dids": [jp], "mid": 1},
+            2: {"flds": SEP.join(["plain", "龍の定義", "plain"]),
+                "dids": [jp], "mid": 1},
+            3: {"flds": SEP.join(["plain", "plain", "虎の例文"]),
+                "dids": [jp], "mid": 1},
             # 2-field layout (front / back) — a different note type
-            (SEP.join(["語彙", "解釈"]),),
+            4: {"flds": SEP.join(["語彙", "解釈"]),
+                "dids": [jp], "mid": 2},
             # 1-field layout (cloze-like single field)
-            ("日本語",),
-        ]
-        aqt.mw.col.db.all = lambda q, p=(): list(rows)
+            5: {"flds": "日本語", "dids": [jp], "mid": 2},
+            # French deck: first-field kanji must NOT leak into knowledge
+            6: {"flds": SEP.join(["仏文", "définitions"]),
+                "dids": [fr], "mid": 3},
+        }
+        _set_scope_config(["Japanese"])
 
         anki.reset_caches()
         known = anki.get_known_kanji_set()
@@ -1883,7 +2110,12 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             f"known={sorted(known)}",
         )
         check(
-            "kanji: known set is exactly the first-field kanji",
+            "kanji: out-of-scope (French deck) kanji is NOT known",
+            "仏" not in known,
+            f"known={sorted(known)}",
+        )
+        check(
+            "kanji: known set is exactly the in-scope first-field kanji",
             known == {"漢", "字", "語", "彙", "日", "本"},
             f"known={sorted(known)}",
         )
@@ -1892,20 +2124,28 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             "龍" not in known and "虎" not in known,
         )
         check(
-            "kanji: known vocab comes from first fields only",
+            "kanji: known vocab comes from in-scope first fields only",
             vocab == {"漢字", "plain", "語彙", "日本語"},
             f"vocab={sorted(vocab)}",
         )
         status = anki.knowledge_status()
         check(
-            "kanji: status reports a ready all-types snapshot",
+            "kanji: status reports a ready scoped snapshot",
             status["ready"] and status["mature_notes_scanned"] == 5
-            and status["scope"] == "mature notes only (ivl >= 21), all note types, first field"
+            and "scope decks" in status["scope"]
+            and "Japanese" in status["scope"]
             and status["last_error"] is None,
             f"status={status}",
         )
+
+        # Empty scope is fail-closed: no decks selected, no knowledge.
+        _set_scope_config([])
+        anki.reset_caches()
+        check("kanji: empty scope yields empty knowledge",
+              anki.get_known_kanji_set() == set()
+              and anki.get_known_vocabulary_set() == set())
     finally:
-        aqt.mw.col.db.all = prev_db_all
+        _restore_collection_state(scope_state)
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:
@@ -1931,6 +2171,8 @@ def test_snapshot_waits_for_open_collection() -> None:
     prev_ready = anki._caches_ready.is_set()
     import core as _core
     prev_generator = _core._generator
+    had_cfg = "1619602654" in aqt.mw.addonManager.configs
+    prev_cfg = dict(aqt.mw.addonManager.configs.get("1619602654", {}))
     try:
         SEP = "\x1f"
         # Startup moment: collection not open yet.
@@ -1949,12 +2191,18 @@ def test_snapshot_waits_for_open_collection() -> None:
               "gated build must not mark ready")
 
         # Profile opens: collection becomes available — now it builds.
+        # The reopened collection carries one Scope deck; knowledge is
+        # scoped to it.
         import types
+        _decks = _FakeDecks()
+        _jp = _decks.add("Japanese")
         aqt.mw.col = types.SimpleNamespace(
             db=types.SimpleNamespace(
                 all=lambda q, p=(): [(SEP.join(["漢字", "def"]),)]
-            )
+            ),
+            decks=_decks,
         )
+        _set_scope_config(["Japanese"])
         anki._build_caches()
         known = anki.get_known_kanji_set()
         check("col-gate: snapshot builds once collection opens",
@@ -1962,6 +2210,10 @@ def test_snapshot_waits_for_open_collection() -> None:
               f"known={sorted(known)}")
     finally:
         aqt.mw.col = prev_col
+        if had_cfg:
+            aqt.mw.addonManager.configs["1619602654"] = prev_cfg
+        else:
+            aqt.mw.addonManager.configs.pop("1619602654", None)
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:
@@ -1974,30 +2226,33 @@ def test_knowledge_summary_text() -> None:
     """The knowledge dialog's content source: counts, lists, scope."""
     import anki
 
-    prev_db_all = aqt.mw.col.db.all
     prev_kanji = set(anki._known_kanji_cache)
     prev_vocab = set(anki._known_vocab_cache)
     prev_ready = anki._caches_ready.is_set()
     import core as _core
     prev_generator = _core._generator
+    scope_state = _save_collection_state()
     try:
         SEP = "\x1f"
-        aqt.mw.col.db.all = lambda q, p=(): [
-            (SEP.join(["漢字", "def"]),),
-            (SEP.join(["語彙", "def"]),),
-        ]
+        col = aqt.mw.col
+        jp = col.decks.add("Japanese")
+        col.db.notes = {
+            1: {"flds": SEP.join(["漢字", "def"]), "dids": [jp], "mid": 1},
+            2: {"flds": SEP.join(["語彙", "def"]), "dids": [jp], "mid": 1},
+        }
+        _set_scope_config(["Japanese"])
         anki.reset_caches()
         text = anki.knowledge_summary_text()
         check("summary: shows kanji count", "Known kanji: 4" in text, text)
         check("summary: shows word count", "Known words: 2" in text, text)
         check("summary: lists the kanji",
               "漢" in text and "語" in text, text)
-        check("summary: shows scope", "mature notes" in text, text)
+        check("summary: shows scope", "scope decks" in text, text)
         short = anki.knowledge_summary_text(max_kanji=2, max_words=1)
         check("summary: truncates long lists with a remainder",
               "more" in short, short)
     finally:
-        aqt.mw.col.db.all = prev_db_all
+        _restore_collection_state(scope_state)
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:
@@ -2024,14 +2279,17 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
     prev_ready = anki._caches_ready.is_set()
     import core as _core
     prev_generator = _core._generator
+    scope_state = _save_collection_state()
     try:
         SEP = "\x1f"
+        aqt.mw.col.decks.add("Japanese")
+        _set_scope_config(["Japanese"])
         rows = [(SEP.join(["漢字", "龍の定義"]),)]
 
         def strict_all(query, params=()):
             # New-schema Anki: there is no 'models' table at all.
             if re.search(r"\b(join|from)\s+models\b", query,
-                         re.IGNORECASE):
+                          re.IGNORECASE):
                 raise _sqlite3.OperationalError("no such table: models")
             return list(rows)
 
@@ -2049,6 +2307,7 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
         )
     finally:
         aqt.mw.col.db.all = prev_db_all
+        _restore_collection_state(scope_state)
         anki._known_kanji_cache = prev_kanji
         anki._known_vocab_cache = prev_vocab
         if prev_ready:
@@ -2254,6 +2513,181 @@ def test_yomitan_bridge_sw_keepalive() -> None:
     check("bridge: BRIDGE_SCRIPT parses as valid Python", ok, err)
 
 
+def _yomitan_multi_dict_blob() -> str:
+    """Synthetic /ankiFields glossary: 3 dictionaries glued in one blob.
+
+    Mirrors Yomitan's real template: each <li data-dictionary> is followed
+    by its OWN interleaved <style> block (scoped [data-dictionary] CSS that
+    Anki needs to render the definition like Yomitan does).
+
+    Dict B's definition uses only known kanji (不公平); A and C smuggle in
+    unknown kanji (贔屓扱受 / 欠続). B also carries a nested example list to
+    prove inner <li> items (no data-dictionary) never cause a false split.
+    """
+    return (
+        "<ol>"
+        '<li data-dictionary="Dict A"><i>(Dict A)</i>'
+        "<span>贔屓があって、不公平な扱いを受けること。</span></li>"
+        '<style>[data-dictionary="Dict A"]{color:red;}</style>'
+        '<li data-dictionary="Dict B"><i>(Dict B)</i>'
+        "<span>公で平でないこと。不公平であること。</span>"
+        "<ul><li>nested example without marker</li></ul></li>"
+        '<style>[data-dictionary="Dict B"]{color:green;}</style>'
+        '<li data-dictionary="Dict C"><i>(Dict C)</i>'
+        "<span>公平を欠く状態が続くこと。</span></li>"
+        '<style>[data-dictionary="Dict C"]{color:blue;}</style>'
+        "</ol>"
+    )
+
+
+def test_yomitan_glossary_split_per_dictionary() -> None:
+    """Yomitan blob splits into per-dictionary native-HTML slices (no network)."""
+    import yomitan
+
+    blob = _yomitan_multi_dict_blob()
+    parts = yomitan.split_glossary_by_dictionary(blob)
+    check("yomitan-split: blob splits into 3 slices",
+          len(parts) == 3, f"got {len(parts)}")
+    check("yomitan-split: titles extracted in order",
+          [t for t, _ in parts] == ["Dict A", "Dict B", "Dict C"],
+          f"got {[t for t, _ in parts]}")
+    check("yomitan-split: slices are verbatim substrings",
+          all(s in blob for _, s in parts))
+    check("yomitan-split: slices tile the <li> region exactly",
+          "".join(s for _, s in parts) == blob[blob.find("<li"):blob.rfind("</ol>")])
+    check("yomitan-split: nested inner <li> does not over-split",
+          "nested example without marker" in parts[1][1])
+    check("yomitan-split: no <ol> wrapper leaks into slices",
+          all("<ol" not in s.lower() for _, s in parts))
+    check("yomitan-split: each slice carries its OWN <style> block",
+          "color:green" in parts[1][1]
+          and "color:red" not in parts[1][1]
+          and "color:blue" not in parts[1][1]
+          and "color:red" in parts[0][1]
+          and "color:blue" in parts[2][1],
+          f"styles leaked across slices")
+
+    single = '<div class="yomitan-glossary">単独の定義文です。</div>'
+    check("yomitan-split: marker-less blob falls back to whole",
+          yomitan.split_glossary_by_dictionary(single) == [(None, single)])
+    custom = ("<ol><li><span>custom template one。</span></li>"
+              "<li><span>custom template two。</span></li></ol>")
+    check("yomitan-split: custom template without markers falls back to whole",
+          yomitan.split_glossary_by_dictionary(custom) == [(None, custom)])
+    check("yomitan-split: empty input falls back",
+          yomitan.split_glossary_by_dictionary("") == [(None, "")])
+
+
+def _yomitan_child_list_blob() -> str:
+    """Synthetic blob mirroring the 会社 incident: one dictionary contributes
+    only a 子見出し child-entry term list (all-common kanji → scores ~1.0),
+    while 小学館 holds the genuine prose definition (partly-unknown kanji).
+    The term list must NEVER win, no matter its kanji score.
+    """
+    return (
+        "<ol>"
+        '<li data-dictionary="子見出し辞典"><i>(子見出し辞典)</i>'
+        "<span>(子) 会社員 | 会社組合 | 会社法 | 会社人間</span></li>"
+        '<li data-dictionary="小学館例解学習国語 第十二版">'
+        "<i>(小学館例解学習国語 第十二版)</i>"
+        "<span>利益をえるため、お金を出し合って作る仕組みの団体。例 株式会社。</span></li>"
+        "</ol>"
+    )
+
+
+def test_yomitan_term_list_loses_to_real_definition() -> None:
+    """Regression for the 会社 incident: a pipe-separated child-entry list
+    ((子) 会社員 | 会社組合 | …) outscored the genuine 小学館 definition
+    because every kanji in the list was already known. Term lists are not
+    readable definitions — they must be filtered like reference titles."""
+    import yomitan
+    import engine as engine_mod
+    from models import DictionaryEntry
+
+    junk = "(子) 会社員 | 会社組合 | 会社更生法 | 会社整理 | 会社説明会"
+    check("ref: long pipe-separated term list is a reference",
+          compredef_generator._is_reference_title(junk), f"got: {junk[:40]!r}")
+    prose_with_pipe = "定義にパイプ｜記号がある場合もある。"
+    check("ref: prose WITH sentence punctuation stays real (pipe or not)",
+          not compredef_generator._is_reference_title(prose_with_pipe))
+
+    blob = _yomitan_child_list_blob()
+    real_slice = yomitan.split_glossary_by_dictionary(blob)[1][1]
+    entries = [
+        DictionaryEntry(word="会社", reading="かいしゃ", definition=s,
+                        dictionary_title=t or "Yomitan",
+                        dictionary_path="yomitan://api")
+        for t, s in yomitan.split_glossary_by_dictionary(blob)
+    ]
+
+    # Learner knows every kanji in the junk slice (list + its dictionary
+    # title are all common) but only a few of the real definition's —
+    # without the filter the junk scores a perfect 1.0 and early-exits.
+    known = {"子", "会", "社", "員", "組", "合", "法", "人", "間",
+             "見", "出", "辞", "典"}
+    junk_score = compredef_generator._calculate_kanji_score(entries[0].definition, known)
+    check("term-list: junk really does score 1.0 here (repro is valid)",
+          junk_score == 1.0, f"got {junk_score}")
+
+    original_fetch = engine_mod.fetch_yomitan_definitions
+    engine_mod.fetch_yomitan_definitions = lambda w, r="": entries  # type: ignore
+    cfgs = aqt.mw.addonManager.configs
+    had_key = "1619602654" in cfgs
+    old_cfg = cfgs.get("1619602654")
+    cfgs["1619602654"] = {"dictionary_source": "yomitan"}
+    try:
+        gen = engine_mod.DefinitionGenerator(provider=None, known_kanji=known)
+        result = gen.generate("会社", ladder_paths=[], reading="かいしゃ")
+    finally:
+        engine_mod.fetch_yomitan_definitions = original_fetch  # type: ignore
+        if had_key:
+            cfgs["1619602654"] = old_cfg
+        else:
+            cfgs.pop("1619602654", None)
+    check("term-list: genuine definition wins, byte-exact",
+          result == real_slice, f"got: {(result or '')[:80]!r}")
+
+
+def test_yomitan_returns_single_best_definition() -> None:
+    """Engine scores per-dictionary slices, returns winner in native HTML."""
+    import yomitan
+    import engine as engine_mod
+    from models import DictionaryEntry
+
+    blob = _yomitan_multi_dict_blob()
+    winner_slice = yomitan.split_glossary_by_dictionary(blob)[1][1]
+    entries = [
+        DictionaryEntry(word="不公平", reading="ふこうへい", definition=s,
+                        dictionary_title=t or "Yomitan",
+                        dictionary_path="yomitan://api")
+        for t, s in yomitan.split_glossary_by_dictionary(blob)
+    ]
+
+    # Hermetic: stub the network fetch AND the dictionary-source config.
+    original_fetch = engine_mod.fetch_yomitan_definitions
+    engine_mod.fetch_yomitan_definitions = lambda w, r="": entries  # type: ignore
+    cfgs = aqt.mw.addonManager.configs
+    had_key = "1619602654" in cfgs
+    old_cfg = cfgs.get("1619602654")
+    cfgs["1619602654"] = {"dictionary_source": "yomitan"}
+    try:
+        gen = engine_mod.DefinitionGenerator(
+            provider=None, known_kanji={"不", "公", "平"})
+        result = gen.generate("不公平", ladder_paths=[], reading="ふこうへい")
+    finally:
+        engine_mod.fetch_yomitan_definitions = original_fetch  # type: ignore
+        if had_key:
+            cfgs["1619602654"] = old_cfg
+        else:
+            cfgs.pop("1619602654", None)
+    check("yomitan-pick: a definition was returned", result is not None)
+    check("yomitan-pick: winner is the fully-known Dict B slice, byte-exact",
+          result == winner_slice, f"got: {(result or '')[:80]!r}")
+    check("yomitan-pick: losing dictionaries are NOT in the output",
+          result is not None and "Dict A" not in result and "Dict C" not in result,
+          f"got: {(result or '')[:80]!r}")
+
+
 def main() -> int:
     print("=" * 70)
     print("CompreDef fundamental regression suite")
@@ -2292,8 +2726,12 @@ def main() -> int:
         test_qt_enum_compat()
         test_tab_generate_decisions()
         test_multi_note_type_targeting()
+        test_scope_deck_filtering()
         test_config_survives_yomitan_toggle()
         test_yomitan_bridge_sw_keepalive()
+        test_yomitan_glossary_split_per_dictionary()
+        test_yomitan_term_list_loses_to_real_definition()
+        test_yomitan_returns_single_best_definition()
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.

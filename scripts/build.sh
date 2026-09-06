@@ -78,7 +78,7 @@ with zipfile.ZipFile("dist/CompreDef.ankiaddon", "r") as z:
     REQUIRED = [
         "__init__.py", "core.py", "engine.py", "provider.py", "renderer.py",
         "models.py", "scoring.py", "utils.py", "anki.py", "parser.py",
-        "generator.py", "gui.py", "editor_browser.py",
+        "generator.py", "gui.py", "editor_browser.py", "scope.py",
     ]
     missing = [m for m in REQUIRED if m not in names]
     assert not missing, f"Missing runtime modules: {missing}"
