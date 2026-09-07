@@ -2817,6 +2817,98 @@ def test_knowledge_summary_text() -> None:
             anki._caches_ready.clear()
         _core._generator = prev_generator
 
+
+def test_provenance_search_builders() -> None:
+    """
+    Browser provenance searches (v1.2.4): clicking a Kanji/Vocab row in
+    the knowledge dialog must open Anki's Browse screen with the notes
+    that actually produced that item's mastery points.
+
+    Syntax contract per the OFFICIAL Anki manual (searching.html):
+    - "field:value"  = field matches EXACTLY (vocab rows)
+    - "field:*value*" = field CONTAINS (kanji rows — kanji points are
+      admitted when the first field contains the kanji anywhere)
+    - terms are double-quoted (special characters stay literal),
+      multiple fields OR-join, list capped at 8 fields.
+    - fallbacks: 're:^term$' (vocab) / bare quoted term (kanji).
+    """
+    import anki
+
+    scope_state = _save_collection_state()
+    try:
+        # ---- Pure builder: shapes, quoting, caps, fallbacks -----------
+        # Vocab = first-field EXACT, quoted, OR-joined.
+        q = anki.build_provenance_search("vocab", "学校",
+                                         ["Expression", "Word"])
+        check("prov: vocab search is exact field matches",
+              q == '"Expression:学校" or "Word:学校"', f"got {q}")
+        # Kanji = first-field CONTAINS (*term*), quoted.
+        qk = anki.build_provenance_search("kanji", "学",
+                                          ["Expression"])
+        check("prov: kanji search is contains field matches",
+              qk == '"Expression:*学*"', f"got {qk}")
+        # Dedup + 8-field cap (9 fields -> 8 terms).
+        many = [f"F{i}" for i in range(9)]
+        qm = anki.build_provenance_search("vocab", "学校", many)
+        check("prov: field list capped at 8 terms",
+              qm.count(" or ") == 7 and '"F8:学校"' not in qm, f"got {qm}")
+        # Dedup keeps first occurrence order.
+        qd = anki.build_provenance_search("vocab", "学校",
+                                          ["Expression", "Expression"])
+        check("prov: duplicate field names deduped",
+              qd == '"Expression:学校"', f"got {qd}")
+        # Fallbacks when no fields resolve.
+        check("prov: vocab fallback is regex whole-field exact",
+              anki.build_provenance_search("vocab", "学校", []) ==
+              '"re:^学校$"', "fallback shape changed")
+        check("prov: kanji fallback is plain quoted term",
+              anki.build_provenance_search("kanji", "学", None) == '"学"',
+              "fallback shape changed")
+        check("prov: empty term yields empty search",
+              anki.build_provenance_search("kanji", "", ["F"]) == "")
+        # Whitespace-only field names are dropped, not searched.
+        check("prov: blank field names ignored",
+              anki.build_provenance_search("vocab", "学校", [" ", ""]) ==
+              '"re:^学校$"')
+
+        # ---- Live resolution against the fake collection ---------------
+        # Two note types in scope: their FIRST fields are what the
+        # snapshot counts from, so provenance must target exactly them.
+        col = aqt.mw.col
+        jp = col.decks.add("Japanese")
+        mid_a = col.models.add_model("Type A", ["Expression", "Reading"])
+        mid_b = col.models.add_model("Type B", ["Word", "Definition"])
+        col.db.notes = {
+            1: {"flds": "学校", "dids": [jp], "mid": mid_a, "ivl": 400},
+            2: {"flds": "語彙", "dids": [jp], "mid": mid_b, "ivl": 400},
+        }
+        _set_scope_config(["Japanese"])
+        fields = anki.first_field_names_for_scope()
+        check("prov: scope first-field names resolve",
+              sorted(fields) == ["Expression", "Word"], f"got {fields}")
+        qv = anki.build_provenance_search("vocab", "学校", fields)
+        check("prov: live vocab search covers both first fields",
+              qv == '"Expression:学校" or "Word:学校"', f"got {qv}")
+
+        # Empty scope is fail-closed (no fields -> fallback shape).
+        _set_scope_config([])
+        check("prov: empty scope yields no field names",
+              anki.first_field_names_for_scope() == [])
+        # Out-of-scope types never contribute their fields.
+        _set_scope_config(["Japanese"])
+        fr = col.decks.add("French")
+        mid_c = col.models.add_model("French Type", ["Front", "Back"])
+        col.db.notes[3] = {"flds": "bonjour", "dids": [fr], "mid": mid_c,
+                           "ivl": 400}
+        fields2 = anki.first_field_names_for_scope()
+        check("prov: out-of-scope type fields excluded",
+              "Front" not in fields2 and
+              sorted(fields2) == ["Expression", "Word"],
+              f"got {fields2}")
+    finally:
+        _restore_collection_state(scope_state)
+
+
 def test_knowledge_survives_new_schema(tmp_root: str) -> None:
     """
     The v1.0.5 production bug: the knowledge query referenced the legacy
@@ -3279,6 +3371,7 @@ def main() -> int:
         test_snapshot_waits_for_open_collection()
         test_sync_reset_is_thread_safe()
         test_knowledge_summary_text()
+        test_provenance_search_builders()
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()
         test_qt_enum_compat()

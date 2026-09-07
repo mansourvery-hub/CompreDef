@@ -1,14 +1,16 @@
 import re
 import threading
 from aqt import mw
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
-    from .scope import SCOPE_CONFIG_KEY, get_scope_decks, scope_dids
+    from .scope import (SCOPE_CONFIG_KEY, get_scope_decks, scope_dids,
+                        implied_note_types)
 else:
-    from scope import SCOPE_CONFIG_KEY, get_scope_decks, scope_dids
+    from scope import (SCOPE_CONFIG_KEY, get_scope_decks, scope_dids,
+                       implied_note_types)
 
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
 # "Word" knowledge = multi-kanji compounds ONLY. Pure-kana words are
@@ -518,3 +520,112 @@ def knowledge_summary_text(max_kanji: int = 2000,
     lines += ["", "Mastered kanji (all):", kanji_list or "(none)", "",
               "Mastered vocab (all):", words_shown or "(none)"]
     return "\n".join(lines)
+
+
+# Provenance search strings (v1.2.4): opening Anki's Browser from the
+# knowledge dialog. Syntax follows the OFFICIAL Anki manual (docs.ankiweb.
+# net/searching.html), verified against 26.08.1:
+# - "field:value"  → field matches value EXACTLY ("front:dog" does not
+#   match "a dog").
+# - "field:*value*" → field CONTAINS value.
+# - "re:^value$"    → regex whole-field exact match, any field.
+# Quoting a term ("...") keeps special characters literal.
+
+def first_field_names_for_scope() -> List[str]:
+    """
+    Returns the distinct FIRST-FIELD names of every note type that owns
+    cards in the user's Scope decks.
+
+    Why first fields only: the knowledge snapshot counts kanji/vocab
+    ONLY from first fields, so provenance searches must target the same
+    fields — searching definitions/examples would list notes that never
+    contributed to the mastery points.
+
+    Uses implied_note_types() (mid-based, schema-proof) then
+    col.models to resolve each type's first field. Returns [] when
+    nothing is resolvable — callers fall back to a regex search.
+    """
+    try:
+        if not mw or not mw.col:
+            return []
+        scope = _get_scope_deck_names()
+        if not scope:
+            return []
+        type_names = implied_note_types(mw.col, scope)
+        models = getattr(mw.col, "models", None)
+        if models is None:
+            return []
+        names: List[str] = []
+        seen: Set[str] = set()
+        for tn in type_names:
+            model = None
+            try:
+                model = models.by_name(tn)
+            except Exception:
+                model = None
+            if not model:
+                continue
+            flds = model.get("flds") if isinstance(model, dict) else None
+            if not flds:
+                continue
+            try:
+                first = flds[0].get("name", "")
+            except (IndexError, AttributeError):
+                continue
+            if first and first not in seen:
+                seen.add(first)
+                names.append(str(first))
+        return names
+    except Exception:
+        return []
+
+
+# Safety cap on the OR-list length: pathological collections can have
+# dozens of note types in scope; the search bar stays readable and the
+# query fast with at most this many field terms.
+_MAX_PROVENANCE_FIELDS = 8
+
+
+def build_provenance_search(kind: str, term: str,
+                            first_fields: Optional[List[str]] = None) -> str:
+    """
+    Builds the Browser search string for a kanji/vocab row's provenance.
+
+    kind='vocab': first-field EXACT match — mirrors how vocab points
+    are admitted (the whole first field must BE the compound), so
+    "Expression:学校" lists exactly the notes that gave 学校 its mastery.
+
+    kind='kanji': first-field CONTAINS match — mirrors how kanji points
+    are admitted (the first field contains the kanji anywhere), so
+    "Expression:*学*" lists every contributing note.
+
+    Quoting rules per the manual: terms with special characters (the
+    '*' wrapper) are double-quoted; plain exact matches are quoted too
+    so colons/colons-in-field-names stay literal.
+
+    Fallbacks when first_fields is empty/unresolvable: 're:^term$'
+    (vocab, whole-field exact on any field) or the bare quoted term
+    (kanji, substring — same as Anki's basic search).
+    """
+    if not term:
+        return ""
+    # Dedupe while keeping order (first occurrence wins) — callers may
+    # pass raw lists; the builder itself must be idempotent on dupes.
+    clean: List[str] = []
+    for f in (first_fields or []):
+        name = str(f).strip()
+        if name and name not in clean:
+            clean.append(name)
+    if not clean:
+        if kind == "kanji":
+            return f'"{term}"'
+        return f'"re:^{term}$"'
+    terms = []
+    if kind == "kanji":
+        # Contains: field:*term* (quoted — '*' is special unquoted).
+        for f in clean[:_MAX_PROVENANCE_FIELDS]:
+            terms.append(f'"{f}:*{term}*"')
+    else:  # vocab: exact field match, no wildcards.
+        for f in clean[:_MAX_PROVENANCE_FIELDS]:
+            terms.append(f'"{f}:{term}"')
+    return " or ".join(terms)

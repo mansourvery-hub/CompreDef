@@ -28,6 +28,10 @@ from aqt.qt import (
     QListWidget,
     QListWidgetItem,
     QAbstractItemView,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    Qt,
     QLabel,
     QGroupBox,
     QTextEdit,
@@ -35,7 +39,7 @@ from aqt.qt import (
     QTabWidget,
     QScrollArea,
     QFrame,
-    Qt,
+    QGridLayout,
 )
 
 from .core import get_provider
@@ -93,6 +97,39 @@ def _size_button(btn: QPushButton) -> QPushButton:
     btn.setMinimumWidth(140)
     btn.setMinimumHeight(30)
     return btn
+
+
+# Knowledge-dialog table helpers (PyQt5/PyQt6 cross-version)
+def _table_select_rows_flag() -> Any:
+    """QAbstractItemView.SelectionBehavior.SelectRows across Qt versions."""
+    if hasattr(QAbstractItemView, "SelectionBehavior") and hasattr(
+            QAbstractItemView.SelectionBehavior, "SelectRows"):
+        return QAbstractItemView.SelectionBehavior.SelectRows
+    return QAbstractItemView.SelectRows
+
+
+def _table_single_selection_flag() -> Any:
+    """QAbstractItemView.SelectionMode.SingleSelection across versions."""
+    if hasattr(QAbstractItemView, "SelectionMode") and hasattr(
+            QAbstractItemView.SelectionMode, "SingleSelection"):
+        return QAbstractItemView.SelectionMode.SingleSelection
+    return QAbstractItemView.SingleSelection
+
+
+def _header_resize_stretch_flag() -> Any:
+    """QHeaderView.ResizeMode.Stretch across PyQt5/PyQt6."""
+    if hasattr(QHeaderView, "ResizeMode") and hasattr(
+            QHeaderView.ResizeMode, "Stretch"):
+        return QHeaderView.ResizeMode.Stretch
+    return QHeaderView.Stretch
+
+
+def _header_resize_resize_to_contents_flag() -> Any:
+    """QHeaderView.ResizeMode.ResizeToContents across versions."""
+    if hasattr(QHeaderView, "ResizeMode") and hasattr(
+            QHeaderView.ResizeMode, "ResizeToContents"):
+        return QHeaderView.ResizeMode.ResizeToContents
+    return QHeaderView.ResizeToContents
 
 
 # Keyword lists for auto-matching target word and definition fields
@@ -2177,6 +2214,25 @@ def show_config_dialog(initial_tab: int = 0) -> None:
     dialog.exec()
 
 
+class _NumericTableItem(QTableWidgetItem):
+    """Table item that sorts NUMERICALLY (UserRole float), not by text.
+
+    QTableWidget's default __lt__ compares DisplayRole text, so "999
+    days" sorted above "9969 days" and mastery "0.10" above "1.00" —
+    the v1.2.4 header-sort bug. Subclassing __lt__ to read the UserRole
+    float is Qt's documented way to get value-based sorting.
+    """
+
+    def __lt__(self, other: Any) -> bool:
+        try:
+            mine = float(self.data(_user_role()))
+            theirs = float(other.data(_user_role()))
+            return mine < theirs
+        except (TypeError, ValueError):
+            # No numeric data on either side: fall back to text compare.
+            return super().__lt__(other)
+
+
 class KnowledgeDialog(QDialog):
     """Debug-oriented view of the learner-knowledge snapshot.
 
@@ -2225,23 +2281,34 @@ class KnowledgeDialog(QDialog):
         # Overview tab --------------------------------------------------
         self.overview_tab = QWidget()
         ov = QVBoxLayout(self.overview_tab)
+        # Full-width flowing paragraph: no manual line breaks, no indent,
+        # zero layout margins so the text starts at the left edge (plus
+        # only the dialog's own padding) — the v1.2.4 clunkiness fix.
         hint = QLabel(
-            "MASTERED = mastery weight 1.0: the kanji/vocab sits on a\n"
-            "note whose card interval reached a FULL YEAR.\n"
-            "SEEN = on any in-scope note with interval > 0 (any age).\n"
-            "All counts come from the FIRST FIELD of notes in your\n"
-            "Scope decks — definitions, examples and other fields are\n"
-            "never counted. 'Vocab' = kanji-only compound words.\n"
-            "Click a stat card below to see the full list."
+            "MASTERED = mastery weight 1.0: the kanji/vocab sits on a "
+            "note whose card interval reached a FULL YEAR. SEEN = on any "
+            "in-scope note with interval > 0 (any age). All counts come "
+            "from the FIRST FIELD of notes in your Scope decks — "
+            "definitions, examples and other fields are never counted. "
+            "'Vocab' = kanji-only compound words. Click a stat card below "
+            "to see the full list."
         )
         hint.setWordWrap(True)
+        hint.setIndent(0)
+        hint.setContentsMargins(0, 0, 0, 0)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(8)
         ov.addWidget(hint)
-        # Stat cards are added dynamically once data arrives.
-        self.stat_container = QWidget()
-        self.stat_layout = QHBoxLayout(self.stat_container)
-        ov.addWidget(self.stat_container)
+        # Stat cards are added dynamically once data arrives (2-column
+        # grid — a single row of five cards was too cramped).
+        self.stat_grid = QGridLayout()
+        self.stat_grid.setColumnStretch(0, 1)
+        self.stat_grid.setColumnStretch(1, 1)
+        ov.addLayout(self.stat_grid)
         self.overview_details = QLabel("")
         self.overview_details.setWordWrap(True)
+        self.overview_details.setIndent(0)
+        self.overview_details.setContentsMargins(0, 0, 0, 0)
         ov.addWidget(self.overview_details, stretch=1)
         ov.addStretch(1)
         self.tabs.addTab(self.overview_tab, "Overview")
@@ -2250,8 +2317,10 @@ class KnowledgeDialog(QDialog):
         self.kanji_tab = self._make_list_tab(
             "Every SEEN kanji (on a note with interval > 0) with its "
             "mastery weight — 1.00 = MASTERED (note interval >= 1 year), "
-            "lower = still maturing. Sort by mastery to find weak kanji.",
-            sort_key="mastery")
+            "lower = still maturing. Click a row to open Anki's Browser "
+            "with every note whose first field contains that kanji. "
+            "Click the column headers to sort.",
+            columns=("Kanji", "Mastery"), kind="kanji")
         self.tabs.addTab(self.kanji_tab, "Kanji")
 
         # Vocab tab (kanji-only compounds) -------------------------------
@@ -2261,15 +2330,19 @@ class KnowledgeDialog(QDialog):
             "compound words (2+ kanji, no kana); kana-only words and "
             "single kanji are excluded by design (kana words are "
             "inflection-hostile, single kanji are covered by the kanji "
-            "tab).",
-            sort_key="mastery")
+            "tab). Click a row to open Anki's Browser with every note "
+            "whose first field is exactly that word. Click the column "
+            "headers to sort.",
+            columns=("Vocab", "Mastery"), kind="vocab")
         self.tabs.addTab(self.words_tab, "Vocab")
 
         # Mature notes tab ----------------------------------------------
         self.notes_tab = self._make_list_tab(
-            "The MATURE notes (first field + max card interval) the "
-            "snapshot was built from. Mature = interval >= 1 year.",
-            sort_key="interval")
+            "The MATURE notes the snapshot was built from: first field "
+            "and its interval (the note's longest card interval). "
+            "Mature = interval >= 1 year. Click the column headers to "
+            "sort.",
+            columns=("Note", "Interval"), kind=None)
         self.tabs.addTab(self.notes_tab, "Mature Notes")
 
         # Status line + refresh + close ----------------------------------
@@ -2293,47 +2366,62 @@ class KnowledgeDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-    def _make_list_tab(self, header: str, sort_key: str = "") -> Any:
-        """Builds a (filter + sort + list + count) tab; returns the tab.
+    def _make_list_tab(self, header: str, columns: tuple,
+                       kind: Optional[str] = None) -> Any:
+        """Builds a (filter + 2-column sortable table + count) tab.
 
-        sort_key='mastery' adds a Kanji/Vocab sort combo (A-Z /
-        mastery high-low / mastery low-high); 'interval' adds the
-        Mature Notes sort combo (A-Z / interval high-low / low-high).
+        columns: the two header labels, e.g. ("Kanji", "Mastery"). The
+        first column holds the item (kanji/vocab/note text), the second
+        its numeric value (mastery weight or interval days) — stored as
+        the item's Qt.UserRole data so header-click sorting is NUMERIC,
+        not alphabetical ("900" > "1000" lexically).
+
+        kind ('kanji'/'vocab'/None): when set, single-clicking a row
+        opens Anki's Browser with the provenance search for that item
+        (see _open_browser_for_term). The Mature Notes tab passes None
+        (its rows are whole notes, nothing to browse).
         """
         tab = QWidget()
         v = QVBoxLayout(tab)
         head = QLabel(header)
         head.setWordWrap(True)
+        head.setIndent(0)
+        head.setContentsMargins(0, 0, 0, 0)
         v.addWidget(head)
         filter_row = QHBoxLayout()
         filter_edit = QLineEdit()
         filter_edit.setPlaceholderText("Filter...")
         filter_row.addWidget(filter_edit)
-        if sort_key:
-            sort_combo = QComboBox()
-            if sort_key == "mastery":
-                sort_combo.addItems(["A-Z", "Mastery ↓", "Mastery ↑"])
-                sort_combo.setToolTip("Sort by mastery weight.")
-            else:  # interval (mature notes)
-                sort_combo.addItems(["A-Z", "Interval ↓", "Interval ↑"])
-                sort_combo.setToolTip("Sort by max card interval.")
-            filter_row.addWidget(sort_combo)
-            tab._sort_combo = sort_combo      # type: ignore[attr-defined]
-            sort_combo.currentIndexChanged.connect(
-                lambda _idx, t=tab: _knowledge_apply_filter(t))
         count_label = QLabel("0")
         filter_row.addWidget(count_label)
         v.addLayout(filter_row)
-        list_widget = QListWidget()
-        list_widget.setAlternatingRowColors(True)
-        list_widget.setUniformItemSizes(True)
-        v.addWidget(list_widget, stretch=1)
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(list(columns))
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            _table_select_rows_flag())
+        table.setSelectionMode(
+            _table_single_selection_flag())
+        # Column 0 (the item) stretches; column 1 (value) sizes to fit.
+        table.horizontalHeader().setSectionResizeMode(
+            0, _header_resize_stretch_flag())
+        table.horizontalHeader().setSectionResizeMode(
+            1, _header_resize_resize_to_contents_flag())
+        # Numeric sort on header click: UserRole carries the float.
+        table.setSortingEnabled(True)
+        v.addWidget(table, stretch=1)
         tab._filter_edit = filter_edit      # type: ignore[attr-defined]
         tab._count_label = count_label      # type: ignore[attr-defined]
-        tab._list_widget = list_widget      # type: ignore[attr-defined]
-        tab._sort_key = sort_key            # type: ignore[attr-defined]
+        tab._table = table                  # type: ignore[attr-defined]
+        tab._kind = kind                    # type: ignore[attr-defined]
         filter_edit.textChanged.connect(
             lambda text, t=tab: _knowledge_apply_filter(t))
+        if kind:
+            # Single click (the user's choice — no selection step
+            # needed) opens the Browser with the provenance search.
+            table.cellClicked.connect(
+                lambda row, _col, t=tab: _open_browser_for_term(t, row))
         return tab
 
     # -- Data loading ----------------------------------------------------
@@ -2430,9 +2518,10 @@ class KnowledgeDialog(QDialog):
                                     len(mature_rows))
         scope = status.get("scope", "")
 
-        # Overview: stat cards --------------------------------------------
-        for i in reversed(range(self.stat_layout.count())):
-            item = self.stat_layout.takeAt(i)
+        # Overview: stat cards in a 2-column grid --------------------------
+        # (one cramped HBox row was the v1.2.4 clunkiness complaint).
+        while self.stat_grid.count():
+            item = self.stat_grid.takeAt(0)
             w = item.widget() if item is not None else None
             if w is not None:
                 w.deleteLater()
@@ -2459,9 +2548,10 @@ class KnowledgeDialog(QDialog):
              "the snapshot was built from / every note in your Scope "
              "decks"),
         ]
-        for title, value, target_tab, desc in cards:
-            self.stat_layout.addWidget(
-                self._make_stat_card(title, value, desc, target_tab))
+        for idx, (title, value, target_tab, desc) in enumerate(cards):
+            self.stat_grid.addWidget(
+                self._make_stat_card(title, value, desc, target_tab),
+                idx // 2, idx % 2)
 
         details_bits = [f"Source: {scope}"]
         if totals.get("total_notes"):
@@ -2481,40 +2571,46 @@ class KnowledgeDialog(QDialog):
         # The seen set is the mastered set's superset (mastered = weight
         # exactly 1.0); listing it makes the mastery sort meaningful —
         # weak kanji sink to the bottom instead of an all-1.00 list.
-        self._fill_list(self.kanji_tab, [
-            (f"{k}  (mastery {seen_kanji_points[k]:.2f})",
-             float(seen_kanji_points[k]))
-            for k in sorted(seen_kanji_points.keys())
-        ])
+        self._fill_table(self.kanji_tab, sorted(
+            (k, float(pts)) for k, pts in seen_kanji_points.items()))
         self.tabs.setTabText(
             1, f"Kanji ({seen_kanji} seen, {mastered_kanji} mastered)")
 
         # Vocab tab (kanji-only compounds): every SEEN item -------------
-        self._fill_list(self.words_tab, [
-            (f"{w}  (mastery {seen_vocab_points[w]:.2f})",
-             float(seen_vocab_points[w]))
-            for w in sorted(seen_vocab_points.keys())
-        ])
+        self._fill_table(self.words_tab, sorted(
+            (w, float(pts)) for w, pts in seen_vocab_points.items()))
         self.tabs.setTabText(
             2, f"Vocab ({seen_vocab} seen, {mastered_vocab} mastered)")
 
         # Mature notes tab --------------------------------------------------
+        # Interval = the note's longest card interval (plain "interval";
+        # the old "max interval" wording confused the user).
         note_rows = []
         for row in mature_rows:
             word_text = row[0] if isinstance(row, (list, tuple)) else row
             ivl = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else 0
             try:
                 ivl_f = float(ivl)
-                ivl_txt = f"{ivl_f:.0f} days"
             except (TypeError, ValueError):
                 ivl_f = 0.0
-                ivl_txt = "unknown"
-            note_rows.append(
-                (f"{word_text}  — max interval {ivl_txt}", ivl_f))
-        self._fill_list(self.notes_tab, note_rows)
+            note_rows.append((str(word_text), ivl_f))
+        self._fill_table(self.notes_tab, sorted(note_rows))
         # Same count as the stat card (status), not the row list length
         # (rows can be deduplicated differently on some Anki builds).
         self.tabs.setTabText(3, f"Mature Notes ({mature_scanned})")
+
+        # Provenance searches target first fields of the Scope's note
+        # types; resolved once per refresh (schema-proof public APIs).
+        try:
+            if __package__:
+                from .anki import first_field_names_for_scope
+            else:
+                from anki import first_field_names_for_scope  # type: ignore
+            first_fields = first_field_names_for_scope()
+        except Exception:
+            first_fields = []
+        self.kanji_tab._first_fields = first_fields  # type: ignore[attr-defined]
+        self.words_tab._first_fields = first_fields  # type: ignore[attr-defined]
 
     def _make_stat_card(self, title: str, value: str, desc: str,
                         target_tab: str) -> QWidget:
@@ -2535,6 +2631,18 @@ class KnowledgeDialog(QDialog):
         v.addWidget(d)
         return card
 
+    def _fill_table(self, tab: Any, rows: List[tuple]) -> None:
+        """Populates a 2-column table tab; updates the visible count.
+
+        rows: sorted (item_text, numeric_value) tuples — Kanji/Vocab
+        carry mastery weights (0..1), Mature Notes carry interval days.
+        The numeric value is stored as each row's Qt.UserRole data so
+        header-click sorting is numeric; the text column shows it
+        formatted ("1.00" mastery / "123 days" interval).
+        """
+        tab._all_rows = [(str(d), float(s)) for d, s in rows]  # type: ignore[attr-defined]
+        _knowledge_apply_filter(tab)
+
     def _goto_tab(self, name: str) -> None:
         """Switches to a detail tab by its tab label prefix."""
         for i in range(self.tabs.count()):
@@ -2542,54 +2650,99 @@ class KnowledgeDialog(QDialog):
                 self.tabs.setCurrentIndex(i)
                 return
 
-    def _fill_list(self, tab: Any, rows: List[Any]) -> None:
-        """Populates a list tab and updates its visible count.
 
-        rows is a list of (display_text, numeric_sort_key) tuples; the
-        sort combo reorders by the numeric key (mastery or interval),
-        A-Z reorders by display text.
-        """
-        tab._all_rows = [(str(d), float(s)) for d, s in rows]  # type: ignore[attr-defined]
-        _knowledge_apply_filter(tab)
+def _knowledge_table_rows(tab: Any) -> List[tuple]:
+    """Returns the tab's rows filtered by the filter box, order intact."""
+    edit = getattr(tab, "_filter_edit", None)
+    needle = edit.text().strip() if edit is not None else ""
+    rows = getattr(tab, "_all_rows", []) or []
+    if needle:
+        rows = [r for r in rows if needle in r[0]]
+    return rows
 
 
 def _knowledge_apply_filter(tab: Any) -> None:
-    """Live filter + sort helper shared by the knowledge dialog's tabs.
+    """Rebuilds a table tab's visible rows from the filter box.
 
-    Rows are (display_text, numeric_sort_key) tuples. The optional sort
-    combo picks the ordering: A-Z (display text) or the numeric key
-    descending/ascending (mastery for Kanji/Vocab, interval for Mature
-    Notes). The filter is applied on top of the sort.
+    Header-click sorting is left to Qt (UserRole numeric — see
+    _fill_table); this only (re)populates the table for the current
+    filter text and refreshes the 'N shown' count.
     """
-    edit = getattr(tab, "_filter_edit", None)
-    list_widget = getattr(tab, "_list_widget", None)
-    if edit is None or list_widget is None:
+    table = getattr(tab, "_table", None)
+    if table is None:
         return
-    rows = getattr(tab, "_all_rows", []) or []
+    rows = _knowledge_table_rows(tab)
+    needle = (getattr(tab, "_filter_edit", None) is not None
+              and tab._filter_edit.text().strip())
+    is_notes = getattr(tab, "_kind", None) is None
 
-    # Sort first (combo index: 0=A-Z, 1=key desc, 2=key asc).
-    sort_combo = getattr(tab, "_sort_combo", None)
-    if sort_combo is not None:
-        mode = int(sort_combo.currentIndex())
-        if mode == 1:
-            rows = sorted(rows, key=lambda r: (-r[1], r[0]))
-        elif mode == 2:
-            rows = sorted(rows, key=lambda r: (r[1], r[0]))
+    # Repopulate without triggering per-cell sort churn: sorting stays
+    # enabled so header clicks keep working after a filter change.
+    table.setSortingEnabled(False)
+    table.setRowCount(len(rows))
+    user_role = _user_role()
+    for i, (text, num) in enumerate(rows):
+        first = _NumericTableItem(text)
+        if is_notes:
+            # Mature notes: interval in days, unknown when unparseable.
+            second_txt = (f"{num:.0f} days" if num else "unknown")
         else:
-            rows = sorted(rows, key=lambda r: r[0])
-
-    # Filter on top of the sorted order.
-    needle = edit.text().strip()
-    if needle:
-        rows = [r for r in rows if needle in r[0]]
-    list_widget.clear()
-    list_widget.addItems([r[0] for r in rows])
-
+            second_txt = f"{num:.2f}"
+        second = _NumericTableItem(second_txt)
+        # Numeric sort key on the value column's items.
+        second.setData(user_role, float(num))
+        first.setData(user_role, float(num))  # same key keeps rows paired
+        table.setItem(i, 0, first)
+        table.setItem(i, 1, second)
+    table.setSortingEnabled(True)
     count_label = getattr(tab, "_count_label", None)
     if count_label is not None:
         total = len(getattr(tab, "_all_rows", []) or [])
         count_label.setText(f"{len(rows)} shown" +
                             (f" / {total}" if needle else ""))
+
+
+def _open_browser_for_term(tab: Any, row: int) -> None:
+    """Opens Anki's Browser with the clicked row's provenance search.
+
+    Kanji rows search first-field CONTAINS (how kanji points are
+    admitted); Vocab rows search first-field EXACT (how vocab points
+    are admitted) — the search syntax comes from the official Anki
+    manual. Never raises: a browse failure only prints.
+    """
+    try:
+        table = getattr(tab, "_table", None)
+        kind = getattr(tab, "_kind", None)
+        if table is None or kind not in ("kanji", "vocab"):
+            return
+        item = table.item(row, 0)
+        if item is None:
+            return
+        term = item.text()
+        if not term:
+            return
+        if __package__:
+            from .anki import build_provenance_search
+        else:
+            from anki import build_provenance_search  # type: ignore
+        search = build_provenance_search(
+            kind, term, getattr(tab, "_first_fields", None))
+        if not search:
+            return
+        # dialogs.open returns the existing Browser or creates one —
+        # the officially supported way to open the Browse screen.
+        from aqt import dialogs
+        browser = dialogs.open("Browser", mw)
+        # search_for is the modern API; older builds expose searchFor.
+        if hasattr(browser, "search_for"):
+            browser.search_for(search)
+        elif hasattr(browser, "searchFor"):
+            browser.searchFor(search)
+        print(f"CompreDef: provenance search for '{term}': {search}")
+    except Exception:
+        import traceback
+        print(f"CompreDef: provenance browse failed:\n"
+              f"{traceback.format_exc()}")
 
 
 def show_knowledge_dialog() -> None:
