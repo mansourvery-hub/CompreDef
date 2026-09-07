@@ -1,7 +1,7 @@
 import re
 import threading
 from aqt import mw
-from typing import List, Set, Optional
+from typing import Dict, List, Set, Tuple
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
@@ -11,17 +11,28 @@ else:
     from scope import SCOPE_CONFIG_KEY, get_scope_decks, scope_dids
 
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')
+# "Word" knowledge = multi-kanji compounds ONLY. Pure-kana words are
+# inflection-hostile (やめる vs やめて) and single kanji are already
+# covered by the kanji score, so both are excluded from vocab points.
+_KANJI_WORD_RE = re.compile(r'^[\u4e00-\u9fff]{2,}$')
 _FIELD_SEP = '\x1f'
+
+# Interval-weighted knowledge (v1.2 scoring algorithm):
+# each kanji/vocab scores ivl/365 capped at 1.0 — a year-old interval
+# is full mastery, anything less counts proportionally.
+_FULL_MASTERY_IVL_DAYS = 365.0
 
 _known_kanji_cache: Set[str] = set()
 _known_vocab_cache: Set[str] = set()
+_kanji_points_cache: Dict[str, float] = {}
+_vocab_points_cache: Dict[str, float] = {}
 _caches_ready = threading.Event()
 _build_lock = threading.Lock()
 _db_warned = False
 # Last-build diagnostics (read via knowledge_status() in the Debug Console)
 _last_rows_scanned = 0
 _last_words_kept = 0
-_last_error: Optional[str] = None
+_last_error = None
 _last_scope_label = ""
 
 def _warn_db_error(msg: str) -> None:
@@ -65,9 +76,35 @@ def _get_scope_deck_names() -> List[str]:
         return []
 
 
-def _fetch_learned_note_fields() -> list:
+def _maturity_points(ivl: float) -> float:
+    """Interval-weighted mastery: ivl/365, capped at 1.0.
+
+    A one-year interval earns the full point (fluently known);
+    younger intervals count proportionally. Matches the user's v1.2
+    scoring spec exactly.
     """
-    Returns the first-field text of every mature note INSIDE the Scope.
+    try:
+        days = float(ivl)
+    except (TypeError, ValueError):
+        return 0.0
+    if days <= 0:
+        return 0.0
+    if days >= _FULL_MASTERY_IVL_DAYS:
+        return 1.0
+    return days / _FULL_MASTERY_IVL_DAYS
+
+
+def _first_field_text(flds_blob: str) -> str:
+    """Extracts the clean first-field text from a notes.flds blob."""
+    if not flds_blob or not isinstance(flds_blob, str):
+        return ""
+    return flds_blob.split(_FIELD_SEP, 1)[0].strip()
+
+
+def _fetch_learned_note_rows() -> List[Tuple[str, float]]:
+    """
+    Returns [(first_field_text, max_card_interval_days)] for every note
+    inside the Scope that owns at least one mature card (ivl >= 21).
 
     Only cards in the user's selected Scope decks (subdecks included)
     count — a French deck must never inflate Japanese kanji knowledge.
@@ -114,28 +151,44 @@ def _fetch_learned_note_fields() -> list:
 
         did_list = ",".join(str(int(d)) for d in sorted(dids))
         rows = mw.col.db.all(
-            "SELECT flds FROM notes "
-            "WHERE id IN (SELECT nid FROM cards WHERE ivl >= 21 "
-            f"AND did IN ({did_list}))"
+            "SELECT notes.flds, MAX(cards.ivl) FROM notes "
+            "JOIN cards ON cards.nid = notes.id "
+            "WHERE cards.ivl >= 21 "
+            f"AND cards.did IN ({did_list}) "
+            "GROUP BY notes.id"
         ) or []
         _last_rows_scanned = len(rows)
 
-        out = []
+        out: List[Tuple[str, float]] = []
         for row in rows:
             blob = row[0] if isinstance(row, (list, tuple)) else row
             if not blob or not isinstance(blob, str):
                 continue
-            word_text = blob.split(_FIELD_SEP, 1)[0].strip()
+            word_text = _first_field_text(blob)
             if word_text:
-                out.append(word_text)
+                try:
+                    ivl = float(row[1]) if isinstance(row, (list, tuple)) and len(row) > 1 else 0.0
+                except (TypeError, ValueError):
+                    ivl = 0.0
+                out.append((word_text, ivl))
         return out
     except Exception as e:
         _warn_db_error(f"DB error while fetching learned notes: {e}")
         return []
 
 def _build_caches() -> None:
-    """Internal worker to build the session knowledge snapshot."""
-    global _known_kanji_cache, _known_vocab_cache, _last_words_kept
+    """Internal worker to build the session knowledge snapshot.
+
+    v1.2 algorithm: knowledge is INTERVAL-WEIGHTED, not binary.
+    - Kanji points: for each kanji in a first field, max(ivl)/365
+      capped at 1.0.
+    - Vocab points: same, but ONLY for multi-kanji compounds
+      (single kanji covered by kanji score; kana-only words excluded
+      to dodge inflection mismatches like やめる/やめて).
+    The engine combines both dictionaries when scoring definitions.
+    """
+    global _known_kanji_cache, _known_vocab_cache
+    global _kanji_points_cache, _vocab_points_cache, _last_words_kept
     with _build_lock:
         if _caches_ready.is_set():
             return
@@ -149,28 +202,37 @@ def _build_caches() -> None:
             # builds the real one.
             return
 
-        known_kanji: Set[str] = set()
-        known_words: Set[str] = set()
+        kanji_points: Dict[str, float] = {}
+        vocab_points: Dict[str, float] = {}
 
-        # _fetch_learned_note_fields already returns ONLY first-field
-        # text — kanji from definitions (including CompreDef's own
-        # generated ones), examples, readings, and notes can never reach
-        # the known set.
-        for word_text in _fetch_learned_note_fields():
+        # _fetch_learned_note_rows already returns ONLY first-field
+        # text + intervals — kanji from definitions (including
+        # CompreDef's own generated ones), examples, readings, and
+        # notes can never reach the known set.
+        for word_text, ivl in _fetch_learned_note_rows():
             if not word_text or not isinstance(word_text, str):
                 continue
-            known_kanji.update(_KANJI_RE.findall(word_text))
-            known_words.add(word_text)
+            pts = _maturity_points(ivl)
+            for kanji in set(_KANJI_RE.findall(word_text)):
+                if pts > kanji_points.get(kanji, 0.0):
+                    kanji_points[kanji] = pts
+            # Vocab: multi-kanji compounds only (v1.2 spec).
+            if _KANJI_WORD_RE.match(word_text):
+                if pts > vocab_points.get(word_text, 0.0):
+                    vocab_points[word_text] = pts
 
-        _known_kanji_cache = known_kanji
-        _known_vocab_cache = known_words
-        _last_words_kept = len(known_words)
+        _kanji_points_cache = kanji_points
+        _vocab_points_cache = vocab_points
+        # Legacy binary views derived from the points (>0 ⇒ known).
+        _known_kanji_cache = set(kanji_points.keys())
+        _known_vocab_cache = set(vocab_points.keys())
+        _last_words_kept = len(vocab_points)
         _caches_ready.set()
         print(f"CompreDef: learner snapshot built: "
-              f"{len(known_kanji)} kanji / {len(known_words)} words "
+              f"{len(kanji_points)} kanji / {len(vocab_points)} kanji-words "
               f"from {_last_rows_scanned} mature notes "
-              f"(mature = ivl >= 21, scope [{_last_scope_label}], "
-              f"first field only)")
+              f"(ivl-weighted, mature = ivl >= 21, scope "
+              f"[{_last_scope_label}], first field only)")
 
 def init_caches_async() -> None:
     """
@@ -188,14 +250,32 @@ def init_caches_async() -> None:
     mw.taskman.run_in_background(_build_caches)
 
 def get_known_kanji_set() -> Set[str]:
+    """Binary view of kanji knowledge (any interval > 0)."""
     if not _caches_ready.is_set():
         _build_caches()
     return _known_kanji_cache
 
 def get_known_vocabulary_set() -> Set[str]:
+    """Binary view of vocab knowledge (kanji-only compounds)."""
     if not _caches_ready.is_set():
         _build_caches()
     return _known_vocab_cache
+
+def get_kanji_points() -> Dict[str, float]:
+    """Interval-weighted kanji mastery: {kanji: ivl/365 capped at 1.0}."""
+    if not _caches_ready.is_set():
+        _build_caches()
+    return _kanji_points_cache
+
+def get_vocab_points() -> Dict[str, float]:
+    """Interval-weighted vocab mastery: {compound: ivl/365 capped at 1.0}.
+
+    Only multi-kanji compounds — kana-only and single-kanji words are
+    deliberately excluded (v1.2 spec: avoid inflection mismatches).
+    """
+    if not _caches_ready.is_set():
+        _build_caches()
+    return _vocab_points_cache
 
 def reset_caches() -> None:
     """Manual refresh of the knowledge snapshot."""
@@ -223,7 +303,7 @@ def knowledge_status() -> dict:
         "known_words": len(_known_vocab_cache),
         "mature_notes_scanned": _last_rows_scanned,
         "words_kept": _last_words_kept,
-        "scope": "mature notes only (ivl >= 21) in scope decks, "
+        "scope": "mature notes (ivl >= 21, ivl-weighted) in scope decks, "
         "first field" + scope_suffix,
         "last_error": _last_error,
     }
@@ -248,13 +328,12 @@ def knowledge_summary_text(max_kanji: int = 2000,
         words_shown += f", … (+{len(words) - max_words} more)"
     lines = [
         f"Known kanji: {len(known)}",
-        f"Known words: {len(vocab)}",
+        f"Known kanji-words: {len(vocab)}",
         f"Source: {status['scope']}",
         f"Mature notes scanned: {status['mature_notes_scanned']}",
     ]
     if status["last_error"]:
         lines.append(f"Last error: {status['last_error']}")
     lines += ["", "Kanji:", kanji_list or "(none)", "",
-              "Words (sample):", words_shown or "(none)"]
+              "Kanji words (sample):", words_shown or "(none)"]
     return "\n".join(lines)
-

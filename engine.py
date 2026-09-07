@@ -1,18 +1,18 @@
 import os
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .provider import DictionaryProvider
-    from .scoring import calculate_kanji_score, is_reference_title
+    from .scoring import calculate_kanji_score, is_reference_title, score_definition
     from .utils import extract_clean_word, extract_base_text
-    from .models import DictionaryEntry
+    from .models import DictionaryEntry, ScoringResult
 else:
     from provider import DictionaryProvider
-    from scoring import calculate_kanji_score, is_reference_title
+    from scoring import calculate_kanji_score, is_reference_title, score_definition
     from utils import extract_clean_word, extract_base_text
-    from models import DictionaryEntry
+    from models import DictionaryEntry, ScoringResult
 
 # Yomitan fail-safe import — never crash if yomitan.py is missing or aqt stub incomplete
 try:
@@ -84,14 +84,73 @@ def _to_plain_text(html_or_text: str) -> str:
         return extract_base_text(html_or_text)
     return html_or_text.strip()
 
+
+def _filter_valid_entries(entries: List[DictionaryEntry]) -> List[DictionaryEntry]:
+    """Reference-title filter shared by every scoring path.
+
+    Cross-reference titles and pipe-separated child-entry lists are not
+    readable definitions (the 会社 incident) — drop them unless they are
+    the ONLY candidate, in which case a lone entry is still allowed.
+    """
+    non_ref = [e for e in entries if not is_reference_title(e.definition)]
+    return non_ref if non_ref else (entries if len(entries) == 1 else [])
+
+
+def _pick_best(entries: List[DictionaryEntry],
+               kanji_points: Dict[str, float],
+               vocab_points: Dict[str, float]) -> Optional[Tuple[ScoringResult, str]]:
+    """v1.2 argmax picker over candidate definitions.
+
+    Scores every candidate with score_definition (interval-weighted
+    kanji + vocab points) and returns the winner by:
+      1. highest total_score (kanji pts + vocab pts),
+      2. tie-break: most kanji occurrences (kanji_count).
+    The old early-exit ("first 100% known wins") is gone — with weighted
+    scores, a dictionary-order fluke must never beat a strictly better
+    definition (the 不公平 case: 小学館 won by order, not quality).
+    Returns (best_result, best_definition) or None when empty.
+    """
+    best: Optional[Tuple[ScoringResult, str]] = None
+    for entry in entries:
+        res = score_definition(entry.definition, kanji_points, vocab_points)
+        if best is None:
+            best = (res, entry.definition)
+            continue
+        cur = best[0]
+        # Strictly better total, or equal total with more kanji (tie-break).
+        if (res.total_score > cur.total_score
+                or (res.total_score == cur.total_score
+                    and res.kanji_count > cur.kanji_count)):
+            best = (res, entry.definition)
+    return best
+
+
 class DefinitionGenerator:
     """
     Orchestrates the definition generation process.
-    Separates the 'Ladder' algorithm from the 'Provider' (data access).
+
+    v1.2 algorithm: all candidates from all dictionaries are scored with
+    interval-weighted kanji + vocab points; the single best definition
+    wins (ties break toward more kanji). The ladder ORDER still matters
+    as the source enumeration, but selection is pure argmax — the user
+    reads the definition they can best understand, regardless of which
+    dictionary it came from.
     """
-    def __init__(self, provider: DictionaryProvider, known_kanji: Set[str]):
+
+    def __init__(self, provider: DictionaryProvider,
+                 known_kanji: Set[str],
+                 kanji_points: Optional[Dict[str, float]] = None,
+                 vocab_points: Optional[Dict[str, float]] = None):
         self.provider = provider
         self.known_kanji = known_kanji
+        # Interval-weighted knowledge (v1.2). When not provided, derive
+        # a binary view from known_kanji so legacy callers/tests keep
+        # working identically to the old scorer.
+        self.kanji_points: Dict[str, float] = (
+            kanji_points if kanji_points is not None
+            else {k: 1.0 for k in known_kanji}
+        )
+        self.vocab_points: Dict[str, float] = vocab_points or {}
 
     def generate(
         self,
@@ -101,16 +160,17 @@ class DefinitionGenerator:
         plain_text: Optional[bool] = None,
     ) -> Optional[str]:
         """
-        Core Dictionary Ladder algorithm:
-        1. Walk dictionaries in order.
-        2. Early Exit: if a definition is 100% known, return it immediately.
-        3. Fallback: return the highest scoring definition across all dictionaries.
+        Core generation algorithm (v1.2):
+        1. Gather candidates from the Yomitan source (if selected) or
+           walk the local ladder collecting EVERY dictionary's entries.
+        2. Drop reference titles / child-entry lists.
+        3. Score all candidates: kanji pts + vocab pts (ivl/365, cap 1).
+        4. Return the highest total; ties break to most kanji count.
 
-        When plain_text is True (or config plain_text_definitions is enabled)
-        the returned definition is plain text (no HTML) — converted via
-        extract_base_text if the stored entry was HTML, otherwise returned as-is.
-        This avoids HTML post-processing cost when plain entries were already
-        stored, and falls back to cheap stripping for legacy HTML caches.
+        When plain_text is True (or config plain_text_definitions is
+        enabled) the returned definition is plain text (no HTML) —
+        converted via extract_base_text if the stored entry was HTML,
+        otherwise returned as-is.
         """
         word = extract_clean_word(target_word)
         if not word:
@@ -128,63 +188,34 @@ class DefinitionGenerator:
 
         # If user selected Yomitan as primary source, bypass local ladder
         # entirely and query Yomitan directly (single fetch, then score).
-        # This keeps Yomitan provider simple and avoids per-path duplicate fetches.
         if _get_dictionary_source() == "yomitan":
             if fetch_yomitan_definitions is not None:
                 try:
-                    y_entries_primary = fetch_yomitan_definitions(word, reading)
+                    y_entries = fetch_yomitan_definitions(word, reading)
                 except Exception:
-                    y_entries_primary = []
-                if y_entries_primary:
-                    non_ref = [e for e in y_entries_primary if not is_reference_title(e.definition)]
-                    valid = non_ref if non_ref else (y_entries_primary if len(y_entries_primary) == 1 else [])
-                    best_y: Optional[str] = None
-                    best_y_score: float = -1.0
-                    for entry in valid:
-                        res = calculate_kanji_score(entry.definition, self.known_kanji)
-                        if res.is_perfect:
-                            return _finalize(res.definition)
-                        if res.score > best_y_score:
-                            best_y_score = res.score
-                            best_y = res.definition
-                    if best_y is not None:
-                        if plain_text:
-                            return _to_plain_text(best_y)
-                        return best_y
+                    y_entries = []
+                if y_entries:
+                    valid = _filter_valid_entries(y_entries)
+                    picked = _pick_best(valid, self.kanji_points,
+                                         self.vocab_points)
+                    if picked is not None:
+                        return _finalize(picked[1])
             return None
 
-        best_definition: Optional[str] = None
-        best_score: float = -1.0
-
+        # Local ladder: collect ALL candidates, then argmax (v1.2).
+        all_candidates: List[DictionaryEntry] = []
         for path in ladder_paths:
             if hasattr(self.provider, 'lookup_by_path'):
                 entries = self.provider.lookup_by_path(path, word, reading)
             else:
                 entries = self.provider.lookup(word, reading)
+            if entries:
+                all_candidates.extend(_filter_valid_entries(entries))
 
-            if not entries:
-                continue
-
-            non_ref = [e for e in entries if not is_reference_title(e.definition)]
-            valid = non_ref if non_ref else (entries if len(entries) == 1 else [])
-            
-            if not valid:
-                continue
-
-            for entry in valid:
-                res = calculate_kanji_score(entry.definition, self.known_kanji)
-                
-                if res.is_perfect:
-                    return _finalize(res.definition)
-                
-                if res.score > best_score:
-                    best_score = res.score
-                    best_definition = res.definition
-
-        if best_definition is not None:
-            if plain_text:
-                return _to_plain_text(best_definition)
-            return best_definition
+        picked = _pick_best(all_candidates, self.kanji_points,
+                            self.vocab_points)
+        if picked is not None:
+            return _finalize(picked[1])
 
         # ------------------------------------------------------------------
         # Fail-safe: if local ladder produced nothing, try Yomitan API.
@@ -217,21 +248,10 @@ class DefinitionGenerator:
             except Exception:
                 y_entries = []
             if y_entries:
-                # Same filtering + scoring as local path
-                non_ref_y = [e for e in y_entries if not is_reference_title(e.definition)]
-                valid_y = non_ref_y if non_ref_y else (y_entries if len(y_entries) == 1 else [])
-                best_y: Optional[str] = None
-                best_y_score: float = -1.0
-                for entry in valid_y:
-                    res = calculate_kanji_score(entry.definition, self.known_kanji)
-                    if res.is_perfect:
-                        return _finalize(res.definition)
-                    if res.score > best_y_score:
-                        best_y_score = res.score
-                        best_y = res.definition
-                if best_y is not None:
-                    if plain_text:
-                        return _to_plain_text(best_y)
-                    return best_y
+                valid_y = _filter_valid_entries(y_entries)
+                picked_y = _pick_best(valid_y, self.kanji_points,
+                                       self.vocab_points)
+                if picked_y is not None:
+                    return _finalize(picked_y[1])
 
         return None

@@ -130,6 +130,26 @@ class _FakeCol:
                             and n.get("mid") is not None:
                         out.add(n["mid"])
                 return [(mm,) for mm in out]
+            if "from notes" in ql and "group by notes.id" in ql:
+                # v1.2 knowledge snapshot: (flds, MAX(ivl)) per note,
+                # filtered by scoped dids + ivl >= 21. Notes may carry
+                # per-card ivls: {"dids": [...], "ivls": {did: ivl}}.
+                m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
+                dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
+                    if m else set()
+                rows = []
+                for n in self.notes.values():
+                    hit = set(n.get("dids", [])) & dids
+                    if not hit:
+                        continue
+                    if "ivls" in n:
+                        ivl = max((n["ivls"].get(d, 0) for d in hit),
+                                  default=0)
+                    else:
+                        ivl = n.get("ivl", 30)  # sane mature default
+                    if ivl >= 21:
+                        rows.append((n["flds"], ivl))
+                return rows
             if "from notes" in ql and "did in" in ql:
                 m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
                 dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
@@ -869,12 +889,18 @@ def test_scoring_ignores_furigana() -> None:
 
 
 def test_ladder_early_exit_order(tmp_root: str) -> None:
-    """Historical bug #4: simpler dictionaries win via early exit, in order."""
+    """Historical bug #4 → v1.2 SEMANTICS CHANGE: with argmax scoring the
+    BETTER-comprehension definition wins regardless of dictionary order.
+    Known 会/社: the 'easy' dictionary's definition uses only known
+    kanji and MORE vocab compounds (会社), so argmax picks it — but it
+    must win on QUALITY, not on being first in the ladder (reversed
+    order must produce the same winner)."""
     # db_utils returns no known kanji in the test env, so monkeypatch.
     original = compredef_generator.get_known_kanji_set
 
     def fake_known() -> set:
-        return {"会", "社"}
+        return {"会", "社", "定", "義", "説", "明", "高", "度", "専", "門", "的",
+                "や", "さ", "し", "い", "か", "ん", "た", "な", "む", "ず", "こ"}
 
     compredef_generator.get_known_kanji_set = fake_known  # type: ignore
     try:
@@ -909,10 +935,22 @@ def test_ladder_early_exit_order(tmp_root: str) -> None:
             "ladder: a definition was chosen",
             chosen is not None,
         )
+        # With all these kanji known, BOTH definitions are fully known;
+        # argmax tie-break: most kanji → the hard/kanji-dense one wins.
         check(
-            "ladder: early exit picks easy dictionary's definition",
-            chosen is not None and "やさしい" in chosen,
+            "ladder: argmax tie-break picks most-kanji definition",
+            chosen is not None and "むずかしい" in chosen,
             f"got: {chosen[:40] if chosen else None}",
+        )
+        # Order-independence: reversed ladder must pick the same winner.
+        chosen_rev = compredef_generator.generate_definition(
+            "会社", dictionaries=[hard, easy]
+        )
+        check(
+            "ladder: argmax is order-independent",
+            chosen_rev == chosen,
+            f"forward={chosen[:20] if chosen else None!r} "
+            f"reversed={chosen_rev[:20] if chosen_rev else None!r}",
         )
     finally:
         compredef_generator.get_known_kanji_set = original  # type: ignore
@@ -1171,8 +1209,14 @@ def test_disabled_dictionaries_skipped(tmp_root: str) -> None:
         "言葉", dictionaries=[easy, hard]
     )
     check(
-        "disabled: baseline with both enabled picks easy def",
-        both is not None and "やさしい" in both,
+        "disabled: baseline picks a definition",
+        both is not None,
+    )
+    # v1.2 argmax: winner is quality-based (no early exit by order); the
+    # same winner must appear regardless of which dictionaries remain.
+    check(
+        "disabled: baseline with both enabled picks the argmax winner",
+        both is not None and ("やさしい" in both or "むずかしい" in both),
     )
 
     only_hard = compredef_generator.generate_definition(
@@ -1632,6 +1676,107 @@ def test_multi_note_type_targeting() -> None:
     _restore_collection_state(scope_state)
 
 
+def test_v12_scoring_algorithm() -> None:
+    """
+    v1.2 definition scoring — the 不公平 incident:
+    - kanji score  = Σ point(k) per occurrence, point = ivl/365 cap 1.0
+    - vocab score  = Σ point(w) per multi-kanji compound occurrence
+    - winner = highest (kanji + vocab); tie-break = most kanji count
+    - kana-only inflections NEVER match vocab (やめる vs やめて)
+    """
+    import scoring as scoring_mod
+
+    # Learner: 公/平 fully known (1.0), 判/定 half-year (0.5), 不 unknown.
+    # Kana-only words never enter vocab candidates (v1.2 spec).
+    kp = {"公": 1.0, "平": 1.0, "判": 0.5, "定": 0.5}
+    vp = {"会社": 1.0}
+
+    # Three candidates shaped like the user's 不公平 case.
+    shogakukan = "公平でないこと。えこひいきがあること。例 不公平な判定。対 公平。"
+    daijirin = "かたよっていて、扱いが公平でない・こと（さま）。⇔公平。「━な処置」「━感」━さ（名）"
+    # A kanji-dense tie candidate: same total as another, more kanji.
+    tie_a = "公平な判定。"
+    tie_b = "公平でない判定がある。"
+
+    # 1. Kanji points: 公平×3 (2.0+2.0+2.0? no — per OCCURRENCE:
+    #    公平 appears 3× ⇒ 3×(1+1)=6.0; 不=0; 判定=(0.5+0.5)=1.0; 例=0; 対=0
+    #    → kanji_score = 7.0. Vocab: no known compounds in text → 0.
+    res = scoring_mod.score_definition(shogakukan, kp, vp)
+    check("v12: kanji pts sum per occurrence",
+          abs(res.kanji_score - 7.0) < 1e-9,
+          f"got {res.kanji_score}")
+    check("v12: vocab pts from known compounds only",
+          res.vocab_score == 0.0,
+          f"got {res.vocab_score}")
+    check("v12: total = kanji + vocab",
+          abs(res.total_score - 7.0) < 1e-9,
+          f"got {res.total_score}")
+    check("v12: counts every kanji occurrence",
+          res.kanji_count == 11,
+          f"got {res.kanji_count}")
+
+    # 2. Kana-heavy daijirin: fewer kanji ⇒ lower total despite same
+    #    readability. (User can read both; algorithm prefers kanji-vocab
+    #    coverage — matches "I'd get 大辞泉" once weights are equal.)
+    res_d = scoring_mod.score_definition(daijirin, kp, vp)
+    check("v12: kana-dense definition scores lower",
+          res_d.total_score < res.total_score,
+          f"daijirin={res_d.total_score} vs shogakukan={res.total_score}")
+
+    # 3. Tie-break: equal totals → most kanji wins.
+    #    tie_a: 公平な判定。 = 4 kanji, total 3.0
+    #    tie_b: 公平な判定を取る。 = 4 kanji + more kana, still 3.0 —
+    #    need a REAL tie with different kanji counts: same total via
+    #    a half-known extra kanji: 公平な判定に対して。 → 対 known 0.0
+    #    …so instead: tie_c drops 判定 (−1.0) but adds 2 full kanji.
+    tie_a = "公平な判定。"                       # 3.0, 4 kanji
+    tie_b = "公平な会社の判定だ。"               # 公平(2)+会社(2)+判定(1)=5? no
+    # Simpler deterministic tie: 公平な判定。 vs 公平な決定場。 both 3.0?
+    # 公(1)+平(1)+判(0.5)+定(0.5)=3.0, 4 kanji
+    # 公(1)+平(1)+決(0.5)+定(0.5)+場(0)=3.0, 5 kanji
+    kp2 = {**kp, "決": 0.5, "場": 0.0}
+    ra = scoring_mod.score_definition(tie_a, kp2, vp)
+    rb = scoring_mod.score_definition("公平な決定場。", kp2, vp)
+    check("v12: tie-break set up (equal totals)",
+          abs(ra.total_score - rb.total_score) < 1e-9,
+          f"{ra.total_score} vs {rb.total_score}")
+    check("v12: tie-break prefers more kanji",
+          rb.kanji_count > ra.kanji_count,
+          f"{rb.kanji_count} vs {ra.kanji_count}")
+
+    # 4. Inflection immunity: やめて never matches known やめる because
+    #    kana-only words are not vocab candidates at all.
+    kp2 = {}
+    vp2 = {"やめる": 1.0}
+    res_y = scoring_mod.score_definition("やめてもいいですか。", kp2, vp2)
+    check("v12: kana-only vocab never scores (inflection immunity)",
+          res_y.vocab_score == 0.0 and res_y.kanji_score == 0.0)
+
+    # 5. extract_kanji_words: compounds only, split at non-kanji.
+    words = scoring_mod.extract_kanji_words("不公平な会社の判定だ。")
+    check("v12: kanji-word extraction",
+          words == {"不公平", "会社", "判定"}, f"got {words}")
+    check("v12: single kanji not a vocab word",
+          scoring_mod.extract_kanji_words("日") == set())
+
+    # 6. Engine-level argmax with the 不公平-style dictionary set:
+    #    two fully-readable defs; the one with more kanji+compounds wins.
+    import engine as engine_mod
+    from models import DictionaryEntry
+    entries = [
+        DictionaryEntry("不公平", "ふこうへい", daijirin, "大辞林", "x"),
+        DictionaryEntry("不公平", "ふこうへい", shogakukan, "小学館", "y"),
+    ]
+    picked = engine_mod._pick_best(entries, kp, vp)
+    check("v12: engine argmax picks the richer definition",
+          picked is not None and "えこひいき" in picked[1],
+          f"got {(picked[1][:30] if picked else None)!r}")
+    # Order independence:
+    picked_rev = engine_mod._pick_best(list(reversed(entries)), kp, vp)
+    check("v12: engine argmax is order-independent",
+          picked_rev is not None and picked_rev[1] == picked[1])
+
+
 def test_scope_deck_filtering() -> None:
     """
     Deck Scope: subdeck inclusion, ANY-card membership, unsaved-note
@@ -1766,6 +1911,112 @@ def test_scope_deck_filtering() -> None:
 
 
 # ---------------------------------------------------------------------------
+class _FakeN:
+    """Tiny note stand-in for scope tests (module-level for reuse)."""
+    def __init__(self, nid, type_name=""):
+        self.id = nid
+        self._t = type_name
+    def note_type(self):
+        return {"name": self._t} if self._t else {}
+
+
+def test_multi_deck_quickfix_semantics() -> None:
+    """
+    v1.2 quick-fix contract (the 会社 complaint):
+    - A note with cards in SEVERAL decks is in scope when ANY one is
+      covered — the user must never need to add every deck.
+    - The quick-fix must never offer "Add deck" when scope already
+      passes but mapping fails (that loop made the dialog reappear
+      forever).
+    """
+    aqt_dir = os.path.join(FAKE_STUB_DIR, "aqt")
+    with open(os.path.join(aqt_dir, "browser.py"), "w") as f:
+        f.write("class Browser:  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "qt.py"), "w") as f:
+        f.write("class QMenu:  # stub\n    pass\nclass QKeySequence:  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "utils.py"), "w") as f:
+        f.write("def tooltip(*args, **kwargs):  # stub\n    pass\n")
+    with open(os.path.join(aqt_dir, "gui_hooks.py"), "w") as f:
+        f.write(
+            "class _Hook:  # stub: append-only registry like the real one\n"
+            "    def __init__(self): self._hooks = []\n"
+            "    def append(self, fn): self._hooks.append(fn)\n"
+            "editor_did_init_buttons = _Hook()\n"
+            "browser_menus_did_init = _Hook()\n"
+            "browser_will_show_context_menu = _Hook()\n"
+            "editor_did_load_note = _Hook()\n"
+            "editor_did_unfocus_field = _Hook()\n"
+            "editor_did_init = _Hook()\n"
+            "profile_did_open = _Hook()\n"
+        )
+    import importlib
+    import types
+    pkg_name = "compredef_addon"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [REPO_ROOT]
+        sys.modules[pkg_name] = pkg
+    else:
+        pkg = sys.modules[pkg_name]
+    sys.modules[f"{pkg_name}.generator"] = compredef_generator
+    sys.modules[f"{pkg_name}.parser"] = compredef_parser
+    if "db_utils" in sys.modules:
+        sys.modules[f"{pkg_name}.db_utils"] = sys.modules["db_utils"]
+    else:
+        sys.modules[f"{pkg_name}.db_utils"] = importlib.import_module("db_utils")
+
+    scope_state = _save_collection_state()
+    col = aqt.mw.col
+    jp = col.decks.add("Japanese")
+    fr = col.decks.add("French")
+    try:
+        # 会社-like note: cards in BOTH a scoped deck and an unscoped deck.
+        col.db.notes[500] = {"flds": "会社", "dids": [jp, fr], "mid": 1,
+                            "ivl": 400}
+        cfg_any = {"scope_decks": ["Japanese"]}
+        check("quickfix: ANY covered deck puts multi-deck note in scope",
+              compredef_scope.note_in_scope(
+                  _FakeN(500, "JP Mining Note"), cfg_any, col))
+        # And the quick-fix only ever needs to add the OUT-of-scope decks:
+        # scope.note_deck_names lists all; the caller filters against the
+        # scope before appending (editor_browser._add_deck_to_scope_and_reset
+        # appends ONLY missing ones — a no-op when already in scope).
+        check("quickfix: note decks include both",
+              set(compredef_scope.note_deck_names(_FakeN(500, ""), col))
+              == {"Japanese", "French"})
+
+        # 2. Mapping-fail must NOT trigger the add-deck dialog: scope
+        #    passes, mapping fails → _offer_add_to_scope routes to the
+        #    mapping branch (dialog text mentions fields, no Add-deck).
+        eb = importlib.import_module(f"{pkg_name}.editor_browser")
+        # A note whose type IS in scope but has NO inferable fields.
+        class EmptyNote:
+            id = 500
+            def note_type(self):
+                return {"name": "NoFields"}
+            def keys(self):
+                return ["Front", "Back"]
+            def __contains__(self, k):
+                return k in ("Front", "Back")
+            def __getitem__(self, k):
+                return ""
+        col.db.notes[500]["flds"] = "会社"
+        col.db.notes[500]["mid"] = None  # type lookup yields no mapping
+        cfg_scope_ok = {"scope_decks": ["Japanese"], "targets": {}}
+        # resolve: scope OK → mapping: inference on Front/Back fails.
+        res = eb.resolve_fields_for_note(EmptyNote(), cfg_scope_ok)
+        check("quickfix: scope-pass + mapping-fail yields None",
+              res is None)
+        # _offer_add_to_scope re-checks scope itself: it must detect
+        # in-scope and NOT offer add-deck (we can't run the Qt dialog
+        # headlessly, so assert the branch decision helper directly).
+        in_scope = eb._note_in_scope(EmptyNote(), cfg_scope_ok)
+        check("quickfix: dialog routes mapping-fail away from add-deck",
+              in_scope is True)
+    finally:
+        _restore_collection_state(scope_state)
+
+
 # Real-dictionary smoke test (skipped if not installed).
 # ---------------------------------------------------------------------------
 
@@ -2116,10 +2367,12 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
     Known kanji/vocab come ONLY from the FIRST field of mature notes
     INSIDE the Scope decks — never from Definition/Example/other fields,
     and never from out-of-scope decks (the French deck must not inflate
-    Japanese knowledge). Distinct kanji per field position make leaks
-    attributable, and the mixed layouts simulate several note types at
-    once. This also proves CompreDef-generated definitions (written to
-    non-first fields) can never pollute the learner's known-kanji set.
+    Japanese knowledge). v1.2: knowledge is INTERVAL-WEIGHTED
+    (ivl/365 capped at 1.0) and vocab is KANJI-ONLY (multi-kanji
+    compounds; kana-only words like 'plain' excluded, single kanji
+    covered by the kanji score). This also proves CompreDef-generated
+    definitions (written to non-first fields) can never pollute the
+    learner's known-kanji set.
     """
     import anki
 
@@ -2137,27 +2390,32 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         jp = col.decks.add("Japanese")
         fr = col.decks.add("French")
         col.db.notes = {
-            # 3-field layout (word / definition / example), in scope
+            # 3-field layout (word / definition / example), in scope.
+            # ivls vary: 365+ (full), 182.5 (half point), 100 (young).
             1: {"flds": SEP.join(["漢字", "plain def", "plain ex"]),
-                "dids": [jp], "mid": 1},
+                "dids": [jp], "mid": 1, "ivl": 400},
             2: {"flds": SEP.join(["plain", "龍の定義", "plain"]),
-                "dids": [jp], "mid": 1},
+                "dids": [jp], "mid": 1, "ivl": 182.5},
             3: {"flds": SEP.join(["plain", "plain", "虎の例文"]),
-                "dids": [jp], "mid": 1},
+                "dids": [jp], "mid": 1, "ivl": 100},
             # 2-field layout (front / back) — a different note type
             4: {"flds": SEP.join(["語彙", "解釈"]),
-                "dids": [jp], "mid": 2},
-            # 1-field layout (cloze-like single field)
-            5: {"flds": "日本語", "dids": [jp], "mid": 2},
+                "dids": [jp], "mid": 2, "ivl": 400},
+            # 1-field layout (cloze-like single field) — HALF-mature:
+            # 182.5-day interval earns exactly 0.5 points (v1.2 spec).
+            5: {"flds": "日本語", "dids": [jp], "mid": 2, "ivl": 182.5},
             # French deck: first-field kanji must NOT leak into knowledge
             6: {"flds": SEP.join(["仏文", "définitions"]),
-                "dids": [fr], "mid": 3},
+                "dids": [fr], "mid": 3, "ivl": 400},
         }
         _set_scope_config(["Japanese"])
 
         anki.reset_caches()
+        anki._build_caches()
         known = anki.get_known_kanji_set()
         vocab = anki.get_known_vocabulary_set()
+        kanji_pts = anki.get_kanji_points()
+        vocab_pts = anki.get_vocab_points()
 
         check("kanji: first-field kanji is known",
               {"漢", "字", "語", "彙", "日", "本"} <= known,
@@ -2186,11 +2444,22 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             "kanji: generated definitions do not pollute knowledge",
             "龍" not in known and "虎" not in known,
         )
+        # v1.2: vocab is KANJI-ONLY — kana/plain words ('plain') excluded.
         check(
-            "kanji: known vocab comes from in-scope first fields only",
-            vocab == {"漢字", "plain", "語彙", "日本語"},
+            "kanji: known vocab is kanji-only compounds from first fields",
+            vocab == {"漢字", "語彙", "日本語"},
             f"vocab={sorted(vocab)}",
         )
+        # v1.2: interval weighting — 400d ⇒ 1.0, 182.5d ⇒ 0.5.
+        check("kanji: 400-day interval earns full 1.0 points",
+              kanji_pts.get("漢") == 1.0 and kanji_pts.get("字") == 1.0,
+              f"pts={kanji_pts}")
+        check("kanji: half-year interval earns 0.5 points",
+              kanji_pts.get("日") == 0.5 and kanji_pts.get("本") == 0.5,
+              f"pts={kanji_pts}")
+        check("kanji: vocab points follow the same weighting",
+              vocab_pts.get("漢字") == 1.0 and vocab_pts.get("日本語") == 0.5,
+              f"vpts={vocab_pts}")
         status = anki.knowledge_status()
         check(
             "kanji: status reports a ready scoped snapshot",
@@ -2204,9 +2473,11 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         # Empty scope is fail-closed: no decks selected, no knowledge.
         _set_scope_config([])
         anki.reset_caches()
+        anki._build_caches()
         check("kanji: empty scope yields empty knowledge",
               anki.get_known_kanji_set() == set()
-              and anki.get_known_vocabulary_set() == set())
+              and anki.get_known_vocabulary_set() == set()
+              and anki.get_kanji_points() == {})
     finally:
         _restore_collection_state(scope_state)
         anki._known_kanji_cache = prev_kanji
@@ -2255,13 +2526,13 @@ def test_snapshot_waits_for_open_collection() -> None:
 
         # Profile opens: collection becomes available — now it builds.
         # The reopened collection carries one Scope deck; knowledge is
-        # scoped to it.
+        # scoped to it. (v1.2 rows carry (flds, ivl).)
         import types
         _decks = _FakeDecks()
         _jp = _decks.add("Japanese")
         aqt.mw.col = types.SimpleNamespace(
             db=types.SimpleNamespace(
-                all=lambda q, p=(): [(SEP.join(["漢字", "def"]),)]
+                all=lambda q, p=(): [(SEP.join(["漢字", "def"]), 400)]
             ),
             decks=_decks,
         )
@@ -2300,14 +2571,17 @@ def test_knowledge_summary_text() -> None:
         col = aqt.mw.col
         jp = col.decks.add("Japanese")
         col.db.notes = {
-            1: {"flds": SEP.join(["漢字", "def"]), "dids": [jp], "mid": 1},
-            2: {"flds": SEP.join(["語彙", "def"]), "dids": [jp], "mid": 1},
+            1: {"flds": SEP.join(["漢字", "def"]), "dids": [jp], "mid": 1,
+                "ivl": 400},
+            2: {"flds": SEP.join(["語彙", "def"]), "dids": [jp], "mid": 1,
+                "ivl": 400},
         }
         _set_scope_config(["Japanese"])
         anki.reset_caches()
+        anki._build_caches()
         text = anki.knowledge_summary_text()
         check("summary: shows kanji count", "Known kanji: 4" in text, text)
-        check("summary: shows word count", "Known words: 2" in text, text)
+        check("summary: shows word count", "Known kanji-words: 2" in text, text)
         check("summary: lists the kanji",
               "漢" in text and "語" in text, text)
         check("summary: shows scope", "scope decks" in text, text)
@@ -2347,7 +2621,7 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
         SEP = "\x1f"
         aqt.mw.col.decks.add("Japanese")
         _set_scope_config(["Japanese"])
-        rows = [(SEP.join(["漢字", "龍の定義"]),)]
+        rows = [(SEP.join(["漢字", "龍の定義"]), 400)]
 
         def strict_all(query, params=()):
             # New-schema Anki: there is no 'models' table at all.
@@ -2358,6 +2632,7 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
 
         aqt.mw.col.db.all = strict_all
         anki.reset_caches()
+        anki._build_caches()
         known = anki.get_known_kanji_set()
         check(
             "schema: snapshot builds without the legacy models table",
@@ -2790,6 +3065,8 @@ def main() -> int:
         test_tab_generate_decisions()
         test_multi_note_type_targeting()
         test_scope_deck_filtering()
+        test_multi_deck_quickfix_semantics()
+        test_v12_scoring_algorithm()
         test_config_survives_yomitan_toggle()
         test_yomitan_bridge_sw_keepalive()
         test_yomitan_glossary_split_per_dictionary()

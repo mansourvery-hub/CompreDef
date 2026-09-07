@@ -9,11 +9,13 @@ import os
 # __package__ is truthy only in the packaged (Anki) context.
 if __package__:
     from .provider import LocalSQLiteProvider
-    from .anki import get_known_kanji_set
+    from .anki import (get_known_kanji_set, get_kanji_points,
+                       get_vocab_points, reset_caches)
     from .engine import DefinitionGenerator
 else:
     from provider import LocalSQLiteProvider
-    from anki import get_known_kanji_set
+    from anki import (get_known_kanji_set, get_kanji_points,
+                      get_vocab_points, reset_caches)
     from engine import DefinitionGenerator
 
 # Singletons for the application lifecycle
@@ -105,8 +107,36 @@ def reset_provider_cache() -> None:
     _provider_source = None
 
 
+def reset_generator() -> None:
+    """Forces the next get_generator() to re-snapshot learner knowledge.
+
+    The generator caches the knowledge at build time; after the Scope
+    changes (GUI save, quick-fix add-deck), the old generator would keep
+    scoring against the STALE snapshot — the v1.1.4 "add deck does not
+    fix it" contributor. Also rebuilds knowledge from Anki's DB when
+    possible (synchronous fallback mirrors anki.py's lazy path).
+    """
+    global _generator
+    _generator = None
+    try:
+        reset_caches()
+    except Exception:
+        pass
+
+
 def get_generator():
+    """Returns the DefinitionGenerator singleton (knowledge-aware).
+
+    Built with interval-weighted kanji + vocab points (v1.2). The
+    snapshot is read ONCE per generator; reset_generator() forces a
+    rebuild after knowledge-relevant changes.
+    """
     global _generator
     if _generator is None:
-        _generator = DefinitionGenerator(get_provider(), get_known_kanji_set())
+        _generator = DefinitionGenerator(
+            get_provider(),
+            get_known_kanji_set(),
+            kanji_points=dict(get_kanji_points()),
+            vocab_points=dict(get_vocab_points()),
+        )
     return _generator

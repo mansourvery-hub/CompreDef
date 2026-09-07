@@ -182,27 +182,15 @@ def _infer_field_mapping(note) -> Optional[Dict[str, str]]:
             "definition_field": definition}
 
 
-def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def _resolve_mapping_for_inscope_note(note, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Mapping resolution for a note that ALREADY passed the Scope gate.
+
+    Returns the field mapping or None when no usable mapping exists
+    (explicit + inferred both failed). Kept separate so callers can
+    distinguish "outside Scope" (fix by adding the deck) from "no field
+    mapping" (fix by configuring fields) — the v1.2 dialog must never
+    offer "Add deck" for a mapping problem, which looped forever.
     """
-    Returns {'word_field', 'reading_field', 'definition_field'} for this
-    note, or None when the note must not generate.
-
-    Field mapping still comes from the note's own type (multi-type
-    'targets' when configured, legacy single-type otherwise), but
-    membership is decided by the Scope: the note must additionally have
-    a card in one of the selected Scope decks. Out-of-scope notes (and
-    everything, when the scope is empty) yield None.
-
-    If the note is inside the Scope but has no explicit entry in
-    `targets`, an auto-inferred mapping is returned so that selecting a
-    deck alone is enough — the "no need to add each note type" promise.
-    """
-    # Scope gate first: deck membership is the primary filter (fail-fast,
-    # and so auto-inference only fires for in-scope notes). The editor
-    # instance enables Add-window (unsaved note) deck resolution.
-    if not _note_in_scope(note, config, editor=getattr(note, "_cd_editor", None)):
-        return None
-
     targets = config.get("targets")
     if isinstance(targets, dict) and targets:
         mapping = targets.get(_get_note_type_name(note))
@@ -214,18 +202,16 @@ def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, 
             }
             if resolved["word_field"] and resolved["definition_field"]:
                 return resolved
-            # Incomplete mapping but note is in scope → try inference.
-            inferred = _infer_field_mapping(note)
-            return inferred
-        # No entry for this type but type is in scope → infer.
+            # Incomplete mapping → try inference.
+            return _infer_field_mapping(note)
+        # No entry for this type → infer.
         return _infer_field_mapping(note)
 
     # Legacy single-type config: applies only to that one type.
     legacy_type = str(config.get("note_type", "") or "").strip()
     if legacy_type and _get_note_type_name(note) != legacy_type:
-        # Legacy gate failed but Scope already passed — for legacy
-        # configs without a Scope we keep the old behaviour, otherwise
-        # allow inference for any in-scope type.
+        # Legacy gate failed but Scope already passed — allow inference
+        # for any in-scope type when a Scope is configured.
         if isinstance(config.get("scope_decks"), list) and config.get("scope_decks"):
             return _infer_field_mapping(note)
         return None
@@ -237,6 +223,29 @@ def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, 
     if resolved["word_field"] and resolved["definition_field"]:
         return resolved
     return _infer_field_mapping(note)
+
+
+def resolve_fields_for_note(note, config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    Returns {'word_field', 'reading_field', 'definition_field'} for this
+    note, or None when the note must not generate.
+
+    Field mapping still comes from the note's own type (multi-type
+    'targets' when configured, legacy single-type otherwise), but
+    membership is decided by the Scope: the note must have a card in
+    one of the selected Scope decks (ANY card suffices — a note with
+    cards in several decks is in scope when at least one is covered;
+    the user never needs to add every deck it touches).
+
+    If the note is inside the Scope but has no explicit entry in
+    `targets`, an auto-inferred mapping is returned so that selecting a
+    deck alone is enough — the "no need to add each note type" promise.
+    """
+    # Scope gate first: deck membership is the primary filter. The editor
+    # instance enables Add-window (unsaved note) deck resolution.
+    if not _note_in_scope(note, config, editor=getattr(note, "_cd_editor", None)):
+        return None
+    return _resolve_mapping_for_inscope_note(note, config)
 
 
 def _resolve_editor_note(editor) -> Optional[Any]:
@@ -269,28 +278,52 @@ def _add_deck_to_scope_and_reset(deck_names: List[str]) -> bool:
     """Appends decks to the Scope config and rebuilds knowledge.
 
     Shared by the quick-fix dialog and the Add-window path. Returns
-    True on success. Never raises.
+    True on success. Also drops the generator singleton so the next
+    generation re-scores against the NEW knowledge (the v1.1.4 "add
+    deck does not fix it" contributor: the generator kept the stale
+    snapshot). Never raises.
     """
     try:
         addon = _get_addon_name()
         cfg = mw.addonManager.getConfig(addon) or {}
-        new_scope = list(cfg.get(_SCOPE_KEY) or [])
+        old_scope = list(cfg.get(_SCOPE_KEY) or [])
+        new_scope = list(old_scope)
         for d in deck_names:
             if d and d not in new_scope:
                 new_scope.append(d)
+        if new_scope == old_scope:
+            # Nothing changed — still reset the generator, since the
+            # caller expects a behavior change (idempotent safety).
+            pass
         cfg[_SCOPE_KEY] = new_scope
         mw.addonManager.writeConfig(addon, cfg)
-        # Knowledge must rebuild for the new deck to count.
+        print(f"CompreDef: quick-fix added deck(s) {deck_names} to Scope "
+              f"(now: {new_scope})")
+        # Knowledge must rebuild for the new deck to count, and the
+        # generator must drop its stale knowledge snapshot.
         try:
-            from .anki import reset_caches as _reset
+            from .core import reset_generator as _reset_gen
         except Exception:
             try:
-                from anki import reset_caches as _reset  # type: ignore
+                from core import reset_generator as _reset_gen  # type: ignore
             except Exception:
-                _reset = None
-        if _reset:
+                _reset_gen = None
+        if _reset_gen is not None:
             try:
-                _reset()
+                _reset_gen()
+            except Exception:
+                pass
+        else:
+            # Last resort: reset knowledge caches directly.
+            try:
+                from .anki import reset_caches as _reset
+            except Exception:
+                try:
+                    from anki import reset_caches as _reset  # type: ignore
+                except Exception:
+                    _reset = None
+                if _reset:
+                    _reset()
             except Exception:
                 pass
         return True
@@ -340,33 +373,62 @@ def _target_deck_for_note(note, editor) -> str:
 
 def _offer_add_to_scope(note, editor) -> None:
     """
-    Out-of-scope quick fix: explains WHY the note is blocked (which deck
-    it lives in vs. what Scope covers) and offers a one-click "add this
-    deck & retry".
+    Out-of-scope quick fix: explains WHY the note is blocked (which of
+    its decks are covered vs not — ANY coverage suffices) and offers a
+    one-click "add this deck & retry".
 
-    v1.1.2 support case: the note was in a SIBLING deck (…::
-    anki-japanese-template) while Scope held a leaf (…::My New Japanese
-    Deck). v1.1.3 follow-up case: an ADD-WINDOW note (no cards yet) —
-    its target deck is the window's selected deck, which the old
-    quick-fix could not see, so "Add deck" silently did nothing and the
-    dialog reappeared forever. Both paths now resolve the deck first.
+    v1.2 hardening: when the Scope ALREADY covers one of the note's
+    decks but generation still failed, the cause is a field-mapping
+    problem, not scope — offering "Add deck" there looped forever (the
+    user's report). That case now gets a mapping-specific message and
+    NEVER the add-deck button.
     """
+    # Re-check precisely: is scope the actual blocker, or mapping?
+    cfg = _get_addon_config() if mw else {}
+    in_scope = _note_in_scope(note, cfg, editor=getattr(note, "_cd_editor", None))
     note_decks = _scope_note_deck_names(note)
     if not note_decks:
-        # Unsaved Add-window note: check the deck it WILL be added to.
         target = _target_deck_for_note(note, editor)
         if target:
             note_decks = [target]
-    scope = (mw.addonManager.getConfig(_get_addon_name()) or {}).get(_SCOPE_KEY) or [] \
-        if mw and hasattr(mw, "addonManager") else []
+    scope = list(cfg.get(_SCOPE_KEY) or [])
+    scope_txt = ", ".join(scope) if scope else "(none)"
+
+    if in_scope:
+        # Scope passes but the caller landed here → mapping failure.
+        type_name = _get_note_type_name(note)
+        fields = list(note.keys()) if note is not None else []
+        msg = (
+            f"This note's type could not be mapped to word/definition "
+            f"fields:\n\nNote type: {type_name}\n"
+            f"Fields: {', '.join(fields[:8])}{' …' if len(fields) > 8 else ''}\n\n"
+            f"Map it under Tools → CompreDef Configuration → Fields."
+        )
+        try:
+            from aqt.utils import askUserDialog  # type: ignore
+            diag = askUserDialog(
+                msg, ["Open Configuration…", "Cancel"],
+                parent=editor.parentWindow if editor is not None else None,
+                title="CompreDef — field mapping needed",
+            )
+            if diag.run() == "Open Configuration…":
+                try:
+                    from .gui import show_config_dialog
+                except Exception:
+                    from gui import show_config_dialog  # type: ignore
+                # Fields tab is index 1 (Scope=0, Fields=1).
+                show_config_dialog(initial_tab=1)
+        except Exception:
+            tooltip(msg, parent=editor.parentWindow if editor else None)
+        return
 
     deck_txt = ", ".join(note_decks) if note_decks else "(unknown — no cards yet)"
-    scope_txt = ", ".join(scope) if scope else "(none)"
     msg = (
-        f"This note's deck is not in the CompreDef Scope:\n\n"
+        f"This note is outside the CompreDef Scope:\n\n"
         f"Note is in: {deck_txt}\n"
         f"Scope covers: {scope_txt}\n\n"
-        f"Add this deck to the Scope and generate now?"
+        f"Add this deck to the Scope and generate now?\n"
+        f"(A note only needs ONE of its decks in the Scope.)"
     )
     try:
         from aqt.utils import askUserDialog  # type: ignore
@@ -396,7 +458,7 @@ def _offer_add_to_scope(note, editor) -> None:
             )
             return
         if _add_deck_to_scope_and_reset(note_decks):
-            # Retry generation with the updated config.
+            # Retry generation with the updated config + fresh knowledge.
             on_editor_generate_definition(editor)
     elif result == "Open Scope…":
         try:
@@ -434,7 +496,8 @@ def on_editor_generate_definition(editor) -> None:
     # Field mapping comes from the note's own type (multi-type 'targets'
     # when configured, legacy single-type otherwise). The Scope gate
     # decides membership; when it blocks, the quick-fix dialog explains
-    # the deck mismatch and can add the deck on the spot.
+    # the deck mismatch and can add the deck on the spot. Mapping-only
+    # failures (scope passes) get the mapping dialog instead.
     fields = resolve_fields_for_note(note, config)
     if fields is None:
         _offer_add_to_scope(note, editor)

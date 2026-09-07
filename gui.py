@@ -1070,6 +1070,11 @@ class ConfigDialog(QDialog):
             self._save_config_now()
         except Exception:
             pass
+        # Scope changed: knowledge must rebuild for scoring to follow.
+        try:
+            _reset_knowledge_caches()
+        except Exception:
+            pass
 
     def _on_select_decks(self) -> None:
         """Opens the polished Scope picker as a dedicated window."""
@@ -1088,6 +1093,11 @@ class ConfigDialog(QDialog):
                 self._save_config_now()
             except Exception:
                 pass
+            # Scope changed: knowledge must rebuild for scoring to follow.
+            try:
+                _reset_knowledge_caches()
+            except Exception:
+                pass
 
     def _on_clear_scope(self) -> None:
         """Empties the scope (fail-closed) and persists immediately."""
@@ -1101,6 +1111,11 @@ class ConfigDialog(QDialog):
         self._refresh_implied_types()
         try:
             self._save_config_now()
+        except Exception:
+            pass
+        # Scope changed: knowledge must rebuild for scoring to follow.
+        try:
+            _reset_knowledge_caches()
         except Exception:
             pass
 
@@ -2125,11 +2140,22 @@ def show_scope_dialog() -> None:
     )
     if dialog.exec():
         new_scope = dialog.selected_decks()
-        # Persist like ConfigDialog does
+         # Persist like ConfigDialog does
         try:
             updated = dict(cfg)
             updated[SCOPE_CONFIG_KEY] = list(new_scope)
             mw.addonManager.writeConfig(addon_name, updated)
+            # Scope changed: drop the generator's stale knowledge and
+            # rebuild the snapshot (same reset as the config dialog).
+            try:
+                from .core import reset_generator  # type: ignore
+                reset_generator()
+            except Exception:
+                try:
+                    from core import reset_generator  # type: ignore
+                    reset_generator()
+                except Exception:
+                    pass
             _reset_knowledge_caches()
             tooltip(f"CompreDef Scope: {len(new_scope)} deck(s) — {'none' if not new_scope else ', '.join(new_scope)}")
         except Exception:
