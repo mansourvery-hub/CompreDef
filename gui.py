@@ -2452,55 +2452,20 @@ class KnowledgeDialog(QDialog):
             return
 
         def task() -> dict:
-            # Runs on the background thread: gather every view's data in
-            # one pass. All DB access goes through mw.col.db (never an
-            # external sqlite connection).
+            # Runs on the background thread: ONE payload call, itself
+            # cached per snapshot generation (v1.2.6) — a warm dialog
+            # open performs ZERO database queries. All DB access goes
+            # through mw.col.db (never an external sqlite connection).
             try:
                 if __package__:
-                    from .anki import (knowledge_summary_text, knowledge_status,
-                                      knowledge_totals, sync_reset_caches,
-                                      get_kanji_points, get_vocab_points,
-                                      _seen_points)
+                    from .anki import get_knowledge_dialog_payload
                 else:
-                    from anki import (knowledge_summary_text,  # type: ignore
-                                      knowledge_status, knowledge_totals,
-                                      sync_reset_caches, get_kanji_points,
-                                      get_vocab_points, _seen_points)
+                    from anki import get_knowledge_dialog_payload  # type: ignore
+                return get_knowledge_dialog_payload(
+                    force_rebuild=force_rebuild)
             except Exception:
                 import traceback
                 return {"error": traceback.format_exc()}
-            # Only the Refresh button forces a fresh scan. The SYNCHRONOUS
-            # variant is used because this task runs on a background
-            # thread, and mw.taskman must never be called from there
-            # (Anki's Taskman flags it — the v1.2.1 dialog bug).
-            if force_rebuild:
-                sync_reset_caches()
-            try:
-                if __package__:
-                    from .anki import _fetch_learned_note_rows
-                else:
-                    from anki import _fetch_learned_note_rows  # type: ignore
-                # Mature rows mirror the snapshot's universe; when the
-                # snapshot is cached (no rebuild), re-derive rows with
-                # the same mature-only query the snapshot itself uses.
-                mature_rows = _fetch_learned_note_rows()
-            except Exception:
-                mature_rows = []
-            # SEEN points (any interval > 0) for the secondary readouts.
-            try:
-                seen_kanji_pts, seen_vocab_pts = _seen_points()
-            except Exception:
-                seen_kanji_pts, seen_vocab_pts = {}, {}
-            return {
-                "summary": knowledge_summary_text(),
-                "status": knowledge_status(),
-                "totals": knowledge_totals(),
-                "kanji_points": get_kanji_points(),
-                "vocab_points": get_vocab_points(),
-                "seen_kanji_points": seen_kanji_pts,
-                "seen_vocab_points": seen_vocab_pts,
-                "mature_rows": mature_rows,
-            }
 
         def on_done(future) -> None:
             try:
@@ -2775,8 +2740,42 @@ def _open_browser_for_term(tab: Any, row: int) -> None:
               f"{traceback.format_exc()}")
 
 
+# Singleton handle for the non-modal knowledge dialog (v1.2.6): the
+# old modal exec() LOCKED Anki's Browser while the dialog was open —
+# after double-clicking a kanji, the user could not use the Browser
+# until closing the knowledge window. A non-modal singleton fixes both
+# that and duplicate windows.
+_knowledge_dialog_instance: Optional[KnowledgeDialog] = None
+
+
 def show_knowledge_dialog() -> None:
-    """Displays the learner-knowledge debug view (tabbed, clickable)."""
-    dialog = KnowledgeDialog(
-        parent=mw.app.activeWindow() if mw and mw.app else None)
-    dialog.exec()
+    """Displays the learner-knowledge debug view — non-modal, singleton.
+
+    Non-modal (show(), not exec()): the dialog never blocks Anki's
+    Browser, so the double-click provenance flow works while both
+    windows are open. Singleton: re-opening focuses the existing dialog
+    (and refreshes its data) instead of stacking copies.
+    """
+    global _knowledge_dialog_instance
+    try:
+        if _knowledge_dialog_instance is not None:
+            try:
+                # Qt object still alive? (sip.isdeleted-style check via
+                # a safe attribute touch)
+                _knowledge_dialog_instance.isVisible()
+            except RuntimeError:
+                # C++ object deleted — rebuild below.
+                _knowledge_dialog_instance = None
+        if _knowledge_dialog_instance is None:
+            _knowledge_dialog_instance = KnowledgeDialog(
+                parent=mw.app.activeWindow() if mw and mw.app else None)
+        else:
+            # Re-focus + fresh data (cached payload: near-instant).
+            _knowledge_dialog_instance._refresh_async()
+        _knowledge_dialog_instance.show()
+        _knowledge_dialog_instance.raise_()
+        _knowledge_dialog_instance.activateWindow()
+    except Exception:
+        import traceback
+        print(f"CompreDef: knowledge dialog failed to open:\n"
+              f"{traceback.format_exc()}")

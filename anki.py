@@ -37,6 +37,11 @@ _vocab_points_cache: Dict[str, float] = {}
 # change only when the user edits note types or the Scope — never per
 # dialog open). None = not yet resolved.
 _scope_first_fields_cache: Optional[List[str]] = None
+# v1.2.6 snapshot GENERATION: bumped by every real _build_caches run.
+# The knowledge-dialog payload is cached against this number, so a
+# cached dialog open performs ZERO database queries; only a genuine
+# rebuild (Refresh button, scope change) invalidates the payload.
+_snapshot_generation = 0
 _caches_ready = threading.Event()
 _build_lock = threading.Lock()
 _db_warned = False
@@ -255,6 +260,10 @@ def _build_caches() -> None:
         # 'cache aggressively, rebuild rarely' mandate).
         global _scope_first_fields_cache
         _scope_first_fields_cache = _resolve_scope_first_fields()
+        # v1.2.6: a new snapshot is a new generation — invalidates the
+        # cached dialog payload.
+        global _snapshot_generation
+        _snapshot_generation += 1
         _caches_ready.set()
         print(f"CompreDef: learner snapshot built: "
               f"{len(kanji_points)} mastered kanji / "
@@ -704,3 +713,75 @@ def build_provenance_search(kind: str, term: str,
         # across the AND.
         return f"({field_part}) and {deck_part}"
     return field_part
+
+
+# ---------------------------------------------------------------------------
+# Knowledge-dialog payload cache (v1.2.6)
+#
+
+def snapshot_generation() -> int:
+    """The current snapshot's generation number (0 until first build).
+
+    Bumped by every real _build_caches run; consumers cache their
+    aggregated data against this number.
+    """
+    return _snapshot_generation
+
+
+_dialog_payload_cache: Optional[dict] = None
+_dialog_payload_cache_gen: int = -1
+_dialog_payload_lock = threading.Lock()
+
+
+def get_knowledge_dialog_payload(force_rebuild: bool = False) -> dict:
+    """
+    Everything the knowledge dialog renders, in ONE call — cached.
+
+    The v1.2.5 dialog still re-ran _fetch_learned_note_rows(),
+    _seen_points() and knowledge_totals() on EVERY open ("loading
+    takes as much time as generating" — each is a full mature-notes
+    scan). Now the whole payload dict is built once per snapshot
+    GENERATION: a cached dialog open performs ZERO database queries,
+    and only a genuine rebuild (Refresh button, scope change, profile
+    reopen) bumps the generation and invalidates it.
+
+    force_rebuild=True forces a synchronous snapshot rebuild first
+    (the Refresh button path; safe on background threads — it uses
+    sync reset, never mw.taskman).
+    Returns the payload dict the GUI's _populate expects.
+    """
+    global _dialog_payload_cache, _dialog_payload_cache_gen
+    with _dialog_payload_lock:
+        if force_rebuild:
+            sync_reset_caches()
+        # Ensure the snapshot exists (first ever open) — same lazy
+        # contract as the getters; a no-op when already ready.
+        if not _caches_ready.is_set():
+            _build_caches()
+        gen = _snapshot_generation
+        if (_dialog_payload_cache is not None
+                and _dialog_payload_cache_gen == gen):
+            return _dialog_payload_cache
+
+        mature_rows: List[Tuple[str, float]] = []
+        try:
+            mature_rows = _fetch_learned_note_rows()
+        except Exception:
+            mature_rows = []
+        try:
+            seen_kanji_pts, seen_vocab_pts = _seen_points()
+        except Exception:
+            seen_kanji_pts, seen_vocab_pts = {}, {}
+        payload = {
+            "summary": knowledge_summary_text(),
+            "status": knowledge_status(),
+            "totals": knowledge_totals(),
+            "kanji_points": dict(get_kanji_points()),
+            "vocab_points": dict(get_vocab_points()),
+            "seen_kanji_points": seen_kanji_pts,
+            "seen_vocab_points": seen_vocab_pts,
+            "mature_rows": mature_rows,
+        }
+        _dialog_payload_cache = payload
+        _dialog_payload_cache_gen = gen
+        return payload

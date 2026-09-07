@@ -2948,6 +2948,131 @@ def test_provenance_search_builders() -> None:
         _restore_collection_state(scope_state)
 
 
+def test_dialog_payload_cached_per_generation() -> None:
+    """
+    The v1.2.5 'loading as slow as generating' bug: even in cached
+    mode the dialog task re-ran _fetch_learned_note_rows(),
+    _seen_points() and knowledge_totals() on EVERY open — each a full
+    mature-notes scan. v1.2.6 caches the whole payload per snapshot
+    GENERATION: a warm open must do ZERO DB queries, and only a real
+    rebuild (force) bumps the generation and refreshes the payload.
+    """
+    import anki
+
+    prev_kanji = set(anki._known_kanji_cache)
+    prev_vocab = set(anki._known_vocab_cache)
+    prev_ready = anki._caches_ready.is_set()
+    prev_gen = anki._snapshot_generation
+    prev_payload = anki._dialog_payload_cache
+    prev_payload_gen = anki._dialog_payload_cache_gen
+    import core as _core
+    prev_generator = _core._generator
+    scope_state = _save_collection_state()
+    query_log = []
+    prev_all = aqt.mw.col.db.all
+    prev_scalar = aqt.mw.col.db.scalar
+
+    def logging_all(q, p=()):
+        query_log.append(q)
+        return prev_all(q, p)
+
+    def logging_scalar(q, p=()):
+        query_log.append(q)
+        return prev_scalar(q, p)
+
+    try:
+        SEP = "\x1f"
+        col = aqt.mw.col
+        jp = col.decks.add("Japanese")
+        col.db.notes = {
+            1: {"flds": SEP.join(["漢字", "def"]), "dids": [jp], "mid": 1,
+                "ivl": 400},
+        }
+        _set_scope_config(["Japanese"])
+        # Start from a clean slate: earlier tests may have left the
+        # snapshot READY under their own scope, which would make the
+        # first payload call a no-op (no gen bump).
+        anki._caches_ready.clear()
+        anki._dialog_payload_cache = None
+        anki._dialog_payload_cache_gen = -1
+
+        # First payload call: builds the snapshot (generation 1) and
+        # gathers the payload — DB queries expected.
+        aqt.mw.col.db.all = logging_all
+        aqt.mw.col.db.scalar = logging_scalar
+        try:
+            payload1 = anki.get_knowledge_dialog_payload()
+        finally:
+            aqt.mw.col.db.all = prev_all
+            aqt.mw.col.db.scalar = prev_scalar
+        gen1 = anki.snapshot_generation()
+        check("payload: first call builds snapshot (gen bump)",
+              gen1 == prev_gen + 1 and payload1["status"]["ready"],
+              f"gen1={gen1} prev={prev_gen}")
+
+        # Warm call: same generation, ZERO DB queries (pure cache hit).
+        query_log.clear()
+        aqt.mw.col.db.all = logging_all
+        aqt.mw.col.db.scalar = logging_scalar
+        try:
+            payload2 = anki.get_knowledge_dialog_payload()
+            warm_queries = len(query_log)
+        finally:
+            aqt.mw.col.db.all = prev_all
+            aqt.mw.col.db.scalar = prev_scalar
+        check("payload: warm open performs ZERO DB queries",
+              warm_queries == 0,
+              f"queries run: {query_log[-3:]}")
+        check("payload: warm call returns the SAME cached dict",
+              payload2 is payload1)
+
+        # force_rebuild: new generation, payload refreshed.
+        col.db.notes[2] = {"flds": SEP.join(["語彙", "d"]), "dids": [jp],
+                           "mid": 1, "ivl": 400}
+        query_log.clear()
+        aqt.mw.col.db.all = logging_all
+        aqt.mw.col.db.scalar = logging_scalar
+        try:
+            payload3 = anki.get_knowledge_dialog_payload(
+                force_rebuild=True)
+        finally:
+            aqt.mw.col.db.all = prev_all
+            aqt.mw.col.db.scalar = prev_scalar
+        gen3 = anki.snapshot_generation()
+        check("payload: force rebuild bumps the generation",
+              gen3 == gen1 + 1, f"gen1={gen1} gen3={gen3}")
+        check("payload: force rebuild refreshes the data",
+              payload3 is not payload1 and
+              len(payload3["kanji_points"]) == 4,
+              f"kanji={sorted(payload3['kanji_points'])}")
+        # And the next warm call is again query-free.
+        query_log.clear()
+        aqt.mw.col.db.all = logging_all
+        aqt.mw.col.db.scalar = logging_scalar
+        try:
+            anki.get_knowledge_dialog_payload()
+            warm2 = len(query_log)
+        finally:
+            aqt.mw.col.db.all = prev_all
+            aqt.mw.col.db.scalar = prev_scalar
+        check("payload: warm open after rebuild is again query-free",
+              warm2 == 0, f"queries run: {query_log[-3:]}")
+    finally:
+        aqt.mw.col.db.all = prev_all
+        aqt.mw.col.db.scalar = prev_scalar
+        _restore_collection_state(scope_state)
+        anki._known_kanji_cache = prev_kanji
+        anki._known_vocab_cache = prev_vocab
+        anki._snapshot_generation = prev_gen
+        anki._dialog_payload_cache = prev_payload
+        anki._dialog_payload_cache_gen = prev_payload_gen
+        if prev_ready:
+            anki._caches_ready.set()
+        else:
+            anki._caches_ready.clear()
+        _core._generator = prev_generator
+
+
 def test_knowledge_survives_new_schema(tmp_root: str) -> None:
     """
     The v1.0.5 production bug: the knowledge query referenced the legacy
@@ -3411,6 +3536,7 @@ def main() -> int:
         test_sync_reset_is_thread_safe()
         test_knowledge_summary_text()
         test_provenance_search_builders()
+        test_dialog_payload_cached_per_generation()
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()
         test_qt_enum_compat()
