@@ -2317,9 +2317,9 @@ class KnowledgeDialog(QDialog):
         self.kanji_tab = self._make_list_tab(
             "Every SEEN kanji (on a note with interval > 0) with its "
             "mastery weight — 1.00 = MASTERED (note interval >= 1 year), "
-            "lower = still maturing. Click a row to open Anki's Browser "
-            "with every note whose first field contains that kanji. "
-            "Click the column headers to sort.",
+            "lower = still maturing. Double-click a row to open Anki's "
+            "Browser with every note in your Scope whose first field "
+            "contains that kanji. Click the column headers to sort.",
             columns=("Kanji", "Mastery"), kind="kanji")
         self.tabs.addTab(self.kanji_tab, "Kanji")
 
@@ -2330,9 +2330,9 @@ class KnowledgeDialog(QDialog):
             "compound words (2+ kanji, no kana); kana-only words and "
             "single kanji are excluded by design (kana words are "
             "inflection-hostile, single kanji are covered by the kanji "
-            "tab). Click a row to open Anki's Browser with every note "
-            "whose first field is exactly that word. Click the column "
-            "headers to sort.",
+            "tab). Double-click a row to open Anki's Browser with every "
+            "note in your Scope whose first field is exactly that word. "
+            "Click the column headers to sort.",
             columns=("Vocab", "Mastery"), kind="vocab")
         self.tabs.addTab(self.words_tab, "Vocab")
 
@@ -2354,7 +2354,10 @@ class KnowledgeDialog(QDialog):
         refresh_btn.setToolTip(
             "Rebuild the snapshot now (picks up new mature cards without "
             "restarting Anki).")
-        refresh_btn.clicked.connect(self._refresh_async)
+        # force_rebuild=True: opening the dialog reuses the cached
+        # snapshot; ONLY this button rebuilds it.
+        refresh_btn.clicked.connect(
+            lambda _checked=False: self._refresh_async(force_rebuild=True))
         bar.addWidget(refresh_btn)
         layout.addLayout(bar)
 
@@ -2418,32 +2421,46 @@ class KnowledgeDialog(QDialog):
         filter_edit.textChanged.connect(
             lambda text, t=tab: _knowledge_apply_filter(t))
         if kind:
-            # Single click (the user's choice — no selection step
-            # needed) opens the Browser with the provenance search.
-            table.cellClicked.connect(
+            # DOUBLE-click opens the Browser with the provenance search
+            # (single click was too trigger-happy while scanning rows;
+            # v1.2.5 user request).
+            table.cellDoubleClicked.connect(
                 lambda row, _col, t=tab: _open_browser_for_term(t, row))
         return tab
 
     # -- Data loading ----------------------------------------------------
 
-    def _refresh_async(self) -> None:
-        """Rebuilds the snapshot off-thread, then populates the tabs."""
-        self.status_label.setText("Rebuilding knowledge snapshot...")
+    def _refresh_async(self, force_rebuild: bool = False) -> None:
+        """Gathers the dialog's data off-thread, then populates the tabs.
+
+        force_rebuild=False (dialog OPEN — the default): the knowledge
+        snapshot is REUSED from cache; only the read-only per-view data
+        (seen points, totals, mature rows) is queried. The snapshot is
+        expensive (a full scope scan) and changes only when cards
+        mature, so opening the dialog must never rebuild it (v1.2.5
+        'cache aggressively, rebuild rarely' mandate).
+
+        force_rebuild=True (the Refresh button): sync_reset_caches()
+        first so brand-new mature cards are picked up.
+        """
+        self.status_label.setText(
+            "Rebuilding knowledge snapshot..." if force_rebuild
+            else "Loading knowledge snapshot...")
         if not mw or not hasattr(mw, "taskman"):
             # Headless/test: no taskman — populate synchronously.
             self._populate({})
             return
 
         def task() -> dict:
-            # Runs on the background thread: rebuild caches if needed and
-            # gather every view's data in one pass. All DB access goes
-            # through mw.col.db (never an external sqlite connection).
+            # Runs on the background thread: gather every view's data in
+            # one pass. All DB access goes through mw.col.db (never an
+            # external sqlite connection).
             try:
                 if __package__:
                     from .anki import (knowledge_summary_text, knowledge_status,
-                                       knowledge_totals, sync_reset_caches,
-                                       get_kanji_points, get_vocab_points,
-                                       _seen_points)
+                                      knowledge_totals, sync_reset_caches,
+                                      get_kanji_points, get_vocab_points,
+                                      _seen_points)
                 else:
                     from anki import (knowledge_summary_text,  # type: ignore
                                       knowledge_status, knowledge_totals,
@@ -2452,16 +2469,20 @@ class KnowledgeDialog(QDialog):
             except Exception:
                 import traceback
                 return {"error": traceback.format_exc()}
-            # Fresh scan (Refresh button must see brand-new mature cards).
-            # SYNCHRONOUS variant: this task itself runs on a background
+            # Only the Refresh button forces a fresh scan. The SYNCHRONOUS
+            # variant is used because this task runs on a background
             # thread, and mw.taskman must never be called from there
             # (Anki's Taskman flags it — the v1.2.1 dialog bug).
-            sync_reset_caches()
+            if force_rebuild:
+                sync_reset_caches()
             try:
                 if __package__:
                     from .anki import _fetch_learned_note_rows
                 else:
                     from anki import _fetch_learned_note_rows  # type: ignore
+                # Mature rows mirror the snapshot's universe; when the
+                # snapshot is cached (no rebuild), re-derive rows with
+                # the same mature-only query the snapshot itself uses.
                 mature_rows = _fetch_learned_note_rows()
             except Exception:
                 mature_rows = []
@@ -2622,6 +2643,10 @@ class KnowledgeDialog(QDialog):
         val_label.setToolTip(f"{desc}\nClick to open the {target_tab} tab.")
         val_label.setStyleSheet("font-size: 16px; font-weight: bold;")
         val_label.setFlat(True)
+        # v1.2.5: the big number buttons were vertically crushed inside
+        # the grid — give them real breathing room (the same fix as
+        # _size_button, tuned taller for the 16px font).
+        val_label.setMinimumHeight(40)
         # Clicking the big number jumps to the matching detail tab.
         val_label.clicked.connect(
             lambda _, name=target_tab: self._goto_tab(name))
@@ -2708,7 +2733,9 @@ def _open_browser_for_term(tab: Any, row: int) -> None:
     Kanji rows search first-field CONTAINS (how kanji points are
     admitted); Vocab rows search first-field EXACT (how vocab points
     are admitted) — the search syntax comes from the official Anki
-    manual. Never raises: a browse failure only prints.
+    manual, and every search is LIMITED to the Scope decks (matches
+    outside the Scope never contributed mastery points).
+    Never raises: a browse failure only prints.
     """
     try:
         table = getattr(tab, "_table", None)
@@ -2721,12 +2748,15 @@ def _open_browser_for_term(tab: Any, row: int) -> None:
         term = item.text()
         if not term:
             return
+        # Same context-aware import as every other knowledge helper.
         if __package__:
-            from .anki import build_provenance_search
+            from .anki import build_provenance_search, _get_scope_deck_names
         else:
-            from anki import build_provenance_search  # type: ignore
+            from anki import (build_provenance_search,  # type: ignore
+                              _get_scope_deck_names)
         search = build_provenance_search(
-            kind, term, getattr(tab, "_first_fields", None))
+            kind, term, getattr(tab, "_first_fields", None),
+            scope_decks=_get_scope_deck_names())
         if not search:
             return
         # dialogs.open returns the existing Browser or creates one —

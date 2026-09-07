@@ -33,6 +33,10 @@ _known_kanji_cache: Set[str] = set()
 _known_vocab_cache: Set[str] = set()
 _kanji_points_cache: Dict[str, float] = {}
 _vocab_points_cache: Dict[str, float] = {}
+# Scope note-type first-field names, resolved once per snapshot (they
+# change only when the user edits note types or the Scope — never per
+# dialog open). None = not yet resolved.
+_scope_first_fields_cache: Optional[List[str]] = None
 _caches_ready = threading.Event()
 _build_lock = threading.Lock()
 _db_warned = False
@@ -246,6 +250,11 @@ def _build_caches() -> None:
         _known_kanji_cache = set(kanji_points.keys())
         _known_vocab_cache = set(vocab_points.keys())
         _last_words_kept = len(vocab_points)
+        # v1.2.5: scope first-field names are part of the snapshot —
+        # resolved here ONCE instead of on every dialog open (the
+        # 'cache aggressively, rebuild rarely' mandate).
+        global _scope_first_fields_cache
+        _scope_first_fields_cache = _resolve_scope_first_fields()
         _caches_ready.set()
         print(f"CompreDef: learner snapshot built: "
               f"{len(kanji_points)} mastered kanji / "
@@ -308,10 +317,12 @@ def reset_caches() -> None:
     Background threads must call sync_reset_caches() instead.
     """
     global _last_rows_scanned, _last_words_kept, _last_error, _last_scope_label
+    global _scope_first_fields_cache
     _last_rows_scanned = 0
     _last_words_kept = 0
     _last_error = None
     _last_scope_label = ""
+    _scope_first_fields_cache = None
     _caches_ready.clear()
     init_caches_async()
 
@@ -327,10 +338,12 @@ def sync_reset_caches() -> None:
     touches Anki's DB wrapper, so it is safe to run on any thread.
     """
     global _last_rows_scanned, _last_words_kept, _last_error, _last_scope_label
+    global _scope_first_fields_cache
     _last_rows_scanned = 0
     _last_words_kept = 0
     _last_error = None
     _last_scope_label = ""
+    _scope_first_fields_cache = None
     _caches_ready.clear()
     # Lazy-build contract: getters see not-ready → _build_caches() runs
     # inline on THIS thread. A closed collection stays not-ready (the
@@ -531,10 +544,10 @@ def knowledge_summary_text(max_kanji: int = 2000,
 # - "re:^value$"    → regex whole-field exact match, any field.
 # Quoting a term ("...") keeps special characters literal.
 
-def first_field_names_for_scope() -> List[str]:
+def _resolve_scope_first_fields() -> List[str]:
     """
-    Returns the distinct FIRST-FIELD names of every note type that owns
-    cards in the user's Scope decks.
+    Uncached worker: the distinct FIRST-FIELD names of every note type
+    that owns cards in the user's Scope decks.
 
     Why first fields only: the knowledge snapshot counts kanji/vocab
     ONLY from first fields, so provenance searches must target the same
@@ -580,14 +593,53 @@ def first_field_names_for_scope() -> List[str]:
         return []
 
 
+def first_field_names_for_scope() -> List[str]:
+    """
+    CACHED first-field names for the Scope's note types (v1.2.5).
+
+    The names are resolved once per snapshot inside _build_caches —
+    they only change when the user edits note types or the Scope —
+    and every subsequent call (each dialog open, each row click)
+    reuses that list. Falls back to a lazy resolution only when the
+    snapshot is not ready yet.
+    """
+    global _scope_first_fields_cache
+    if _caches_ready.is_set() and _scope_first_fields_cache is not None:
+        return list(_scope_first_fields_cache)
+    # Snapshot not built yet: resolve now (and remember for next time
+    # until a real build replaces it).
+    _scope_first_fields_cache = _resolve_scope_first_fields()
+    return list(_scope_first_fields_cache)
+
+
 # Safety cap on the OR-list length: pathological collections can have
 # dozens of note types in scope; the search bar stays readable and the
 # query fast with at most this many field terms.
 _MAX_PROVENANCE_FIELDS = 8
 
 
+def _deck_search_terms() -> List[str]:
+    """
+    The Scope's deck names as quoted 'deck:"Name"' search terms.
+
+    Per the manual, 'deck:french' matches the French deck AND its
+    subdecks — exactly the Scope's expansion rule — so one deck term
+    per selected deck reproduces the snapshot's universe. Names are
+    double-quoted: deck names contain spaces ("deck:french words")
+    and '::' separators that must stay literal.
+    Never raises; [] when the scope is unreadable (the caller then
+    searches without a deck restriction — same as before v1.2.5).
+    """
+    try:
+        names = _get_scope_deck_names()
+        return [f'"deck:{n}"' for n in names if n] or []
+    except Exception:
+        return []
+
+
 def build_provenance_search(kind: str, term: str,
-                            first_fields: Optional[List[str]] = None) -> str:
+                            first_fields: Optional[List[str]] = None,
+                            scope_decks: Optional[List[str]] = None) -> str:
     """
     Builds the Browser search string for a kanji/vocab row's provenance.
 
@@ -599,13 +651,21 @@ def build_provenance_search(kind: str, term: str,
     are admitted (the first field contains the kanji anywhere), so
     "Expression:*学*" lists every contributing note.
 
+    v1.2.5 SCOPE LIMIT: every field term is AND-ed with the Scope's
+    deck terms ('deck:"My Life Decks"') — provenance must show only
+    notes inside the Scope decks (the snapshot's universe), never
+    collection-wide matches from unrelated decks. scope_decks may be
+    passed explicitly (tests); otherwise the user's Scope config is
+    read.
+
     Quoting rules per the manual: terms with special characters (the
     '*' wrapper) are double-quoted; plain exact matches are quoted too
     so colons/colons-in-field-names stay literal.
 
     Fallbacks when first_fields is empty/unresolvable: 're:^term$'
     (vocab, whole-field exact on any field) or the bare quoted term
-    (kanji, substring — same as Anki's basic search).
+    (kanji, substring — same as Anki's basic search). Both keep the
+    deck restriction.
     """
     if not term:
         return ""
@@ -616,16 +676,31 @@ def build_provenance_search(kind: str, term: str,
         name = str(f).strip()
         if name and name not in clean:
             clean.append(name)
+    deck_terms: List[str] = []
+    if scope_decks is None:
+        deck_terms = _deck_search_terms()
+    else:
+        deck_terms = [f'"deck:{n}"' for n in scope_decks if str(n).strip()]
+    # One shared deck restriction: deck:"A" or deck:"B" (a note can sit
+    # in any ONE scoped deck), wrapped so it ANDs with the field match.
+    deck_part = ""
+    if deck_terms:
+        deck_part = "(" + " or ".join(deck_terms) + ")"
     if not clean:
+        field_part = (f'"re:^{term}$"' if kind != "kanji" else f'"{term}"')
+    else:
+        terms = []
         if kind == "kanji":
-            return f'"{term}"'
-        return f'"re:^{term}$"'
-    terms = []
-    if kind == "kanji":
-        # Contains: field:*term* (quoted — '*' is special unquoted).
-        for f in clean[:_MAX_PROVENANCE_FIELDS]:
-            terms.append(f'"{f}:*{term}*"')
-    else:  # vocab: exact field match, no wildcards.
-        for f in clean[:_MAX_PROVENANCE_FIELDS]:
-            terms.append(f'"{f}:{term}"')
-    return " or ".join(terms)
+            # Contains: field:*term* (quoted — '*' is special unquoted).
+            for f in clean[:_MAX_PROVENANCE_FIELDS]:
+                terms.append(f'"{f}:*{term}*"')
+        else:  # vocab: exact field match, no wildcards.
+            for f in clean[:_MAX_PROVENANCE_FIELDS]:
+                terms.append(f'"{f}:{term}"')
+        field_part = " or ".join(terms)
+    if deck_part:
+        # AND binds the field matches to the deck restriction; the
+        # field group is parenthesized so its inner ORs cannot leak
+        # across the AND.
+        return f"({field_part}) and {deck_part}"
+    return field_part

@@ -2831,45 +2831,72 @@ def test_provenance_search_builders() -> None:
     - terms are double-quoted (special characters stay literal),
       multiple fields OR-join, list capped at 8 fields.
     - fallbacks: 're:^term$' (vocab) / bare quoted term (kanji).
+
+    v1.2.5: every search is AND-ed with the Scope's deck terms
+    ('deck:"Name" or deck:"Other"') — provenance lists ONLY notes
+    inside the Scope decks, the same universe the snapshot counts
+    from. Blank-scope searches keep the old un-restricted shape.
     """
     import anki
 
     scope_state = _save_collection_state()
     try:
         # ---- Pure builder: shapes, quoting, caps, fallbacks -----------
-        # Vocab = first-field EXACT, quoted, OR-joined.
+        # Explicit scope: field matches AND deck restriction.
+        SCOPE = ["My Life Decks", "日本語::Mining"]
         q = anki.build_provenance_search("vocab", "学校",
-                                         ["Expression", "Word"])
-        check("prov: vocab search is exact field matches",
-              q == '"Expression:学校" or "Word:学校"', f"got {q}")
-        # Kanji = first-field CONTAINS (*term*), quoted.
+                                         ["Expression", "Word"],
+                                         scope_decks=SCOPE)
+        check("prov: vocab search is exact fields AND scope decks",
+              q == '("Expression:学校" or "Word:学校") and '
+                   '("deck:My Life Decks" or "deck:日本語::Mining")',
+              f"got {q}")
         qk = anki.build_provenance_search("kanji", "学",
-                                          ["Expression"])
-        check("prov: kanji search is contains field matches",
-              qk == '"Expression:*学*"', f"got {qk}")
+                                          ["Expression"], scope_decks=SCOPE)
+        check("prov: kanji search is contains fields AND scope decks",
+              qk == '("Expression:*学*") and '
+                    '("deck:My Life Decks" or "deck:日本語::Mining")',
+              f"got {qk}")
         # Dedup + 8-field cap (9 fields -> 8 terms).
         many = [f"F{i}" for i in range(9)]
-        qm = anki.build_provenance_search("vocab", "学校", many)
+        qm = anki.build_provenance_search("vocab", "学校", many,
+                                          scope_decks=SCOPE)
         check("prov: field list capped at 8 terms",
-              qm.count(" or ") == 7 and '"F8:学校"' not in qm, f"got {qm}")
+              qm.count("F") == 8 and '"F8:学校"' not in qm, f"got {qm}")
         # Dedup keeps first occurrence order.
         qd = anki.build_provenance_search("vocab", "学校",
-                                          ["Expression", "Expression"])
+                                          ["Expression", "Expression"],
+                                          scope_decks=SCOPE)
         check("prov: duplicate field names deduped",
-              qd == '"Expression:学校"', f"got {qd}")
-        # Fallbacks when no fields resolve.
-        check("prov: vocab fallback is regex whole-field exact",
-              anki.build_provenance_search("vocab", "学校", []) ==
-              '"re:^学校$"', "fallback shape changed")
-        check("prov: kanji fallback is plain quoted term",
-              anki.build_provenance_search("kanji", "学", None) == '"学"',
+              qd == '("Expression:学校") and '
+                    '("deck:My Life Decks" or "deck:日本語::Mining")',
+              f"got {qd}")
+        # Fallbacks when no fields resolve — STILL scope-limited.
+        check("prov: vocab fallback is regex exact AND scope",
+              anki.build_provenance_search("vocab", "学校", [],
+                                           scope_decks=SCOPE) ==
+              '("re:^学校$") and ("deck:My Life Decks" or '
+              '"deck:日本語::Mining")',
+              "fallback shape changed")
+        check("prov: kanji fallback is plain term AND scope",
+              anki.build_provenance_search("kanji", "学", None,
+                                          scope_decks=SCOPE) ==
+              '("学") and ("deck:My Life Decks" or "deck:日本語::Mining")',
               "fallback shape changed")
         check("prov: empty term yields empty search",
-              anki.build_provenance_search("kanji", "", ["F"]) == "")
+              anki.build_provenance_search("kanji", "", ["F"],
+                                           scope_decks=SCOPE) == "")
         # Whitespace-only field names are dropped, not searched.
         check("prov: blank field names ignored",
-              anki.build_provenance_search("vocab", "学校", [" ", ""]) ==
-              '"re:^学校$"')
+              anki.build_provenance_search("vocab", "学校", [" ", ""],
+                                           scope_decks=SCOPE).startswith(
+                  '("re:^学校$")'))
+        # Blank scope list => no deck restriction (bare legacy shape,
+        # no parentheses — a lone term needs no grouping).
+        q_no = anki.build_provenance_search("vocab", "学校",
+                                            ["Expression"], scope_decks=[])
+        check("prov: blank scope searches without deck terms",
+              q_no == '"Expression:学校"', f"got {q_no}")
 
         # ---- Live resolution against the fake collection ---------------
         # Two note types in scope: their FIRST fields are what the
@@ -2883,19 +2910,31 @@ def test_provenance_search_builders() -> None:
             2: {"flds": "語彙", "dids": [jp], "mid": mid_b, "ivl": 400},
         }
         _set_scope_config(["Japanese"])
+        # Cached-fields contract (v1.2.5): the builder reuses the
+        # snapshot's cached list; a fresh build refreshes it.
+        anki.reset_caches()
+        anki._build_caches()
         fields = anki.first_field_names_for_scope()
         check("prov: scope first-field names resolve",
               sorted(fields) == ["Expression", "Word"], f"got {fields}")
-        qv = anki.build_provenance_search("vocab", "学校", fields)
+        # Reading the config scope (what the dialog passes) produces
+        # the same deck restriction.
+        qv = anki.build_provenance_search("vocab", "学校", fields,
+                                          scope_decks=["Japanese"])
         check("prov: live vocab search covers both first fields",
-              qv == '"Expression:学校" or "Word:学校"', f"got {qv}")
+              qv == '("Expression:学校" or "Word:学校") and ("deck:Japanese")',
+              f"got {qv}")
 
         # Empty scope is fail-closed (no fields -> fallback shape).
         _set_scope_config([])
+        anki.reset_caches()
+        anki._build_caches()
         check("prov: empty scope yields no field names",
               anki.first_field_names_for_scope() == [])
         # Out-of-scope types never contribute their fields.
         _set_scope_config(["Japanese"])
+        anki.reset_caches()
+        anki._build_caches()
         fr = col.decks.add("French")
         mid_c = col.models.add_model("French Type", ["Front", "Back"])
         col.db.notes[3] = {"flds": "bonjour", "dids": [fr], "mid": mid_c,
