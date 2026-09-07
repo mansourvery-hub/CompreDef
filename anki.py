@@ -22,6 +22,11 @@ _FIELD_SEP = '\x1f'
 # is full mastery, anything less counts proportionally.
 _FULL_MASTERY_IVL_DAYS = 365.0
 
+# v1.2.3: a note/card counts as MATURE only once its interval reaches a
+# FULL YEAR (user decision; the legacy 21-day threshold is deprecated).
+# Single source of truth for the SQL query and every user-facing label.
+_MATURE_IVL_DAYS = 365
+
 _known_kanji_cache: Set[str] = set()
 _known_vocab_cache: Set[str] = set()
 _kanji_points_cache: Dict[str, float] = {}
@@ -101,10 +106,19 @@ def _first_field_text(flds_blob: str) -> str:
     return flds_blob.split(_FIELD_SEP, 1)[0].strip()
 
 
-def _fetch_learned_note_rows() -> List[Tuple[str, float]]:
+def _fetch_learned_note_rows(mature_only: bool = True) -> List[Tuple[str, float]]:
     """
     Returns [(first_field_text, max_card_interval_days)] for every note
-    inside the Scope that owns at least one mature card (ivl >= 21).
+    inside the Scope.
+
+    mature_only=True (default — the knowledge snapshot's admission rule):
+    only notes owning a card with interval >= 365 days (a full year;
+    the legacy 21-day threshold is deprecated). These are the MATURE
+    notes: their kanji/vocab earn mastery points.
+
+    mature_only=False: every in-scope note with a strictly positive
+    interval — used by the knowledge dialog to also show the SEEN
+    kanji/vocab (ivl > 0, any age) alongside the mastered ones.
 
     Only cards in the user's selected Scope decks (subdecks included)
     count — a French deck must never inflate Japanese kanji knowledge.
@@ -149,15 +163,18 @@ def _fetch_learned_note_rows() -> List[Tuple[str, float]]:
             _last_rows_scanned = 0
             return []
 
+        # ivl >= 1 = "seen" (strictly positive interval); >= 365 = mature.
+        ivl_floor = _MATURE_IVL_DAYS if mature_only else 1
         did_list = ",".join(str(int(d)) for d in sorted(dids))
         rows = mw.col.db.all(
             "SELECT notes.flds, MAX(cards.ivl) FROM notes "
             "JOIN cards ON cards.nid = notes.id "
-            "WHERE cards.ivl >= 21 "
+            f"WHERE cards.ivl >= {ivl_floor} "
             f"AND cards.did IN ({did_list}) "
             "GROUP BY notes.id"
         ) or []
-        _last_rows_scanned = len(rows)
+        if mature_only:
+            _last_rows_scanned = len(rows)
 
         out: List[Tuple[str, float]] = []
         for row in rows:
@@ -229,9 +246,11 @@ def _build_caches() -> None:
         _last_words_kept = len(vocab_points)
         _caches_ready.set()
         print(f"CompreDef: learner snapshot built: "
-              f"{len(kanji_points)} kanji / {len(vocab_points)} kanji-words "
+              f"{len(kanji_points)} mastered kanji / "
+              f"{len(vocab_points)} mastered vocab (kanji-only compounds) "
               f"from {_last_rows_scanned} mature notes "
-              f"(ivl-weighted, mature = ivl >= 21, scope "
+              f"(mastery = interval / {_FULL_MASTERY_IVL_DAYS:.0f}, "
+              f"mature = ivl >= {_MATURE_IVL_DAYS}, scope "
               f"[{_last_scope_label}], first field only)")
 
 def init_caches_async() -> None:
@@ -319,24 +338,31 @@ def sync_reset_caches() -> None:
 
 def knowledge_totals() -> dict:
     """
-    Collection-wide totals for the X/total readouts in the knowledge
-    dialog (pure SQLite counts via Anki's DB wrapper — NEVER an
-    external connection; see AGENTS.md).
+    Totals for the X/total readouts in the knowledge dialog (pure
+    SQLite counts via Anki's DB wrapper — NEVER an external
+    connection; see AGENTS.md).
 
-    Returns {'kanji', 'vocab', 'mature_notes', 'total_notes'} where
-    the first three count only inside the Scope decks (the same
-    universe the snapshot is built from) and total_notes counts every
-    note in the collection. All counts are 0 when the DB is
-    unavailable — the GUI then shows the plain numbers without
-    denominators instead of crashing.
+    Returns {'kanji', 'vocab', 'scope_notes', 'mature_notes',
+    'total_notes'}:
+    - kanji / vocab: every distinct kanji / multi-kanji compound in the
+      FIRST field of ANY note in the Scope decks (the "how much
+      Japanese lives in your scoped decks" denominator).
+    - scope_notes: notes in the Scope decks — the PRIMARY denominator
+      for Mature notes (v1.2.3: the old collection-wide 57185 made
+      "10705/57185" meaningless; the user only cares about scope).
+    - mature_notes: in-scope notes owning a card with ivl >= 365.
+    - total_notes: every note in the collection (secondary info only).
+    All counts are 0 when the DB is unavailable — the GUI then shows
+    the plain numbers without denominators instead of crashing.
     """
-    out = {"kanji": 0, "vocab": 0, "mature_notes": 0, "total_notes": 0}
+    out = {"kanji": 0, "vocab": 0, "scope_notes": 0,
+           "mature_notes": 0, "total_notes": 0}
     try:
         if not mw or not mw.col:
             return out
         # 1) Every distinct kanji / multi-kanji compound appearing in the
         #    FIRST field of ANY in-scope note — the "how much Japanese is
-        #    in your decks" denominator for the known X/total readouts.
+        #    in your decks" denominator for the seen X/total readouts.
         scope = _get_scope_deck_names()
         if scope:
             dids = scope_dids(mw.col, scope)
@@ -359,17 +385,26 @@ def knowledge_totals() -> dict:
                         vocab_seen.add(text)
                 out["kanji"] = len(kanji_seen)
                 out["vocab"] = len(vocab_seen)
-                # 2) Mature notes in scope: notes owning at least one card
-                #    with ivl >= 21 (the snapshot's admission rule).
+                # 2) Notes in scope — the Mature-notes denominator the
+                #    user asked for (NOT the whole collection).
+                out["scope_notes"] = (
+                    mw.col.db.scalar(
+                        "SELECT COUNT(DISTINCT notes.id) FROM notes "
+                        "JOIN cards ON cards.nid = notes.id "
+                        f"WHERE cards.did IN ({did_list})"
+                    ) or 0
+                )
+                # 3) Mature notes in scope: notes owning at least one card
+                #    with ivl >= 365 (the snapshot's admission rule).
                 out["mature_notes"] = (
                     mw.col.db.scalar(
                         "SELECT COUNT(DISTINCT notes.id) FROM notes "
                         "JOIN cards ON cards.nid = notes.id "
-                        "WHERE cards.ivl >= 21 "
+                        f"WHERE cards.ivl >= {_MATURE_IVL_DAYS} "
                         f"AND cards.did IN ({did_list})"
                     ) or 0
                 )
-        # 3) Total notes in the WHOLE collection.
+        # 4) Total notes in the WHOLE collection (secondary readout).
         out["total_notes"] = mw.col.db.scalar(
             "SELECT COUNT() FROM notes") or 0
     except Exception:
@@ -389,14 +424,53 @@ def knowledge_status() -> dict:
     scope_suffix = f" [{_last_scope_label}]" if _last_scope_label else ""
     return {
         "ready": _caches_ready.is_set(),
+        # v1.2.3 terminology: the snapshot admits only MATURE notes
+        # (ivl >= 365), so every kanji/vocab in it has mastery 1.0 —
+        # these are the MASTERED sets. 'Seen' (any ivl > 0) is a
+        # separate, larger universe (get_seen_*_points).
+        "mastered_kanji": len(_kanji_points_cache),
+        "mastered_words": len(_vocab_points_cache),
+        # Back-compat aliases for older console snippets.
         "known_kanji": len(_known_kanji_cache),
         "known_words": len(_known_vocab_cache),
         "mature_notes_scanned": _last_rows_scanned,
         "words_kept": _last_words_kept,
-        "scope": "mature notes (ivl >= 21, ivl-weighted) in scope decks, "
+        "scope": f"mature notes (ivl >= {_MATURE_IVL_DAYS}, mastery "
+        f"= interval / {_FULL_MASTERY_IVL_DAYS:.0f}) in scope decks, "
         "first field" + scope_suffix,
         "last_error": _last_error,
     }
+
+
+def _seen_points() -> Tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Builds SEEN kanji/vocab points from every in-scope note with a
+    strictly positive interval (ivl > 0 — any age, not just mature).
+
+    The user's v1.2.3 definitions:
+    - SEEN kanji/vocab: appears on a note whose max interval is > 0.
+    - MASTERED kanji/vocab: mastery weight is exactly 1.0 (interval
+      >= one year). The main snapshot (mature notes only) IS the
+      mastered set; this helper exists so the dialog can show both.
+    Never touches taskman — safe on background threads (the dialog
+    calls it inside its worker). Returns ({kanji: pts}, {vocab: pts}).
+    """
+    kanji_pts: Dict[str, float] = {}
+    vocab_pts: Dict[str, float] = {}
+    try:
+        for word_text, ivl in _fetch_learned_note_rows(mature_only=False):
+            if not word_text or not isinstance(word_text, str):
+                continue
+            pts = _maturity_points(ivl)
+            for kanji in set(_KANJI_RE.findall(word_text)):
+                if pts > kanji_pts.get(kanji, 0.0):
+                    kanji_pts[kanji] = pts
+            if _KANJI_WORD_RE.match(word_text):
+                if pts > vocab_pts.get(word_text, 0.0):
+                    vocab_pts[word_text] = pts
+    except Exception:
+        pass
+    return kanji_pts, vocab_pts
 
 
 def knowledge_summary_text(max_kanji: int = 2000,
@@ -405,37 +479,42 @@ def knowledge_summary_text(max_kanji: int = 2000,
     Human-readable snapshot summary for the knowledge dialog and the
     Debug Console. Pure stdlib logic, covered by the regression suite.
 
-    v1.2.1 layout (the user's debug requests):
-    - X/total readouts: known kanji / every kanji in scope, known
-      kanji-words / every compound in scope, mature notes / all notes.
-    - 'Kanji (all):' — the FULL known-kanji list, clearly labeled as
-      coming from the first fields of mature notes (the old bare
-      'Kanji:' line was unclear what it represented).
-    - 'Kanji words (all):' — the FULL known-words list (the old
-      '(sample)' + fixed truncation is gone; max_* only guards the
-      pathological case).
+    v1.2.3 terminology (user's definitions — 'known' was too loose):
+    - MASTERED kanji/vocab: mastery weight 1.0 (note interval >= 1 year).
+    - SEEN kanji/vocab: on any in-scope note with interval > 0.
+    - 'Vocab' means kanji-only compounds (multi-kanji words); kana-only
+      words and single kanji are excluded by design.
+    Readouts are X/total where totals stay inside the Scope decks;
+    mature notes are X / notes-in-scope (NOT the whole collection).
     """
-    known = get_known_kanji_set()
-    vocab = get_known_vocabulary_set()
+    mastered = get_kanji_points()   # snapshot = mature notes ⇒ mastery 1.0
+    mastered_vocab = get_vocab_points()
+    seen_kanji_pts, seen_vocab_pts = _seen_points()
     status = knowledge_status()
     totals = knowledge_totals()
-    kanji_list = "".join(sorted(known))
+    kanji_list = "".join(sorted(mastered))
     if len(kanji_list) > max_kanji:
         kanji_list = (kanji_list[:max_kanji] +
-                      f"… (+{len(known) - max_kanji} more)")
-    words = sorted(vocab)
+                      f"… (+{len(mastered) - max_kanji} more)")
+    words = sorted(mastered_vocab)
     words_shown = ", ".join(words[:max_words])
     if len(words) > max_words:
         words_shown += f", … (+{len(words) - max_words} more)"
     lines = [
-        f"Known kanji: {len(known)} / {totals['kanji']}",
-        f"Known kanji-words: {len(vocab)} / {totals['vocab']}",
+        f"Mastered kanji: {len(mastered)} / {totals['kanji']} "
+        "(mastery 1.0, interval >= 1 year)",
+        f"Seen kanji: {len(seen_kanji_pts)} / {totals['kanji']} "
+        "(any interval > 0)",
+        f"Mastered vocab: {len(mastered_vocab)} / {totals['vocab']} "
+        "(kanji-only compounds)",
+        f"Seen vocab: {len(seen_vocab_pts)} / {totals['vocab']}",
         f"Source: {status['scope']}",
         f"Mature notes scanned: {status['mature_notes_scanned']}"
-        f" / {totals['total_notes']} notes in collection",
+        f" / {totals['scope_notes']} notes in scope "
+        f"(collection: {totals['total_notes']})",
     ]
     if status["last_error"]:
         lines.append(f"Last error: {status['last_error']}")
-    lines += ["", "Kanji (all):", kanji_list or "(none)", "",
-              "Kanji words (all):", words_shown or "(none)"]
+    lines += ["", "Mastered kanji (all):", kanji_list or "(none)", "",
+              "Mastered vocab (all):", words_shown or "(none)"]
     return "\n".join(lines)

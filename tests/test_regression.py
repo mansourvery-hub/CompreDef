@@ -143,32 +143,44 @@ class _FakeCol:
                         rows.append((n["flds"],))
                 return rows
             if "count(distinct notes.id) from notes" in ql:
-                # mature-notes-in-scope count (scalar call routed via all)
+                # scope-notes / mature-notes-in-scope counts (scalar).
+                # The ivl floor is parsed from the query so the fake
+                # follows production's threshold automatically (21 -> 365
+                # in v1.2.3); no floor = plain scope-notes count.
                 m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
                 dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
                     if m else set()
-                mature = 0
+                ivl_floor_m = _re.search(r"ivl\s*>=\s*(\d+)", ql)
+                floor = int(ivl_floor_m.group(1)) if ivl_floor_m else 0
+                count = 0
                 for n in self.notes.values():
                     if not (set(n.get("dids", [])) & dids):
                         continue
-                    ivl = n.get("ivl", 30)
-                    if "ivls" in n:
-                        hit = set(n.get("dids", [])) & dids
-                        ivl = max((n["ivls"].get(d, 0) for d in hit),
-                                  default=0)
-                    if ivl >= 21:
-                        mature += 1
-                return [(mature,)]
+                    if floor > 0:
+                        ivl = n.get("ivl", 30)
+                        if "ivls" in n:
+                            hit = set(n.get("dids", [])) & dids
+                            ivl = max((n["ivls"].get(d, 0) for d in hit),
+                                      default=0)
+                        if ivl < floor:
+                            continue
+                    count += 1
+                return [(count,)]
             if "select count() from notes" in ql:
                 # total notes in the collection (scalar call).
                 return [(len(self.notes),)]
             if "from notes" in ql and "group by notes.id" in ql:
                 # v1.2 knowledge snapshot: (flds, MAX(ivl)) per note,
-                # filtered by scoped dids + ivl >= 21. Notes may carry
-                # per-card ivls: {"dids": [...], "ivls": {did: ivl}}.
+                # filtered by scoped dids + the query's own ivl floor
+                # (>= 365 mature in v1.2.3, >= 1 seen). The floor is
+                # parsed from the SQL so the fake can never desync from
+                # production's threshold. Notes may carry per-card ivls:
+                # {"dids": [...], "ivls": {did: ivl}}.
                 m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
                 dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
                     if m else set()
+                ivl_floor_m = _re.search(r"ivl\s*>=\s*(\d+)", ql)
+                floor = int(ivl_floor_m.group(1)) if ivl_floor_m else 21
                 rows = []
                 for n in self.notes.values():
                     hit = set(n.get("dids", [])) & dids
@@ -179,7 +191,7 @@ class _FakeCol:
                                   default=0)
                     else:
                         ivl = n.get("ivl", 30)  # sane mature default
-                    if ivl >= 21:
+                    if ivl >= floor:
                         rows.append((n["flds"], ivl))
                 return rows
             if "from notes" in ql and "did in" in ql:
@@ -2374,7 +2386,8 @@ def test_package_relative_imports() -> None:
         expected = {
         "anki": ["get_known_kanji_set", "get_known_vocabulary_set",
                  "init_caches_async", "reset_caches", "knowledge_status",
-                 "knowledge_summary_text", "knowledge_totals"],
+                 "knowledge_summary_text", "knowledge_totals",
+                 "sync_reset_caches", "_seen_points"],
             "core": ["get_provider", "get_generator"],
             "engine": ["DefinitionGenerator"],
             "provider": ["LocalSQLiteProvider", "IndexingError"],
@@ -2416,15 +2429,15 @@ def test_package_relative_imports() -> None:
 
 def test_kanji_extraction_correctness(tmp_root: str) -> None:
     """
-    Known kanji/vocab come ONLY from the FIRST field of mature notes
+    Mastered kanji/vocab come ONLY from the FIRST field of mature notes
+    (ivl >= 365 — v1.2.3 raised the bar from the deprecated 21 days)
     INSIDE the Scope decks — never from Definition/Example/other fields,
     and never from out-of-scope decks (the French deck must not inflate
-    Japanese knowledge). v1.2: knowledge is INTERVAL-WEIGHTED
-    (ivl/365 capped at 1.0) and vocab is KANJI-ONLY (multi-kanji
-    compounds; kana-only words like 'plain' excluded, single kanji
-    covered by the kanji score). This also proves CompreDef-generated
-    definitions (written to non-first fields) can never pollute the
-    learner's known-kanji set.
+    Japanese knowledge). Knowledge is INTERVAL-WEIGHTED (ivl/365
+    capped at 1.0) and vocab is KANJI-ONLY (multi-kanji compounds;
+    kana-only words like 'plain' excluded, single kanji covered by the
+    kanji score). This also proves CompreDef-generated definitions
+    (written to non-first fields) can never pollute the mastered set.
     """
     import anki
 
@@ -2443,7 +2456,8 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         fr = col.decks.add("French")
         col.db.notes = {
             # 3-field layout (word / definition / example), in scope.
-            # ivls vary: 365+ (full), 182.5 (half point), 100 (young).
+            # ivls vary: 400 (mature: >= 365), 182.5 and 100 (SEEN but
+            # NOT mature since v1.2.3 — below the one-year bar).
             1: {"flds": SEP.join(["漢字", "plain def", "plain ex"]),
                 "dids": [jp], "mid": 1, "ivl": 400},
             2: {"flds": SEP.join(["plain", "龍の定義", "plain"]),
@@ -2453,8 +2467,9 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
             # 2-field layout (front / back) — a different note type
             4: {"flds": SEP.join(["語彙", "解釈"]),
                 "dids": [jp], "mid": 2, "ivl": 400},
-            # 1-field layout (cloze-like single field) — HALF-mature:
-            # 182.5-day interval earns exactly 0.5 points (v1.2 spec).
+            # 1-field layout (cloze-like single field) — seen-only:
+            # 182.5-day interval is BELOW mature (365) since v1.2.3, so
+            # 日本語 must NOT enter the mastered snapshot.
             5: {"flds": "日本語", "dids": [jp], "mid": 2, "ivl": 182.5},
             # French deck: first-field kanji must NOT leak into knowledge
             6: {"flds": SEP.join(["仏文", "définitions"]),
@@ -2469,53 +2484,60 @@ def test_kanji_extraction_correctness(tmp_root: str) -> None:
         kanji_pts = anki.get_kanji_points()
         vocab_pts = anki.get_vocab_points()
 
-        check("kanji: first-field kanji is known",
-              {"漢", "字", "語", "彙", "日", "本"} <= known,
+        check("kanji: first-field kanji is mastered",
+              {"漢", "字", "語", "彙"} <= known,
               f"known={sorted(known)}")
         check(
-            "kanji: Definition-only kanji is NOT known",
+            "kanji: Definition-only kanji is NOT mastered",
             "龍" not in known,
             f"known={sorted(known)}",
         )
         check(
-            "kanji: Example-only kanji is NOT known",
+            "kanji: Example-only kanji is NOT mastered",
             "虎" not in known,
             f"known={sorted(known)}",
         )
         check(
-            "kanji: out-of-scope (French deck) kanji is NOT known",
+            "kanji: out-of-scope (French deck) kanji is NOT mastered",
             "仏" not in known,
             f"known={sorted(known)}",
         )
         check(
-            "kanji: known set is exactly the in-scope first-field kanji",
-            known == {"漢", "字", "語", "彙", "日", "本"},
+            "kanji: sub-year notes (182.5/100d) are seen, not mastered",
+            known == {"漢", "字", "語", "彙"},
             f"known={sorted(known)}",
         )
         check(
             "kanji: generated definitions do not pollute knowledge",
             "龍" not in known and "虎" not in known,
         )
-        # v1.2: vocab is KANJI-ONLY — kana/plain words ('plain') excluded.
+        # v1.2: vocab is KANJI-ONLY — kana/plain words ('plain') excluded,
+        # and only MATURE (>= 1 year) compounds are mastered.
         check(
-            "kanji: known vocab is kanji-only compounds from first fields",
-            vocab == {"漢字", "語彙", "日本語"},
+            "kanji: mastered vocab is mature kanji-only compounds",
+            vocab == {"漢字", "語彙"},
             f"vocab={sorted(vocab)}",
         )
-        # v1.2: interval weighting — 400d ⇒ 1.0, 182.5d ⇒ 0.5.
+        # v1.2: interval weighting — mature notes earn exactly 1.0.
         check("kanji: 400-day interval earns full 1.0 points",
               kanji_pts.get("漢") == 1.0 and kanji_pts.get("字") == 1.0,
               f"pts={kanji_pts}")
-        check("kanji: half-year interval earns 0.5 points",
-              kanji_pts.get("日") == 0.5 and kanji_pts.get("本") == 0.5,
-              f"pts={kanji_pts}")
         check("kanji: vocab points follow the same weighting",
-              vocab_pts.get("漢字") == 1.0 and vocab_pts.get("日本語") == 0.5,
+              vocab_pts.get("漢字") == 1.0 and vocab_pts.get("語彙") == 1.0,
               f"vpts={vocab_pts}")
+        # v1.2.3 SEEN view: sub-year notes ARE seen (ivl > 0) — the
+        # mature-only snapshot must not lose them from the seen totals.
+        seen_kpts, seen_vpts = anki._seen_points()
+        check("kanji: seen includes sub-year kanji (日本語)",
+              {"日", "本"} <= set(seen_kpts),
+              f"seen_kpts={sorted(seen_kpts)}")
+        check("kanji: seen includes sub-year vocab (日本語)",
+              "日本語" in seen_vpts,
+              f"seen_vpts={sorted(seen_vpts)}")
         status = anki.knowledge_status()
         check(
             "kanji: status reports a ready scoped snapshot",
-            status["ready"] and status["mature_notes_scanned"] == 5
+            status["ready"] and status["mature_notes_scanned"] == 2
             and "scope decks" in status["scope"]
             and "Japanese" in status["scope"]
             and status["last_error"] is None,
@@ -2693,9 +2715,12 @@ def test_sync_reset_is_thread_safe() -> None:
 def test_knowledge_summary_text() -> None:
     """The knowledge dialog's content source: counts, lists, scope.
 
-    v1.2.1: counts are X/total readouts; the kanji and word lists are
-    labeled '(all)' (the old '(sample)' was misleading), and every
-    list line must be reproducible in the clickable dialog tabs.
+    v1.2.3 terminology (the user's definitions — 'known' was too
+    loose): MASTERED = mastery 1.0 (interval >= 1 year), SEEN = any
+    interval > 0, 'Vocab' = kanji-only compounds. Readouts are
+    X/total with totals INSIDE the Scope decks; Mature notes divide
+    by notes-in-scope (the old whole-collection denominator made
+    '10705/57185' meaningless), with the collection count secondary.
     """
     import anki
 
@@ -2719,43 +2744,69 @@ def test_knowledge_summary_text() -> None:
         anki.reset_caches()
         anki._build_caches()
         text = anki.knowledge_summary_text()
-        check("summary: shows kanji count", "Known kanji: 4" in text, text)
-        check("summary: shows word count", "Known kanji-words: 2" in text,
-              text)
-        check("summary: kanji count carries /total denominator",
-              "Known kanji: 4 / 4" in text, text)
-        check("summary: word count carries /total denominator",
-              "Known kanji-words: 2 / 2" in text, text)
-        check("summary: mature notes carry collection total",
-              "/ 2 notes in collection" in text, text)
+        check("summary: shows mastered kanji count",
+              "Mastered kanji: 4" in text, text)
+        check("summary: shows mastered vocab count",
+              "Mastered vocab: 2" in text, text)
+        check("summary: shows seen kanji count",
+              "Seen kanji: 4" in text, text)
+        check("summary: mastered kanji carries /total denominator",
+              "Mastered kanji: 4 / 4" in text, text)
+        check("summary: mastered vocab carries /total denominator",
+              "Mastered vocab: 2 / 2" in text, text)
+        check("summary: mature notes divide by notes IN SCOPE",
+              "/ 2 notes in scope" in text and
+              "collection: 2" in text, text)
         check("summary: lists the kanji",
               "漢" in text and "語" in text, text)
         check("summary: shows scope", "scope decks" in text, text)
-        # v1.2.1: the old bare 'Kanji:' / '(sample)' labels confused the
-        # user ("what is this kanji list?"); they are now explicit.
-        check("summary: kanji list labeled (all), not bare",
-              "Kanji (all):" in text and "Kanji words (all):" in text, text)
+        # v1.2.3: 'Kanji Words' is renamed 'Vocab' everywhere; the old
+        # 'Kanji words' / 'Known' labels must be gone.
+        check("summary: mastered lists labeled with new terminology",
+              "Mastered kanji (all):" in text and
+              "Mastered vocab (all):" in text, text)
+        check("summary: no deprecated 'Known'/'Kanji words' labels remain",
+              "Known kanji" not in text and
+              "Kanji words" not in text and "Kanji-words" not in text, text)
         check("summary: no deprecated '(sample)' label remains",
               "(sample)" not in text, text)
+        check("summary: no deprecated 21-day mention remains",
+              "21" not in text, text)
         short = anki.knowledge_summary_text(max_kanji=2, max_words=1)
         check("summary: truncates long lists with a remainder",
               "more" in short, short)
-        # Totals: mature notes denominator counts only in-scope mature
-        # notes, and the kanji/vocab totals cover every in-scope first
-        # field (not just mature ones).
+        # Totals: mature/seen denominators count only in-scope notes;
+        # the collection count is separate and secondary.
         totals = anki.knowledge_totals()
         check("totals: counts mature notes in scope",
               totals["mature_notes"] == 2, f"totals={totals}")
+        check("totals: counts notes in scope (primary denominator)",
+              totals["scope_notes"] == 2, f"totals={totals}")
         check("totals: counts all notes in collection",
               totals["total_notes"] == 2, f"totals={totals}")
-        # A non-mature out-of-scope note widens the total_notes only.
+        # An out-of-scope note widens ONLY the collection total; the
+        # scope denominators must stay untouched (the user's 57185 bug).
         col.db.notes[3] = {"flds": SEP.join(["仏文", "d"]), "dids": [999],
                            "mid": 1, "ivl": 1}
         totals2 = anki.knowledge_totals()
-        check("totals: out-of-scope note widens collection total",
+        check("totals: out-of-scope note widens collection total only",
               totals2["total_notes"] == 3 and
+              totals2["scope_notes"] == 2 and
               totals2["kanji"] == 4 and totals2["vocab"] == 2,
               f"totals2={totals2}")
+        # A SEEN-but-young in-scope note joins the seen/total kanji
+        # denominators but never the mastered snapshot.
+        col.db.notes[4] = {"flds": SEP.join(["若い", "d"]), "dids": [jp],
+                           "mid": 1, "ivl": 40}
+        totals3 = anki.knowledge_totals()
+        check("totals: young in-scope note joins kanji totals",
+              totals3["kanji"] == 5 and totals3["scope_notes"] == 3 and
+              totals3["mature_notes"] == 2,
+              f"totals3={totals3}")
+        seen_kpts, seen_vpts = anki._seen_points()
+        check("seen: young in-scope kanji is seen but not mastered",
+              "若" in seen_kpts and "若" not in anki.get_kanji_points(),
+              f"seen={sorted(seen_kpts)}")
     finally:
         _restore_collection_state(scope_state)
         anki._known_kanji_cache = prev_kanji

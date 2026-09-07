@@ -2183,10 +2183,21 @@ class KnowledgeDialog(QDialog):
     Four tabs:
     - Overview: clickable stat cards with X/total readouts; clicking a
       card jumps to the matching detail tab.
-    - Kanji: the FULL known-kanji set (grid), with a search filter.
-    - Kanji Words: the FULL known multi-kanji-compound set, searchable.
+    - Kanji: the FULL mastered-kanji set (one per row + mastery
+      weight), searchable and sortable by mastery.
+    - Vocab: the FULL mastered vocab set (kanji-only compounds),
+      searchable and sortable by mastery.
     - Mature Notes: every mature note (first field + interval) the
-      snapshot was built from — the provenance of the knowledge.
+      snapshot was built from — the provenance of the knowledge —
+      sortable by interval.
+
+    Terminology (v1.2.3, the user's definitions):
+    - MASTERED kanji/vocab: mastery weight 1.0 — the kanji/vocab sits
+      on a note whose interval reached a full YEAR. The knowledge
+      snapshot admits only mature (>= 1 year) notes, so its sets ARE
+      the mastered sets.
+    - SEEN kanji/vocab: appears on any in-scope note with a strictly
+      positive interval (> 0) — shown as secondary readouts.
 
     All heavy data (counts, lists) is fetched via the pure stdlib
     helpers in anki.py on a background thread, then rendered on the
@@ -2215,11 +2226,12 @@ class KnowledgeDialog(QDialog):
         self.overview_tab = QWidget()
         ov = QVBoxLayout(self.overview_tab)
         hint = QLabel(
-            "Knowledge = kanji and multi-kanji words from the FIRST FIELD of\n"
-            "MATURE notes (card interval >= 21 days) in your Scope decks.\n"
-            "Mastery is interval-weighted (interval / 365, capped at 1.0),\n"
-            "so longer intervals count proportionally more.\n"
-            "Definitions, examples and other fields are never counted.\n"
+            "MASTERED = mastery weight 1.0: the kanji/vocab sits on a\n"
+            "note whose card interval reached a FULL YEAR.\n"
+            "SEEN = on any in-scope note with interval > 0 (any age).\n"
+            "All counts come from the FIRST FIELD of notes in your\n"
+            "Scope decks — definitions, examples and other fields are\n"
+            "never counted. 'Vocab' = kanji-only compound words.\n"
             "Click a stat card below to see the full list."
         )
         hint.setWordWrap(True)
@@ -2236,21 +2248,28 @@ class KnowledgeDialog(QDialog):
 
         # Kanji tab -----------------------------------------------------
         self.kanji_tab = self._make_list_tab(
-            "Every kanji counted as KNOWN, one per row, with its mastery "
-            "weight (interval / 365, 1.0 = one-year interval).")
+            "Every SEEN kanji (on a note with interval > 0) with its "
+            "mastery weight — 1.00 = MASTERED (note interval >= 1 year), "
+            "lower = still maturing. Sort by mastery to find weak kanji.",
+            sort_key="mastery")
         self.tabs.addTab(self.kanji_tab, "Kanji")
 
-        # Kanji words tab -----------------------------------------------
+        # Vocab tab (kanji-only compounds) -------------------------------
         self.words_tab = self._make_list_tab(
-            "Every multi-kanji word counted as KNOWN (kana-only and "
-            "single-kanji words are excluded by design), with its "
-            "mastery weight.")
-        self.tabs.addTab(self.words_tab, "Kanji Words")
+            "Every SEEN vocab item with its mastery weight — 1.00 = "
+            "MASTERED (interval >= 1 year). 'Vocab' means kanji-only "
+            "compound words (2+ kanji, no kana); kana-only words and "
+            "single kanji are excluded by design (kana words are "
+            "inflection-hostile, single kanji are covered by the kanji "
+            "tab).",
+            sort_key="mastery")
+        self.tabs.addTab(self.words_tab, "Vocab")
 
         # Mature notes tab ----------------------------------------------
         self.notes_tab = self._make_list_tab(
-            "The mature notes (first field + interval) the snapshot was "
-            "built from.")
+            "The MATURE notes (first field + max card interval) the "
+            "snapshot was built from. Mature = interval >= 1 year.",
+            sort_key="interval")
         self.tabs.addTab(self.notes_tab, "Mature Notes")
 
         # Status line + refresh + close ----------------------------------
@@ -2274,8 +2293,13 @@ class KnowledgeDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-    def _make_list_tab(self, header: str) -> dict:
-        """Builds a (filter + list + count) tab; returns widget handles."""
+    def _make_list_tab(self, header: str, sort_key: str = "") -> Any:
+        """Builds a (filter + sort + list + count) tab; returns the tab.
+
+        sort_key='mastery' adds a Kanji/Vocab sort combo (A-Z /
+        mastery high-low / mastery low-high); 'interval' adds the
+        Mature Notes sort combo (A-Z / interval high-low / low-high).
+        """
         tab = QWidget()
         v = QVBoxLayout(tab)
         head = QLabel(header)
@@ -2285,6 +2309,18 @@ class KnowledgeDialog(QDialog):
         filter_edit = QLineEdit()
         filter_edit.setPlaceholderText("Filter...")
         filter_row.addWidget(filter_edit)
+        if sort_key:
+            sort_combo = QComboBox()
+            if sort_key == "mastery":
+                sort_combo.addItems(["A-Z", "Mastery ↓", "Mastery ↑"])
+                sort_combo.setToolTip("Sort by mastery weight.")
+            else:  # interval (mature notes)
+                sort_combo.addItems(["A-Z", "Interval ↓", "Interval ↑"])
+                sort_combo.setToolTip("Sort by max card interval.")
+            filter_row.addWidget(sort_combo)
+            tab._sort_combo = sort_combo      # type: ignore[attr-defined]
+            sort_combo.currentIndexChanged.connect(
+                lambda _idx, t=tab: _knowledge_apply_filter(t))
         count_label = QLabel("0")
         filter_row.addWidget(count_label)
         v.addLayout(filter_row)
@@ -2295,6 +2331,7 @@ class KnowledgeDialog(QDialog):
         tab._filter_edit = filter_edit      # type: ignore[attr-defined]
         tab._count_label = count_label      # type: ignore[attr-defined]
         tab._list_widget = list_widget      # type: ignore[attr-defined]
+        tab._sort_key = sort_key            # type: ignore[attr-defined]
         filter_edit.textChanged.connect(
             lambda text, t=tab: _knowledge_apply_filter(t))
         return tab
@@ -2317,12 +2354,13 @@ class KnowledgeDialog(QDialog):
                 if __package__:
                     from .anki import (knowledge_summary_text, knowledge_status,
                                        knowledge_totals, sync_reset_caches,
-                                       get_kanji_points, get_vocab_points)
+                                       get_kanji_points, get_vocab_points,
+                                       _seen_points)
                 else:
                     from anki import (knowledge_summary_text,  # type: ignore
                                       knowledge_status, knowledge_totals,
                                       sync_reset_caches, get_kanji_points,
-                                      get_vocab_points)
+                                      get_vocab_points, _seen_points)
             except Exception:
                 import traceback
                 return {"error": traceback.format_exc()}
@@ -2339,12 +2377,19 @@ class KnowledgeDialog(QDialog):
                 mature_rows = _fetch_learned_note_rows()
             except Exception:
                 mature_rows = []
+            # SEEN points (any interval > 0) for the secondary readouts.
+            try:
+                seen_kanji_pts, seen_vocab_pts = _seen_points()
+            except Exception:
+                seen_kanji_pts, seen_vocab_pts = {}, {}
             return {
                 "summary": knowledge_summary_text(),
                 "status": knowledge_status(),
                 "totals": knowledge_totals(),
                 "kanji_points": get_kanji_points(),
                 "vocab_points": get_vocab_points(),
+                "seen_kanji_points": seen_kanji_pts,
+                "seen_vocab_points": seen_vocab_pts,
                 "mature_rows": mature_rows,
             }
 
@@ -2373,10 +2418,14 @@ class KnowledgeDialog(QDialog):
         totals = data.get("totals", {}) or {}
         kanji_points = data.get("kanji_points", {}) or {}
         vocab_points = data.get("vocab_points", {}) or {}
+        seen_kanji_points = data.get("seen_kanji_points", {}) or {}
+        seen_vocab_points = data.get("seen_vocab_points", {}) or {}
         mature_rows = data.get("mature_rows", []) or []
 
-        known_kanji = len(kanji_points)
-        known_vocab = len(vocab_points)
+        mastered_kanji = len(kanji_points)
+        mastered_vocab = len(vocab_points)
+        seen_kanji = len(seen_kanji_points)
+        seen_vocab = len(seen_vocab_points)
         mature_scanned = status.get("mature_notes_scanned",
                                     len(mature_rows))
         scope = status.get("scope", "")
@@ -2388,45 +2437,66 @@ class KnowledgeDialog(QDialog):
             if w is not None:
                 w.deleteLater()
         cards = [
-            ("Known kanji", f"{known_kanji} / {totals.get('kanji', 0)}",
-             "Kanji", "Known kanji / every kanji in your Scope decks' "
-             "first fields"),
-            ("Known kanji-words", f"{known_vocab} / {totals.get('vocab', 0)}",
-             "Kanji Words", "Known multi-kanji words / every multi-kanji "
-             "word in Scope first fields"),
+            ("Mastered kanji",
+             f"{mastered_kanji} / {totals.get('kanji', 0)}",
+             "Kanji", "Kanji at mastery 1.0 (note interval >= 1 year) / "
+             "every kanji in Scope first fields"),
+            ("Seen kanji",
+             f"{seen_kanji} / {totals.get('kanji', 0)}",
+             "Kanji", "Kanji on any in-scope note with interval > 0 / "
+             "every kanji in Scope first fields"),
+            ("Mastered vocab",
+             f"{mastered_vocab} / {totals.get('vocab', 0)}",
+             "Vocab", "Kanji-only compound words at mastery 1.0 / every "
+             "kanji-only compound in Scope first fields"),
+            ("Seen vocab",
+             f"{seen_vocab} / {totals.get('vocab', 0)}",
+             "Vocab", "Kanji-only compounds on any in-scope note with "
+             "interval > 0 / every compound in Scope first fields"),
             ("Mature notes scanned",
-             f"{mature_scanned} / {totals.get('total_notes', 0)}",
-             "Mature Notes", "Notes the snapshot was built from / every "
-             "note in the collection"),
+             f"{mature_scanned} / {totals.get('scope_notes', 0)}",
+             "Mature Notes", "Mature in-scope notes (interval >= 1 year) "
+             "the snapshot was built from / every note in your Scope "
+             "decks"),
         ]
         for title, value, target_tab, desc in cards:
             self.stat_layout.addWidget(
                 self._make_stat_card(title, value, desc, target_tab))
 
         details_bits = [f"Source: {scope}"]
+        if totals.get("total_notes"):
+            details_bits.append(
+                f"Whole collection: {totals['total_notes']} notes "
+                "(Scope is what counts, the rest is never scanned).")
         if status.get("last_error"):
             details_bits.append(f"Last error: {status['last_error']}")
         self.overview_details.setText("\n".join(details_bits))
         self.status_label.setText(
-            f"{known_kanji} known kanji · {known_vocab} known kanji-words · "
-            f"snapshot built from {mature_scanned} mature note(s)"
+            f"{mastered_kanji} mastered kanji ({seen_kanji} seen) · "
+            f"{mastered_vocab} mastered vocab ({seen_vocab} seen) · "
+            f"{mature_scanned} mature note(s) in scope"
         )
 
-        # Kanji tab: one kanji per row with its mastery weight ------------
-        kanji_sorted = sorted(kanji_points.keys())
+        # Kanji tab: every SEEN kanji with its mastery weight ----------
+        # The seen set is the mastered set's superset (mastered = weight
+        # exactly 1.0); listing it makes the mastery sort meaningful —
+        # weak kanji sink to the bottom instead of an all-1.00 list.
         self._fill_list(self.kanji_tab, [
-            f"{k}  (mastery {kanji_points[k]:.2f})"
-            for k in kanji_sorted
+            (f"{k}  (mastery {seen_kanji_points[k]:.2f})",
+             float(seen_kanji_points[k]))
+            for k in sorted(seen_kanji_points.keys())
         ])
-        self.tabs.setTabText(1, f"Kanji ({known_kanji})")
+        self.tabs.setTabText(
+            1, f"Kanji ({seen_kanji} seen, {mastered_kanji} mastered)")
 
-        # Kanji words tab --------------------------------------------------
-        vocab_sorted = sorted(vocab_points.keys())
+        # Vocab tab (kanji-only compounds): every SEEN item -------------
         self._fill_list(self.words_tab, [
-            f"{w}  (mastery {vocab_points[w]:.2f})"
-            for w in vocab_sorted
+            (f"{w}  (mastery {seen_vocab_points[w]:.2f})",
+             float(seen_vocab_points[w]))
+            for w in sorted(seen_vocab_points.keys())
         ])
-        self.tabs.setTabText(2, f"Kanji Words ({known_vocab})")
+        self.tabs.setTabText(
+            2, f"Vocab ({seen_vocab} seen, {mastered_vocab} mastered)")
 
         # Mature notes tab --------------------------------------------------
         note_rows = []
@@ -2434,10 +2504,13 @@ class KnowledgeDialog(QDialog):
             word_text = row[0] if isinstance(row, (list, tuple)) else row
             ivl = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else 0
             try:
-                ivl_txt = f"{float(ivl):.0f} days"
+                ivl_f = float(ivl)
+                ivl_txt = f"{ivl_f:.0f} days"
             except (TypeError, ValueError):
+                ivl_f = 0.0
                 ivl_txt = "unknown"
-            note_rows.append(f"{word_text}  — max interval {ivl_txt}")
+            note_rows.append(
+                (f"{word_text}  — max interval {ivl_txt}", ivl_f))
         self._fill_list(self.notes_tab, note_rows)
         # Same count as the stat card (status), not the row list length
         # (rows can be deduplicated differently on some Anki builds).
@@ -2469,35 +2542,54 @@ class KnowledgeDialog(QDialog):
                 self.tabs.setCurrentIndex(i)
                 return
 
-    def _fill_list(self, tab: Any, rows: List[str]) -> None:
-        """Populates a list tab and updates its visible count."""
-        tab._all_rows = rows                        # type: ignore[attr-defined]
-        tab._list_widget.clear()                     # type: ignore[attr-defined]
-        tab._list_widget.addItems(rows)              # type: ignore[attr-defined]
+    def _fill_list(self, tab: Any, rows: List[Any]) -> None:
+        """Populates a list tab and updates its visible count.
+
+        rows is a list of (display_text, numeric_sort_key) tuples; the
+        sort combo reorders by the numeric key (mastery or interval),
+        A-Z reorders by display text.
+        """
+        tab._all_rows = [(str(d), float(s)) for d, s in rows]  # type: ignore[attr-defined]
         _knowledge_apply_filter(tab)
 
 
 def _knowledge_apply_filter(tab: Any) -> None:
-    """Live filter helper shared by the knowledge dialog's list tabs."""
+    """Live filter + sort helper shared by the knowledge dialog's tabs.
+
+    Rows are (display_text, numeric_sort_key) tuples. The optional sort
+    combo picks the ordering: A-Z (display text) or the numeric key
+    descending/ascending (mastery for Kanji/Vocab, interval for Mature
+    Notes). The filter is applied on top of the sort.
+    """
     edit = getattr(tab, "_filter_edit", None)
     list_widget = getattr(tab, "_list_widget", None)
     if edit is None or list_widget is None:
         return
-    needle = edit.text().strip()
     rows = getattr(tab, "_all_rows", []) or []
-    if not needle:
-        list_widget.clear()
-        list_widget.addItems(rows)
-        shown = len(rows)
-    else:
-        hits = [r for r in rows if needle in r]
-        list_widget.clear()
-        list_widget.addItems(hits)
-        shown = len(hits)
+
+    # Sort first (combo index: 0=A-Z, 1=key desc, 2=key asc).
+    sort_combo = getattr(tab, "_sort_combo", None)
+    if sort_combo is not None:
+        mode = int(sort_combo.currentIndex())
+        if mode == 1:
+            rows = sorted(rows, key=lambda r: (-r[1], r[0]))
+        elif mode == 2:
+            rows = sorted(rows, key=lambda r: (r[1], r[0]))
+        else:
+            rows = sorted(rows, key=lambda r: r[0])
+
+    # Filter on top of the sorted order.
+    needle = edit.text().strip()
+    if needle:
+        rows = [r for r in rows if needle in r[0]]
+    list_widget.clear()
+    list_widget.addItems([r[0] for r in rows])
+
     count_label = getattr(tab, "_count_label", None)
     if count_label is not None:
-        count_label.setText(f"{shown} shown" +
-                            (f" / {len(rows)}" if needle else ""))
+        total = len(getattr(tab, "_all_rows", []) or [])
+        count_label.setText(f"{len(rows)} shown" +
+                            (f" / {total}" if needle else ""))
 
 
 def show_knowledge_dialog() -> None:

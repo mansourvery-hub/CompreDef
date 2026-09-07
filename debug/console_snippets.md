@@ -12,13 +12,14 @@ folder = mw.addonManager.addonsFolder("1619602654")
 print("version:", json.load(open(os.path.join(folder, "manifest.json")))["human_version"])
 m = importlib.import_module("1619602654.anki")
 print("status:", m.knowledge_status())
-print("mature:", len(mw.col.find_cards("prop:ivl>=21")))
+print("mature:", len(mw.col.find_cards("prop:ivl>=365")))
 ```
 
 Interpretation (see also `status["last_error"]`):
 
 - `mature: 0` → the empty set is correct; knowledge needs
-  `ivl >= 21` cards.
+  `ivl >= 365` cards (mature = one full year, v1.2.3; the legacy
+  21-day threshold is deprecated).
 - `mature_notes_scanned: 0` with mature cards present → the query
   itself failed (check `last_error`); on old versions this meant the
   query hit a renamed table.
@@ -53,7 +54,7 @@ K, SEP = "龍", "\x1f"
 hits = 0
 for (flds,) in mw.col.db.all(
         "SELECT flds FROM notes WHERE id IN "
-        "(SELECT nid FROM cards WHERE ivl >= 21)"):
+        "(SELECT nid FROM cards WHERE ivl >= 365)"):
     first = flds.split(SEP, 1)[0]
     if K in first:
         print("first field:", first[:60])
