@@ -22,6 +22,12 @@ historical failure mode is now structurally fixed):
 3. Single-flight guard: rapid Tab-Tab-Tab never stacks duplicate jobs.
 4. Opt-out via config ("tab_generate": false) for users who prefer
    explicit-only workflows.
+5. v1.2.1: unmapped note types fall back to field auto-inference — the
+   SAME mapping resolver the toolbar button uses. Previously Tab stayed
+   silent for any type missing from `targets` while the button worked
+   (the "does not always fire" report). Mirrors how the official
+   Japanese Support add-on's focus-lost hook (reading.py onFocusLost)
+   stays tolerant: it never requires per-type configuration up front.
 
 Anki 26.x compatibility (verified against installed 26.08.1 source):
 - Two editor generations coexist: the Svelte `NewEditor` (Add window /
@@ -734,7 +740,10 @@ def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any],
 
     Conditions (all must hold):
     - The feature is enabled in config.
-    - The unfocused field IS the configured word field.
+    - The note is inside the Scope (deck membership, ANY card suffices).
+    - The unfocused field IS the word field — from the note type's
+      explicit `targets` entry, its legacy config, or auto-inference
+      (same resolver as the toolbar button; v1.2.1).
     - The definition field exists and is empty (never overwrite existing
       content — explicit regeneration stays available via the toolbar
       button).
@@ -749,21 +758,49 @@ def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any],
         return False
 
     # Multi-type mode: only fire when the note's type is a configured
-    # target AND its own word/definition fields are involved.
+    # target AND its own word/definition fields are involved. When the
+    # type has no explicit entry, fall back to the same auto-inference
+    # the toolbar button uses — otherwise Tab stayed silent for every
+    # unmapped type while the button worked (the "not always working"
+    # report; Japanese Support's focus-lost hook is equally tolerant:
+    # any source field can trigger it).
     targets = config.get("targets")
     if isinstance(targets, dict) and targets:
         mapping = targets.get(_get_note_type_name(note))
-        if not isinstance(mapping, dict):
-            return False
-        word_field = str(mapping.get("word_field", "") or "")
-        def_field = str(mapping.get("definition_field", "") or "")
+        if isinstance(mapping, dict):
+            word_field = str(mapping.get("word_field", "") or "")
+            def_field = str(mapping.get("definition_field", "") or "")
+        else:
+            inferred = _infer_field_mapping(note)
+            if not inferred:
+                return False
+            word_field = inferred["word_field"]
+            def_field = inferred["definition_field"]
     else:
         # Legacy single-type config
         legacy_type = str(config.get("note_type", "") or "").strip()
         if legacy_type and _get_note_type_name(note) != legacy_type:
-            return False
-        word_field = config.get("word_field", "")
-        def_field = config.get("definition_field", "")
+            # Same tolerance as the button path: an in-scope note of a
+            # different type still generates when fields can be inferred
+            # (resolve_fields_for_note does exactly this).
+            if isinstance(config.get("scope_decks"), list) and config.get("scope_decks"):
+                inferred = _infer_field_mapping(note)
+                if not inferred:
+                    return False
+                word_field = inferred["word_field"]
+                def_field = inferred["definition_field"]
+            else:
+                return False
+        else:
+            word_field = config.get("word_field", "")
+            def_field = config.get("definition_field", "")
+            if not word_field or not def_field:
+                # Empty legacy config: inference is the only chance left
+                # (matches resolve_fields_for_note's fallback).
+                inferred = _infer_field_mapping(note)
+                if inferred:
+                    word_field = inferred["word_field"]
+                    def_field = inferred["definition_field"]
 
     if not word_field or not def_field or word_field == def_field:
         return False

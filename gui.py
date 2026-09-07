@@ -2177,38 +2177,328 @@ def show_config_dialog(initial_tab: int = 0) -> None:
     dialog.exec()
 
 
-def show_knowledge_dialog() -> None:
-    """Displays a read-only view of the learner-knowledge snapshot."""
-    dialog = QDialog(parent=mw.app.activeWindow() if mw and mw.app else None)
-    dialog.setWindowTitle("CompreDef Learner Knowledge")
-    dialog.resize(520, 480)
-    layout = QVBoxLayout()
-    dialog.setLayout(layout)
-    hint = QLabel(
-        "Kanji and words from the FIRST FIELD of your MATURE notes\n"
-        "(cards with interval \u2265 21 days) inside your Scope decks.\n"
-        "Definitions, examples, and other fields are never counted.\n"
-        "Change decks under CompreDef Configuration -> Scope, then\n"
-        "restart Anki (or re-save the config) to rebuild the snapshot."
-    )
-    hint.setWordWrap(True)
-    layout.addWidget(hint)
-    view = QTextEdit()
-    view.setReadOnly(True)
-    try:
-        view.setPlainText(knowledge_summary_text())
-    except Exception:
-        import traceback
-        view.setPlainText(
-            "CompreDef: could not build knowledge summary:\n"
-            + traceback.format_exc()
+class KnowledgeDialog(QDialog):
+    """Debug-oriented view of the learner-knowledge snapshot.
+
+    Four tabs:
+    - Overview: clickable stat cards with X/total readouts; clicking a
+      card jumps to the matching detail tab.
+    - Kanji: the FULL known-kanji set (grid), with a search filter.
+    - Kanji Words: the FULL known multi-kanji-compound set, searchable.
+    - Mature Notes: every mature note (first field + interval) the
+      snapshot was built from — the provenance of the knowledge.
+
+    All heavy data (counts, lists) is fetched via the pure stdlib
+    helpers in anki.py on a background thread, then rendered on the
+    main thread (AGENTS.md non-blocking mandate).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("CompreDef Learner Knowledge")
+        self.resize(760, 560)
+        self._build_ui()
+        # Load snapshot data in the background so the dialog opens
+        # instantly even on a huge collection.
+        self._refresh_async()
+
+    # -- UI construction ------------------------------------------------
+
+    def _build_ui(self) -> None:
+        """One-time widget layout (tabs + status bar + close button)."""
+        layout = QVBoxLayout(self)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, stretch=1)
+
+        # Overview tab --------------------------------------------------
+        self.overview_tab = QWidget()
+        ov = QVBoxLayout(self.overview_tab)
+        hint = QLabel(
+            "Knowledge = kanji and multi-kanji words from the FIRST FIELD of\n"
+            "MATURE notes (card interval >= 21 days) in your Scope decks.\n"
+            "Mastery is interval-weighted (interval / 365, capped at 1.0),\n"
+            "so longer intervals count proportionally more.\n"
+            "Definitions, examples and other fields are never counted.\n"
+            "Click a stat card below to see the full list."
         )
-    layout.addWidget(view)
-    if hasattr(QDialogButtonBox, "StandardButton"):
-        close_flag = QDialogButtonBox.StandardButton.Close
+        hint.setWordWrap(True)
+        ov.addWidget(hint)
+        # Stat cards are added dynamically once data arrives.
+        self.stat_container = QWidget()
+        self.stat_layout = QHBoxLayout(self.stat_container)
+        ov.addWidget(self.stat_container)
+        self.overview_details = QLabel("")
+        self.overview_details.setWordWrap(True)
+        ov.addWidget(self.overview_details, stretch=1)
+        ov.addStretch(1)
+        self.tabs.addTab(self.overview_tab, "Overview")
+
+        # Kanji tab -----------------------------------------------------
+        self.kanji_tab = self._make_list_tab(
+            "Every kanji counted as KNOWN, one per row, with its mastery "
+            "weight (interval / 365, 1.0 = one-year interval).")
+        self.tabs.addTab(self.kanji_tab, "Kanji")
+
+        # Kanji words tab -----------------------------------------------
+        self.words_tab = self._make_list_tab(
+            "Every multi-kanji word counted as KNOWN (kana-only and "
+            "single-kanji words are excluded by design), with its "
+            "mastery weight.")
+        self.tabs.addTab(self.words_tab, "Kanji Words")
+
+        # Mature notes tab ----------------------------------------------
+        self.notes_tab = self._make_list_tab(
+            "The mature notes (first field + interval) the snapshot was "
+            "built from.")
+        self.tabs.addTab(self.notes_tab, "Mature Notes")
+
+        # Status line + refresh + close ----------------------------------
+        bar = QHBoxLayout()
+        self.status_label = QLabel("Loading knowledge snapshot...")
+        self.status_label.setWordWrap(True)
+        bar.addWidget(self.status_label, stretch=1)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setToolTip(
+            "Rebuild the snapshot now (picks up new mature cards without "
+            "restarting Anki).")
+        refresh_btn.clicked.connect(self._refresh_async)
+        bar.addWidget(refresh_btn)
+        layout.addLayout(bar)
+
+        if hasattr(QDialogButtonBox, "StandardButton"):
+            close_flag = QDialogButtonBox.StandardButton.Close
+        else:
+            close_flag = QDialogButtonBox.Close
+        button_box = QDialogButtonBox(close_flag)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _make_list_tab(self, header: str) -> dict:
+        """Builds a (filter + list + count) tab; returns widget handles."""
+        tab = QWidget()
+        v = QVBoxLayout(tab)
+        head = QLabel(header)
+        head.setWordWrap(True)
+        v.addWidget(head)
+        filter_row = QHBoxLayout()
+        filter_edit = QLineEdit()
+        filter_edit.setPlaceholderText("Filter...")
+        filter_row.addWidget(filter_edit)
+        count_label = QLabel("0")
+        filter_row.addWidget(count_label)
+        v.addLayout(filter_row)
+        list_widget = QListWidget()
+        list_widget.setAlternatingRowColors(True)
+        list_widget.setUniformItemSizes(True)
+        v.addWidget(list_widget, stretch=1)
+        tab._filter_edit = filter_edit      # type: ignore[attr-defined]
+        tab._count_label = count_label      # type: ignore[attr-defined]
+        tab._list_widget = list_widget      # type: ignore[attr-defined]
+        filter_edit.textChanged.connect(
+            lambda text, t=tab: _knowledge_apply_filter(t))
+        return tab
+
+    # -- Data loading ----------------------------------------------------
+
+    def _refresh_async(self) -> None:
+        """Rebuilds the snapshot off-thread, then populates the tabs."""
+        self.status_label.setText("Rebuilding knowledge snapshot...")
+        if not mw or not hasattr(mw, "taskman"):
+            # Headless/test: no taskman — populate synchronously.
+            self._populate({})
+            return
+
+        def task() -> dict:
+            # Runs on the background thread: rebuild caches if needed and
+            # gather every view's data in one pass. All DB access goes
+            # through mw.col.db (never an external sqlite connection).
+            try:
+                if __package__:
+                    from .anki import (knowledge_summary_text, knowledge_status,
+                                       knowledge_totals, reset_caches,
+                                       get_kanji_points, get_vocab_points)
+                else:
+                    from anki import (knowledge_summary_text,  # type: ignore
+                                      knowledge_status, knowledge_totals,
+                                      reset_caches, get_kanji_points,
+                                      get_vocab_points)
+            except Exception:
+                import traceback
+                return {"error": traceback.format_exc()}
+            # Fresh scan (Refresh button must see brand-new mature cards).
+            reset_caches()
+            try:
+                if __package__:
+                    from .anki import _fetch_learned_note_rows
+                else:
+                    from anki import _fetch_learned_note_rows  # type: ignore
+                mature_rows = _fetch_learned_note_rows()
+            except Exception:
+                mature_rows = []
+            return {
+                "summary": knowledge_summary_text(),
+                "status": knowledge_status(),
+                "totals": knowledge_totals(),
+                "kanji_points": get_kanji_points(),
+                "vocab_points": get_vocab_points(),
+                "mature_rows": mature_rows,
+            }
+
+        def on_done(future) -> None:
+            try:
+                data = future.result()
+            except Exception:
+                import traceback
+                data = {"error": traceback.format_exc()}
+            self._populate(data)
+
+        mw.taskman.run_in_background(task, on_done)
+
+    # -- Rendering --------------------------------------------------------
+
+    def _populate(self, data: dict) -> None:
+        """Fills all four tabs from the background task's result dict."""
+        if "error" in data and data.get("error"):
+            self.status_label.setText(
+                "CompreDef: could not build knowledge summary "
+                "(see Anki debug console).")
+            print("CompreDef: knowledge dialog error:\n" + str(data["error"]))
+            return
+
+        status = data.get("status", {}) or {}
+        totals = data.get("totals", {}) or {}
+        kanji_points = data.get("kanji_points", {}) or {}
+        vocab_points = data.get("vocab_points", {}) or {}
+        mature_rows = data.get("mature_rows", []) or []
+
+        known_kanji = len(kanji_points)
+        known_vocab = len(vocab_points)
+        mature_scanned = status.get("mature_notes_scanned",
+                                    len(mature_rows))
+        scope = status.get("scope", "")
+
+        # Overview: stat cards --------------------------------------------
+        for i in reversed(range(self.stat_layout.count())):
+            item = self.stat_layout.takeAt(i)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.deleteLater()
+        cards = [
+            ("Known kanji", f"{known_kanji} / {totals.get('kanji', 0)}",
+             "Kanji", "Known kanji / every kanji in your Scope decks' "
+             "first fields"),
+            ("Known kanji-words", f"{known_vocab} / {totals.get('vocab', 0)}",
+             "Kanji Words", "Known multi-kanji words / every multi-kanji "
+             "word in Scope first fields"),
+            ("Mature notes scanned",
+             f"{mature_scanned} / {totals.get('total_notes', 0)}",
+             "Mature Notes", "Notes the snapshot was built from / every "
+             "note in the collection"),
+        ]
+        for title, value, target_tab, desc in cards:
+            self.stat_layout.addWidget(
+                self._make_stat_card(title, value, desc, target_tab))
+
+        details_bits = [f"Source: {scope}"]
+        if status.get("last_error"):
+            details_bits.append(f"Last error: {status['last_error']}")
+        self.overview_details.setText("\n".join(details_bits))
+        self.status_label.setText(
+            f"{known_kanji} known kanji · {known_vocab} known kanji-words · "
+            f"snapshot built from {mature_scanned} mature note(s)"
+        )
+
+        # Kanji tab: one kanji per row with its mastery weight ------------
+        kanji_sorted = sorted(kanji_points.keys())
+        self._fill_list(self.kanji_tab, [
+            f"{k}  (mastery {kanji_points[k]:.2f})"
+            for k in kanji_sorted
+        ])
+        self.tabs.setTabText(1, f"Kanji ({known_kanji})")
+
+        # Kanji words tab --------------------------------------------------
+        vocab_sorted = sorted(vocab_points.keys())
+        self._fill_list(self.words_tab, [
+            f"{w}  (mastery {vocab_points[w]:.2f})"
+            for w in vocab_sorted
+        ])
+        self.tabs.setTabText(2, f"Kanji Words ({known_vocab})")
+
+        # Mature notes tab --------------------------------------------------
+        note_rows = []
+        for row in mature_rows:
+            word_text = row[0] if isinstance(row, (list, tuple)) else row
+            ivl = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else 0
+            try:
+                ivl_txt = f"{float(ivl):.0f} days"
+            except (TypeError, ValueError):
+                ivl_txt = "unknown"
+            note_rows.append(f"{word_text}  — max interval {ivl_txt}")
+        self._fill_list(self.notes_tab, note_rows)
+        # Same count as the stat card (status), not the row list length
+        # (rows can be deduplicated differently on some Anki builds).
+        self.tabs.setTabText(3, f"Mature Notes ({mature_scanned})")
+
+    def _make_stat_card(self, title: str, value: str, desc: str,
+                        target_tab: str) -> QWidget:
+        """Builds one clickable overview stat card."""
+        card = QGroupBox()
+        card.setTitle(title)
+        v = QVBoxLayout(card)
+        val_label = QPushButton(value)
+        val_label.setToolTip(f"{desc}\nClick to open the {target_tab} tab.")
+        val_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        val_label.setFlat(True)
+        # Clicking the big number jumps to the matching detail tab.
+        val_label.clicked.connect(
+            lambda _, name=target_tab: self._goto_tab(name))
+        v.addWidget(val_label)
+        d = QLabel(desc)
+        d.setWordWrap(True)
+        v.addWidget(d)
+        return card
+
+    def _goto_tab(self, name: str) -> None:
+        """Switches to a detail tab by its tab label prefix."""
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i).startswith(name):
+                self.tabs.setCurrentIndex(i)
+                return
+
+    def _fill_list(self, tab: Any, rows: List[str]) -> None:
+        """Populates a list tab and updates its visible count."""
+        tab._all_rows = rows                        # type: ignore[attr-defined]
+        tab._list_widget.clear()                     # type: ignore[attr-defined]
+        tab._list_widget.addItems(rows)              # type: ignore[attr-defined]
+        _knowledge_apply_filter(tab)
+
+
+def _knowledge_apply_filter(tab: Any) -> None:
+    """Live filter helper shared by the knowledge dialog's list tabs."""
+    edit = getattr(tab, "_filter_edit", None)
+    list_widget = getattr(tab, "_list_widget", None)
+    if edit is None or list_widget is None:
+        return
+    needle = edit.text().strip()
+    rows = getattr(tab, "_all_rows", []) or []
+    if not needle:
+        list_widget.clear()
+        list_widget.addItems(rows)
+        shown = len(rows)
     else:
-        close_flag = QDialogButtonBox.Close
-    button_box = QDialogButtonBox(close_flag)
-    button_box.rejected.connect(dialog.reject)
-    layout.addWidget(button_box)
+        hits = [r for r in rows if needle in r]
+        list_widget.clear()
+        list_widget.addItems(hits)
+        shown = len(hits)
+    count_label = getattr(tab, "_count_label", None)
+    if count_label is not None:
+        count_label.setText(f"{shown} shown" +
+                            (f" / {len(rows)}" if needle else ""))
+
+
+def show_knowledge_dialog() -> None:
+    """Displays the learner-knowledge debug view (tabbed, clickable)."""
+    dialog = KnowledgeDialog(
+        parent=mw.app.activeWindow() if mw and mw.app else None)
     dialog.exec()

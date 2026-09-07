@@ -288,6 +288,67 @@ def reset_caches() -> None:
     init_caches_async()
 
 
+def knowledge_totals() -> dict:
+    """
+    Collection-wide totals for the X/total readouts in the knowledge
+    dialog (pure SQLite counts via Anki's DB wrapper — NEVER an
+    external connection; see AGENTS.md).
+
+    Returns {'kanji', 'vocab', 'mature_notes', 'total_notes'} where
+    the first three count only inside the Scope decks (the same
+    universe the snapshot is built from) and total_notes counts every
+    note in the collection. All counts are 0 when the DB is
+    unavailable — the GUI then shows the plain numbers without
+    denominators instead of crashing.
+    """
+    out = {"kanji": 0, "vocab": 0, "mature_notes": 0, "total_notes": 0}
+    try:
+        if not mw or not mw.col:
+            return out
+        # 1) Every distinct kanji / multi-kanji compound appearing in the
+        #    FIRST field of ANY in-scope note — the "how much Japanese is
+        #    in your decks" denominator for the known X/total readouts.
+        scope = _get_scope_deck_names()
+        if scope:
+            dids = scope_dids(mw.col, scope)
+            if dids:
+                did_list = ",".join(str(int(d)) for d in sorted(dids))
+                rows = mw.col.db.all(
+                    "SELECT DISTINCT notes.flds FROM notes "
+                    "JOIN cards ON cards.nid = notes.id "
+                    f"WHERE cards.did IN ({did_list})"
+                ) or []
+                kanji_seen: Set[str] = set()
+                vocab_seen: Set[str] = set()
+                for row in rows:
+                    blob = row[0] if isinstance(row, (list, tuple)) else row
+                    text = _first_field_text(blob if isinstance(blob, str) else "")
+                    if not text:
+                        continue
+                    kanji_seen.update(_KANJI_RE.findall(text))
+                    if _KANJI_WORD_RE.match(text):
+                        vocab_seen.add(text)
+                out["kanji"] = len(kanji_seen)
+                out["vocab"] = len(vocab_seen)
+                # 2) Mature notes in scope: notes owning at least one card
+                #    with ivl >= 21 (the snapshot's admission rule).
+                out["mature_notes"] = (
+                    mw.col.db.scalar(
+                        "SELECT COUNT(DISTINCT notes.id) FROM notes "
+                        "JOIN cards ON cards.nid = notes.id "
+                        "WHERE cards.ivl >= 21 "
+                        f"AND cards.did IN ({did_list})"
+                    ) or 0
+                )
+        # 3) Total notes in the WHOLE collection.
+        out["total_notes"] = mw.col.db.scalar(
+            "SELECT COUNT() FROM notes") or 0
+    except Exception:
+        # Totals are a read-only nicety: never let them break the dialog.
+        pass
+    return out
+
+
 def knowledge_status() -> dict:
     """
     One-shot diagnostics for the Debug Console: what the snapshot was
@@ -314,10 +375,21 @@ def knowledge_summary_text(max_kanji: int = 2000,
     """
     Human-readable snapshot summary for the knowledge dialog and the
     Debug Console. Pure stdlib logic, covered by the regression suite.
+
+    v1.2.1 layout (the user's debug requests):
+    - X/total readouts: known kanji / every kanji in scope, known
+      kanji-words / every compound in scope, mature notes / all notes.
+    - 'Kanji (all):' — the FULL known-kanji list, clearly labeled as
+      coming from the first fields of mature notes (the old bare
+      'Kanji:' line was unclear what it represented).
+    - 'Kanji words (all):' — the FULL known-words list (the old
+      '(sample)' + fixed truncation is gone; max_* only guards the
+      pathological case).
     """
     known = get_known_kanji_set()
     vocab = get_known_vocabulary_set()
     status = knowledge_status()
+    totals = knowledge_totals()
     kanji_list = "".join(sorted(known))
     if len(kanji_list) > max_kanji:
         kanji_list = (kanji_list[:max_kanji] +
@@ -327,13 +399,14 @@ def knowledge_summary_text(max_kanji: int = 2000,
     if len(words) > max_words:
         words_shown += f", … (+{len(words) - max_words} more)"
     lines = [
-        f"Known kanji: {len(known)}",
-        f"Known kanji-words: {len(vocab)}",
+        f"Known kanji: {len(known)} / {totals['kanji']}",
+        f"Known kanji-words: {len(vocab)} / {totals['vocab']}",
         f"Source: {status['scope']}",
-        f"Mature notes scanned: {status['mature_notes_scanned']}",
+        f"Mature notes scanned: {status['mature_notes_scanned']}"
+        f" / {totals['total_notes']} notes in collection",
     ]
     if status["last_error"]:
         lines.append(f"Last error: {status['last_error']}")
-    lines += ["", "Kanji:", kanji_list or "(none)", "",
-              "Kanji words (sample):", words_shown or "(none)"]
+    lines += ["", "Kanji (all):", kanji_list or "(none)", "",
+              "Kanji words (all):", words_shown or "(none)"]
     return "\n".join(lines)

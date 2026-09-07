@@ -130,6 +130,38 @@ class _FakeCol:
                             and n.get("mid") is not None:
                         out.add(n["mid"])
                 return [(mm,) for mm in out]
+            # v1.2.1 knowledge_totals: every in-scope first field (for
+            # the X/total denominators). Returns (flds, ivl) rows so the
+            # same post-processing as production runs on them.
+            if "select distinct notes.flds from notes" in ql:
+                m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
+                dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
+                    if m else set()
+                rows = []
+                for n in self.notes.values():
+                    if set(n.get("dids", [])) & dids:
+                        rows.append((n["flds"],))
+                return rows
+            if "count(distinct notes.id) from notes" in ql:
+                # mature-notes-in-scope count (scalar call routed via all)
+                m = _re.search(r"did in\s*\(([\d,\s]+)\)", ql)
+                dids = {int(x) for x in m.group(1).split(",") if x.strip()} \
+                    if m else set()
+                mature = 0
+                for n in self.notes.values():
+                    if not (set(n.get("dids", [])) & dids):
+                        continue
+                    ivl = n.get("ivl", 30)
+                    if "ivls" in n:
+                        hit = set(n.get("dids", [])) & dids
+                        ivl = max((n["ivls"].get(d, 0) for d in hit),
+                                  default=0)
+                    if ivl >= 21:
+                        mature += 1
+                return [(mature,)]
+            if "select count() from notes" in ql:
+                # total notes in the collection (scalar call).
+                return [(len(self.notes),)]
             if "from notes" in ql and "group by notes.id" in ql:
                 # v1.2 knowledge snapshot: (flds, MAX(ivl)) per note,
                 # filtered by scoped dids + ivl >= 21. Notes may carry
@@ -159,6 +191,17 @@ class _FakeCol:
                 rows.extend(self.flds_rows)
                 return rows
             return list(self.flds_rows)
+
+        def scalar(self, query, params=()):
+            """Single-value queries (production uses db.scalar for the
+            knowledge_totals counts); routed through all()."""
+            rows = self.all(query, params)
+            if not rows:
+                return 0
+            first = rows[0]
+            if isinstance(first, (list, tuple)):
+                return first[0] if first else 0
+            return first
 
     def models_by_name(self, name):
         return self.models.by_name(name)
@@ -1650,10 +1693,19 @@ def test_multi_note_type_targeting() -> None:
     check("multi: tab ignores non-word fields of same type",
           not eb._should_auto_generate(mining_note, "Furigana",
                                        targets_config))
+    # v1.2.1: an UNCONFIGURED but in-scope type now auto-generates via
+    # the same field inference the toolbar button uses — the old
+    # hard rejection made Tab "not always work" while the button did.
+    # ("Japanese" sits in the JP deck but has no targets_config entry.)
     unconfigured_note = Note({"Expression": "x", "Meaning": ""},
-                             "Kaishi 1.5k")
-    check("multi: tab never fires on unconfigured type",
-          not eb._should_auto_generate(unconfigured_note, "Expression",
+                             "Japanese")
+    check("multi: tab fires on unconfigured type via inference",
+          eb._should_auto_generate(unconfigured_note, "Expression",
+                                   targets_config))
+    # …but a type whose fields CANNOT be inferred stays silent.
+    cryptic_note = Note({"Side A": "x", "Side B": ""}, "Japanese")
+    check("multi: tab stays silent when fields cannot be inferred",
+          not eb._should_auto_generate(cryptic_note, "Side A",
                                        targets_config))
     check("multi: tab legacy config still works",
           eb._should_auto_generate(
@@ -2322,7 +2374,7 @@ def test_package_relative_imports() -> None:
         expected = {
         "anki": ["get_known_kanji_set", "get_known_vocabulary_set",
                  "init_caches_async", "reset_caches", "knowledge_status",
-                 "knowledge_summary_text"],
+                 "knowledge_summary_text", "knowledge_totals"],
             "core": ["get_provider", "get_generator"],
             "engine": ["DefinitionGenerator"],
             "provider": ["LocalSQLiteProvider", "IndexingError"],
@@ -2557,7 +2609,12 @@ def test_snapshot_waits_for_open_collection() -> None:
         _core._generator = prev_generator
 
 def test_knowledge_summary_text() -> None:
-    """The knowledge dialog's content source: counts, lists, scope."""
+    """The knowledge dialog's content source: counts, lists, scope.
+
+    v1.2.1: counts are X/total readouts; the kanji and word lists are
+    labeled '(all)' (the old '(sample)' was misleading), and every
+    list line must be reproducible in the clickable dialog tabs.
+    """
     import anki
 
     prev_kanji = set(anki._known_kanji_cache)
@@ -2581,13 +2638,42 @@ def test_knowledge_summary_text() -> None:
         anki._build_caches()
         text = anki.knowledge_summary_text()
         check("summary: shows kanji count", "Known kanji: 4" in text, text)
-        check("summary: shows word count", "Known kanji-words: 2" in text, text)
+        check("summary: shows word count", "Known kanji-words: 2" in text,
+              text)
+        check("summary: kanji count carries /total denominator",
+              "Known kanji: 4 / 4" in text, text)
+        check("summary: word count carries /total denominator",
+              "Known kanji-words: 2 / 2" in text, text)
+        check("summary: mature notes carry collection total",
+              "/ 2 notes in collection" in text, text)
         check("summary: lists the kanji",
               "漢" in text and "語" in text, text)
         check("summary: shows scope", "scope decks" in text, text)
+        # v1.2.1: the old bare 'Kanji:' / '(sample)' labels confused the
+        # user ("what is this kanji list?"); they are now explicit.
+        check("summary: kanji list labeled (all), not bare",
+              "Kanji (all):" in text and "Kanji words (all):" in text, text)
+        check("summary: no deprecated '(sample)' label remains",
+              "(sample)" not in text, text)
         short = anki.knowledge_summary_text(max_kanji=2, max_words=1)
         check("summary: truncates long lists with a remainder",
               "more" in short, short)
+        # Totals: mature notes denominator counts only in-scope mature
+        # notes, and the kanji/vocab totals cover every in-scope first
+        # field (not just mature ones).
+        totals = anki.knowledge_totals()
+        check("totals: counts mature notes in scope",
+              totals["mature_notes"] == 2, f"totals={totals}")
+        check("totals: counts all notes in collection",
+              totals["total_notes"] == 2, f"totals={totals}")
+        # A non-mature out-of-scope note widens the total_notes only.
+        col.db.notes[3] = {"flds": SEP.join(["仏文", "d"]), "dids": [999],
+                           "mid": 1, "ivl": 1}
+        totals2 = anki.knowledge_totals()
+        check("totals: out-of-scope note widens collection total",
+              totals2["total_notes"] == 3 and
+              totals2["kanji"] == 4 and totals2["vocab"] == 2,
+              f"totals2={totals2}")
     finally:
         _restore_collection_state(scope_state)
         anki._known_kanji_cache = prev_kanji
