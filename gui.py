@@ -2316,18 +2316,21 @@ class KnowledgeDialog(QDialog):
             try:
                 if __package__:
                     from .anki import (knowledge_summary_text, knowledge_status,
-                                       knowledge_totals, reset_caches,
+                                       knowledge_totals, sync_reset_caches,
                                        get_kanji_points, get_vocab_points)
                 else:
                     from anki import (knowledge_summary_text,  # type: ignore
                                       knowledge_status, knowledge_totals,
-                                      reset_caches, get_kanji_points,
+                                      sync_reset_caches, get_kanji_points,
                                       get_vocab_points)
             except Exception:
                 import traceback
                 return {"error": traceback.format_exc()}
             # Fresh scan (Refresh button must see brand-new mature cards).
-            reset_caches()
+            # SYNCHRONOUS variant: this task itself runs on a background
+            # thread, and mw.taskman must never be called from there
+            # (Anki's Taskman flags it — the v1.2.1 dialog bug).
+            sync_reset_caches()
             try:
                 if __package__:
                     from .anki import _fetch_learned_note_rows

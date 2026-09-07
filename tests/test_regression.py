@@ -2608,6 +2608,88 @@ def test_snapshot_waits_for_open_collection() -> None:
             anki._caches_ready.clear()
         _core._generator = prev_generator
 
+def test_sync_reset_is_thread_safe() -> None:
+    """
+    The v1.2.1 production bug: the knowledge dialog's background task
+    called reset_caches(), which reaches mw.taskman.run_in_background
+    from a NON-main thread — Anki's Taskman printed a 'bug: run_in_
+    background not called from main thread' traceback for every dialog
+    refresh. sync_reset_caches() must rebuild WITHOUT ever touching
+    taskman, and still produce a ready, scoped snapshot.
+    """
+    import anki
+    import threading
+
+    prev_kanji = set(anki._known_kanji_cache)
+    prev_vocab = set(anki._known_vocab_cache)
+    prev_ready = anki._caches_ready.is_set()
+    import core as _core
+    prev_generator = _core._generator
+    scope_state = _save_collection_state()
+    # Tripwire: any taskman access from the reset path fails the test.
+    taskman_calls = []
+    prev_mw_taskman = getattr(aqt.mw, "taskman", None)
+
+    class _TripwireTaskman:
+        def run_in_background(self, *a, **kw):
+            taskman_calls.append(a)
+            raise AssertionError("taskman touched from sync reset path")
+
+    try:
+        SEP = "\x1f"
+        col = aqt.mw.col
+        jp = col.decks.add("Japanese")
+        col.db.notes = {
+            1: {"flds": SEP.join(["漢字", "def"]), "dids": [jp], "mid": 1,
+                "ivl": 400},
+        }
+        _set_scope_config(["Japanese"])
+        aqt.mw.taskman = _TripwireTaskman()
+        # Simulate the dialog's worker thread exactly: a background
+        # thread calling the SYNCHRONOUS reset.
+        result = {}
+
+        def worker():
+            try:
+                anki.sync_reset_caches()
+                result["ok"] = True
+            except Exception as e:  # noqa: BLE001 — the failure IS the test
+                result["ok"] = False
+                result["err"] = e
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(timeout=30)
+        check("sync-reset: background thread never touches taskman",
+              result.get("ok") is True and not taskman_calls,
+              f"result={result} taskman_calls={taskman_calls}")
+        check("sync-reset: snapshot is ready after background rebuild",
+              anki._caches_ready.is_set()
+              and anki.get_known_kanji_set() == {"漢", "字"},
+              f"known={sorted(anki._known_kanji_cache)}")
+        # core.reset_generator (used by generation paths that can run on
+        # background threads) must also stay off taskman.
+        _core.reset_generator()
+        check("sync-reset: reset_generator stays off taskman",
+              not taskman_calls,
+              f"taskman_calls={taskman_calls}")
+    finally:
+        if prev_mw_taskman is not None:
+            aqt.mw.taskman = prev_mw_taskman
+        else:
+            try:
+                del aqt.mw.taskman
+            except AttributeError:
+                pass
+        _restore_collection_state(scope_state)
+        anki._known_kanji_cache = prev_kanji
+        anki._known_vocab_cache = prev_vocab
+        if prev_ready:
+            anki._caches_ready.set()
+        else:
+            anki._caches_ready.clear()
+        _core._generator = prev_generator
+
 def test_knowledge_summary_text() -> None:
     """The knowledge dialog's content source: counts, lists, scope.
 
@@ -3144,6 +3226,7 @@ def main() -> int:
         test_kanji_extraction_correctness(tmp_root)
         test_knowledge_survives_new_schema(tmp_root)
         test_snapshot_waits_for_open_collection()
+        test_sync_reset_is_thread_safe()
         test_knowledge_summary_text()
         test_package_relative_imports()
         test_no_undefined_names_in_shipped_modules()

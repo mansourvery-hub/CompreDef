@@ -10,12 +10,12 @@ import os
 if __package__:
     from .provider import LocalSQLiteProvider
     from .anki import (get_known_kanji_set, get_kanji_points,
-                       get_vocab_points, reset_caches)
+                       get_vocab_points, sync_reset_caches)
     from .engine import DefinitionGenerator
 else:
     from provider import LocalSQLiteProvider
     from anki import (get_known_kanji_set, get_kanji_points,
-                      get_vocab_points, reset_caches)
+                      get_vocab_points, sync_reset_caches)
     from engine import DefinitionGenerator
 
 # Singletons for the application lifecycle
@@ -114,12 +114,14 @@ def reset_generator() -> None:
     changes (GUI save, quick-fix add-deck), the old generator would keep
     scoring against the STALE snapshot — the v1.1.4 "add deck does not
     fix it" contributor. Also rebuilds knowledge from Anki's DB when
-    possible (synchronous fallback mirrors anki.py's lazy path).
+    possible. Uses the SYNCHRONOUS reset because this can be reached from
+    background threads (generation tasks); mw.taskman must never be
+    called off the main thread (Anki prints a 'bug:' traceback).
     """
     global _generator
     _generator = None
     try:
-        reset_caches()
+        sync_reset_caches()
     except Exception:
         pass
 

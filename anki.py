@@ -278,7 +278,14 @@ def get_vocab_points() -> Dict[str, float]:
     return _vocab_points_cache
 
 def reset_caches() -> None:
-    """Manual refresh of the knowledge snapshot."""
+    """Manual refresh of the knowledge snapshot (main-thread safe only).
+
+    Schedules the rebuild via mw.taskman — which Anki's Taskman
+    permits ONLY from the main thread (it prints a 'bug: not called
+    from main thread' traceback otherwise; the v1.2.1 knowledge
+    dialog triggered exactly that from its background task).
+    Background threads must call sync_reset_caches() instead.
+    """
     global _last_rows_scanned, _last_words_kept, _last_error, _last_scope_label
     _last_rows_scanned = 0
     _last_words_kept = 0
@@ -286,6 +293,28 @@ def reset_caches() -> None:
     _last_scope_label = ""
     _caches_ready.clear()
     init_caches_async()
+
+
+def sync_reset_caches() -> None:
+    """Thread-safe manual refresh: rebuilds SYNCHRONOUSLY on the caller's
+    thread, never touching mw.taskman.
+
+    For background tasks (mw.taskman.run_in_background workers, the
+    knowledge dialog's data gatherer): reset_caches() would call
+    taskman.run_in_background from a NON-main thread, which Anki's
+    Taskman flags as a bug. _build_caches is lock-guarded and only
+    touches Anki's DB wrapper, so it is safe to run on any thread.
+    """
+    global _last_rows_scanned, _last_words_kept, _last_error, _last_scope_label
+    _last_rows_scanned = 0
+    _last_words_kept = 0
+    _last_error = None
+    _last_scope_label = ""
+    _caches_ready.clear()
+    # Lazy-build contract: getters see not-ready → _build_caches() runs
+    # inline on THIS thread. A closed collection stays not-ready (the
+    # col-gate), matching test_snapshot_waits_for_open_collection.
+    _build_caches()
 
 
 def knowledge_totals() -> dict:

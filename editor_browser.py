@@ -320,14 +320,14 @@ def _add_deck_to_scope_and_reset(deck_names: List[str]) -> bool:
             except Exception:
                 pass
         else:
-            # Last resort: reset knowledge caches directly.
+            # Last resort: reset knowledge caches directly. The SYNCHRONOUS
+            # variant is used because callers may run on background
+            # threads (generation retry); taskman is main-thread-only.
             try:
-                from .anki import reset_caches as _reset
-            except Exception:
-                try:
-                    from anki import reset_caches as _reset  # type: ignore
-                except Exception:
-                    _reset = None
+                if __package__:
+                    from .anki import sync_reset_caches as _reset
+                else:
+                    from anki import sync_reset_caches as _reset  # type: ignore
                 if _reset:
                     _reset()
             except Exception:
