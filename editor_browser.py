@@ -809,10 +809,14 @@ def _should_auto_generate(note, unfocused_field: str, config: Dict[str, Any],
     if def_field not in note:
         return False
 
-    # Only auto-fill EMPTY definition fields. .strip() on the raw field
-    # covers whitespace-only content; HTML emptiness (e.g. a lone <br>) is
-    # handled by extract_clean_word downstream during generation itself.
-    return not note[def_field].strip()
+    # Only auto-fill EMPTY definition fields. A never-edited field in the
+    # legacy editor ships as "<br>" / "<div><br></div>" HTML rather than
+    # "" — plain .strip() sees it as non-empty and blocks generation.
+    # extract_clean_word strips tags + entities, so HTML emptiness counts
+    # as empty (matches the downstream generation path's cleaning). This
+    # was the Browser bug: 不公平 in Expression + Tab left Definition
+    # as "<br>", so Tab silently did nothing despite the setting.
+    return not extract_clean_word(note[def_field])
 
 
 def on_field_unfocus(changed: bool, note, current_field_index: int) -> bool:
@@ -868,9 +872,40 @@ def _field_name_at(note, index: int) -> str:
     Resolves the field name for a field ordinal via the non-deprecated
     note API. Returns '' for out-of-range indices (hook can fire during
     notetype switches with a stale index).
+
+    Uses mw.col.models.field_names(note.note_type()) as the single
+    source of truth — the same ordered list the legacy editor's
+    onBridgeCmd uses when it saves note.fields[ord] = mungeHTML(txt)
+    before firing the hook. Falls back to note.keys() for the test stub
+    (which has no collection/models) and for any odd note that lacks a
+    note_type. This matches the Japanese Support pattern:
+    `fields = mw.col.models.field_names(note.note_type())`.
     """
+    # Preferred: ordered names from the note type (editor's own order).
     try:
-        names = list(note.keys())
+        nt = note.note_type()  # type: ignore[attr-defined]
+        if nt:
+            try:
+                from aqt import mw as _mw  # local import: test stub has no Qt
+                if _mw and getattr(_mw, "col", None) is not None:
+                    models = getattr(_mw.col, "models", None)
+                    if models is not None and hasattr(models, "field_names"):
+                        names = models.field_names(nt)  # type: ignore[union-attr]
+                        if 0 <= index < len(names):
+                            return str(names[index])
+            except Exception:
+                pass
+            # Fallback: flds list inside the note-type dict itself.
+            flds = nt.get("flds") if isinstance(nt, dict) else None
+            if isinstance(flds, list) and 0 <= index < len(flds):
+                fld = flds[index]
+                if isinstance(fld, dict):
+                    return str(fld.get("name", ""))
+                return str(fld)
+    except Exception:
+        pass
+    try:
+        names = list(note.keys())  # type: ignore[attr-defined]
         if 0 <= index < len(names):
             return names[index]
     except Exception:
