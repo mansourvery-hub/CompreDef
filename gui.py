@@ -34,16 +34,13 @@ from aqt.qt import (
     Qt,
     QLabel,
     QGroupBox,
-    QTextEdit,
     QLineEdit,
     QTabWidget,
-    QScrollArea,
-    QFrame,
     QGridLayout,
 )
 
 from .core import get_provider
-from .anki import knowledge_summary_text, reset_caches as _reset_knowledge_caches
+from .anki import reset_caches as _reset_knowledge_caches
 from .utils import (
     find_dictionary_folders,
     is_zip_dictionary,
@@ -168,7 +165,7 @@ def _get_addon_name() -> str:
     return __name__.split('.')[0]
 
 
-def _find_best_field_match(fields: List[str], keywords: List[str], fallback: str = None) -> Optional[str]:
+def _find_best_field_match(fields: List[str], keywords: List[str], fallback: Optional[str] = None) -> Optional[str]:
     """
     Finds the best matching field name based on keyword similarity.
     """
@@ -200,11 +197,7 @@ def _indent_deck_name(name: str, all_names: List[str]) -> tuple:
     depth = name.count("::")
     indent = "    " * depth
     base = name.rsplit("::", 1)[-1]
-    prefix = "My Life Decks::"  # user-friendly: don't repeat full path
     disp = f"{indent}{base}"
-    if depth > 0:
-        # Show the parent chain compactly for siblings clarity
-        disp = f"{indent}{base}"
     has_children = any(
         n != name and n.startswith(name + "::") for n in all_names
     )
@@ -1449,7 +1442,7 @@ class ConfigDialog(QDialog):
                 extra = [extid] if extid else []
                 results = install_bridge(extra)
                 return (results, None)
-            except Exception as e:
+            except Exception:
                 import traceback
                 return (None, traceback.format_exc())
 

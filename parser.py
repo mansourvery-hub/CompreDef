@@ -29,6 +29,31 @@ else:
     )
     from core import get_provider
 
+# Explicit re-export contract: these names are imported above ONLY so
+# that legacy `parser.X` / `compredef_parser.X` attribute access keeps
+# working (the regression suite leans on it heavily). Listing them in
+# __all__ marks the re-exports as intentional (and silences F401).
+__all__ = [
+    "LocalSQLiteProvider",
+    "IndexingError",
+    "render_structured_content_node",
+    "render_yomitan_definition_html",
+    "render_yomitan_definition_text",
+    "is_zip_dictionary",
+    "is_directory_dictionary",
+    "extract_clean_word",
+    "extract_base_text",
+    "parse_furigana_field",
+    "find_dictionary_folders",
+    "get_provider",
+    "RENDERER_VERSION",
+    "get_single_dictionary",
+    "SingleDictionary",
+    "install_dictionary",
+    "uninstall_dictionary",
+    "is_dictionary_installed",
+]
+
 RENDERER_VERSION = LocalSQLiteProvider.RENDERER_VERSION
 
 def _get_db_path():

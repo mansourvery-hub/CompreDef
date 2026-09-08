@@ -19,7 +19,6 @@ import json
 import os
 import shutil
 import sys
-import re
 
 # ---------------------------------------------------------------------------
 # Bridge script content (yomitan_api.py, based on yomidevs/yomitan-api with
@@ -461,8 +460,8 @@ def _ensure_bridge_script() -> str:
     return script_path
 
 def _platform_data_get() -> dict:
-    for platform_name in PLATFORM_DATA:
-        data = copy.deepcopy(PLATFORM_DATA[platform_name])
+    for platform_name, platform_data in PLATFORM_DATA.items():
+        data = copy.deepcopy(platform_data)
         data["platform"] = platform_name
         if sys.platform in data["platform_aliases"]:
             return data

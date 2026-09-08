@@ -1,16 +1,15 @@
-import os
 from typing import Dict, List, Optional, Set, Tuple
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .provider import DictionaryProvider
-    from .scoring import calculate_kanji_score, is_reference_title, score_definition
+    from .scoring import is_reference_title, score_definition
     from .utils import extract_clean_word, extract_base_text
     from .models import DictionaryEntry, ScoringResult
 else:
     from provider import DictionaryProvider
-    from scoring import calculate_kanji_score, is_reference_title, score_definition
+    from scoring import is_reference_title, score_definition
     from utils import extract_clean_word, extract_base_text
     from models import DictionaryEntry, ScoringResult
 

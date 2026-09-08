@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import List, Optional
 
 # The version of the HTML rendering output. 
 # Bump this whenever rendering changes to invalidate stale SQLite caches.

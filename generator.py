@@ -5,10 +5,8 @@ generator.py - Compatibility layer for legacy tests and imports.
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .core import get_generator
-    from .utils import extract_clean_word
 else:
     from core import get_generator
-    from utils import extract_clean_word
 
 def generate_definition(target_word, mode="", dictionary_folder="", dictionaries=None, reading="", disabled_dictionaries=None, plain_text=None):
     # Map legacy args to new DefinitionGenerator.generate()

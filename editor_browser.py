@@ -1035,7 +1035,7 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
             )
         except Exception:
             print(f"CompreDef: bulk generation crashed:\n{traceback.format_exc()}")
-            tooltip(f"CompreDef: bulk generation crashed — see console.", parent=browser)
+            tooltip("CompreDef: bulk generation crashed — see console.", parent=browser)
 
     mw.taskman.run_in_background(task, on_done)
 

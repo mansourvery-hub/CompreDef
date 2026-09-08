@@ -6,7 +6,7 @@ import hashlib
 import zipfile
 import threading
 import re
-from typing import List, Optional, Callable, Any, Dict
+from typing import List, Optional, Callable
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).

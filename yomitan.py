@@ -535,7 +535,6 @@ def clear_yomitan_cache() -> None:
 # For now the engine fallbacks via fetch_yomitan_definitions() directly.
 # This provider is kept for potential future GUI toggle ("Local" vs "Yomitan" vs "Auto").
 try:
-    import abc
     if __package__:
         from .provider import DictionaryProvider
     else:

@@ -6,10 +6,10 @@ from typing import Dict, List, Optional, Set, Tuple
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
-    from .scope import (SCOPE_CONFIG_KEY, get_scope_decks, scope_dids,
+    from .scope import (get_scope_decks, scope_dids,
                         implied_note_types)
 else:
-    from scope import (SCOPE_CONFIG_KEY, get_scope_decks, scope_dids,
+    from scope import (get_scope_decks, scope_dids,
                        implied_note_types)
 
 _KANJI_RE = re.compile(r'[\u4e00-\u9fff]')

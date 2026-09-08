@@ -1,5 +1,5 @@
 import html
-from typing import Any, List, Optional, Dict
+from typing import Any
 
 def _style_to_css(style: dict) -> str:
     """Converts a Yomitan structured-content style dictionary into an inline CSS string."""
