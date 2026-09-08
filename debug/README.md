@@ -12,12 +12,18 @@ and is **never** executed by CI, `build.sh`, or `release.sh`.
 | Definitions seem too hard / too easy for your level | Use case U2, then S2–S3 |
 | "Where did this kanji come from?" | Use case U3 |
 | A DB-related change was just made to `anki.py` | Full `sanity_knowledge.py` run |
+| The Learner Knowledge *window* (tabs, sorting, Browser search) | `python3 debug/smoke_dialog.py` (headless, local Anki needed) |
 | Anki itself upgraded major versions | S1 + the regression suite |
 
 ## Contents
 
 - **`sanity_knowledge.py`** — standalone checks, system Python, Anki
   stubbed. `python3 debug/sanity_knowledge.py`. Exit 0 = sane.
+- **`smoke_dialog.py`** — headless GUI smoke test for the Learner
+  Knowledge *window* (which the regression suite cannot open: no
+  screen). Needs a local Anki install + local collection; runs fully
+  offscreen. `python3 debug/smoke_dialog.py [--scope "Deck"]`.
+  Exit 0 = pass, 1 = fail, 2 = skipped (no Anki/collection).
 - **`console_snippets.md`** — copy-paste recipes for Anki's
   Help → Debug Console against the **live** collection.
 - This file — specifications and use cases.

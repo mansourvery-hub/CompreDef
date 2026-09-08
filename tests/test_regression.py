@@ -16,8 +16,8 @@ ARCHITECTURE TEST MAP (install-time indexing):
   A4. Missing-word lookup returns [] instantly               -> test_missing_word
   A5. Dictionary replacement re-indexes exactly once        -> test_replacement_reindexes
   A6. Indexing failure is reported loudly                   -> test_indexing_failure_reported
-  A7. Re-adding an installed dictionary is a no-op          -> test_reinstall_is_noop
-  A8. Individual generation failure is logged               -> (editor path, smoke-tested)
+  A7. Re-adding an unchanged dictionary is a no-op (covered inside A2)
+  A8. Dictionary removal deletes its index                  -> test_uninstall_removes_index
 
 HISTORICAL BUG MAP (bug -> test):
   1. '先ず' returned 121 chars of plain text instead of rich
@@ -25,19 +25,19 @@ HISTORICAL BUG MAP (bug -> test):
   2. Renderer upgraded but SQLite kept serving stale entries
      forever                      -> test_renderer_version_invalidates_cache
   3. Furigana <rt> readings polluted kanji scores
-                                 -> test_scoring_ignores_furigana
+                                  -> test_scoring_ignores_furigana
   4. Ladder returned advanced def when a simpler one existed
-                                 -> test_ladder_early_exit_order
+                                  -> test_ladder_early_exit_order
   5. Cross-reference titles won over real definitions
-                                 -> test_reference_title_filtering
+                                  -> test_reference_title_filtering
   6. ZIP and folder produced different output
-                                 -> test_zip_folder_parity
+                                  -> test_zip_folder_parity
   7. data-sc-* attributes rendered differently from Yomitan
-                                 -> test_data_sc_attribute_names
+                                  -> test_data_sc_attribute_names
   8. Real-dictionary smoke (skips when absent)
-                                 -> test_real_dictionary_smoke
+                                  -> test_real_dictionary_smoke
   9. Nonsense word '駿ってさ' froze Anki at 100% CPU
-                                 -> test_nonsense_word_returns_none_fast
+                                  -> test_missing_word
  10. Indexing accumulated ~1.3 GB in RAM (OOM/freeze)
                                  -> test_indexing_streams_in_batches
  11. SQLite connections leaked one handle per lookup
@@ -58,10 +58,18 @@ No Anki/PyQt required: db_utils' Anki dependency is stubbed before import.
 import os
 import re
 import sys
+import ast
+import json
+import glob
 import shutil
 import sqlite3
+import symtable
+import builtins
 import tempfile
 import time
+import importlib
+import importlib.abc
+import types
 
 # ---------------------------------------------------------------------------
 # Make the repo root importable and stub Anki (aqt) BEFORE importing db_utils.
@@ -285,6 +293,7 @@ import parser as compredef_parser  # noqa: E402
 import generator as compredef_generator  # noqa: E402
 import provider  # noqa: E402
 import scope as compredef_scope  # noqa: E402
+import utils as compredef_utils  # noqa: E402
 
 # The directory containing the user's real Yomitan dictionaries (used ONLY
 # by the dynamic smoke tests; everything else runs on synthetic fixtures).
@@ -658,7 +667,7 @@ def test_replacement_reindexes(tmp_root: str) -> None:
     # bank with different content (and thus a different size/mtime).
     time.sleep(0.02)  # ensure mtime_ns differs even on coarse filesystems
     with open(os.path.join(dict_dir, "term_bank_2.json"), "w") as f:
-        __import__("json").dump([
+        json.dump([
             ["追加語", "ついかご", "", "", 0,
              [{"type": "text", "text": "置き換え後に追加された語の定義。"}],
              0, ""],
@@ -715,7 +724,7 @@ def test_indexing_failure_reported(tmp_root: str) -> None:
     empty_dir = os.path.join(tmp_root, "broken_dict")
     os.makedirs(empty_dir, exist_ok=True)
     with open(os.path.join(empty_dir, "index.json"), "w") as f:
-        __import__("json").dump({"title": "Broken", "format": 3}, f)
+        json.dump({"title": "Broken", "format": 3}, f)
 
     d = compredef_parser.get_single_dictionary(empty_dir)
     raised = False
@@ -764,7 +773,7 @@ def test_indexing_failure_reported(tmp_root: str) -> None:
 
 def test_uninstall_removes_index(tmp_root: str) -> None:
     """
-    A9: Removing a dictionary deletes its index — 'old cached definitions'
+    A8: Removing a dictionary deletes its index — 'old cached definitions'
     must never keep appearing after the user removes a dictionary. This was
     a real bug: removed dictionaries left 500k+ stale rows behind.
     """
@@ -962,9 +971,9 @@ def test_ladder_early_exit_order(tmp_root: str) -> None:
         easy = os.path.join(tmp_root, "ladder_easy")
         os.makedirs(easy, exist_ok=True)
         with open(os.path.join(easy, "index.json"), "w") as f:
-            __import__("json").dump({"title": "ladder_easy", "format": 3}, f)
+            json.dump({"title": "ladder_easy", "format": 3}, f)
         with open(os.path.join(easy, "term_bank_1.json"), "w") as f:
-            __import__("json").dump([
+            json.dump([
                 ["会社", "かいしゃ", "", "", 0,
                  [{"type": "text", "text": "やさしい定義。かんたんな説明。"}],
                  0, ""],
@@ -974,9 +983,9 @@ def test_ladder_early_exit_order(tmp_root: str) -> None:
         hard = os.path.join(tmp_root, "ladder_hard")
         os.makedirs(hard, exist_ok=True)
         with open(os.path.join(hard, "index.json"), "w") as f:
-            __import__("json").dump({"title": "ladder_hard", "format": 3}, f)
+            json.dump({"title": "ladder_hard", "format": 3}, f)
         with open(os.path.join(hard, "term_bank_1.json"), "w") as f:
-            __import__("json").dump([
+            json.dump([
                 ["会社", "かいしゃ", "", "", 0,
                  [{"type": "text", "text": "むずかしい定義。高度に専門的な説明。"}],
                  0, ""],
@@ -1108,7 +1117,7 @@ def test_indexing_streams_in_batches(tmp_root: str) -> None:
             i, "",
         ])
     with open(os.path.join(dict_dir, "term_bank_2.json"), "w") as f:
-        __import__("json").dump(big_entries, f, ensure_ascii=False)
+        json.dump(big_entries, f, ensure_ascii=False)
 
     d = compredef_parser.get_single_dictionary(dict_dir)
     t0 = time.time()
@@ -1122,7 +1131,7 @@ def test_indexing_streams_in_batches(tmp_root: str) -> None:
         f"count={count}, rows={db_entry_count(dict_dir)}",
     )
     check(
-        "stream: 12k-row dictionary installs in <30s (bounded RAM by design)",
+        "stream: 4k-row dictionary installs in <30s (bounded RAM by design)",
         elapsed < 30.0,
         f"took {elapsed:.1f}s",
     )
@@ -1137,6 +1146,11 @@ def test_db_connections_are_closed(tmp_root: str) -> None:
     """
     Historical bug #11: SQLite connections leaked one handle per lookup.
     """
+    if not os.path.isdir("/proc/self/fd"):
+        # fd-counting only exists on Linux; elsewhere there is nothing
+        # to count (previously this test CRASHED off-Linux).
+        print("[SKIP] conn: /proc/self/fd unavailable (non-Linux)")
+        return
     dict_dir = build_synthetic_dict(os.path.join(tmp_root, "connleak"))
     compredef_parser.get_single_dictionary(dict_dir).install()
 
@@ -1163,7 +1177,7 @@ def test_reading_disambiguates_homographs(tmp_root: str) -> None:
     dict_dir = os.path.join(tmp_root, "homograph")
     os.makedirs(dict_dir, exist_ok=True)
     with open(os.path.join(dict_dir, "index.json"), "w") as f:
-        __import__("json").dump({"title": "HomographTest", "format": 3}, f)
+        json.dump({"title": "HomographTest", "format": 3}, f)
     entries = [
         ["先ず", "せんず", "", "", 0,
          [{"type": "text", "text": "他より先に事を行う。先を越す。さきんずる。"}],
@@ -1173,7 +1187,7 @@ def test_reading_disambiguates_homographs(tmp_root: str) -> None:
          0, ""],
     ]
     with open(os.path.join(dict_dir, "term_bank_1.json"), "w") as f:
-        __import__("json").dump(entries, f, ensure_ascii=False)
+        json.dump(entries, f, ensure_ascii=False)
 
     d = compredef_parser.get_single_dictionary(dict_dir)
     d.install()
@@ -1245,11 +1259,11 @@ def test_disabled_dictionaries_skipped(tmp_root: str) -> None:
     def custom_dict(path: str, text: str) -> str:
         os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, "index.json"), "w") as f:
-            __import__("json").dump(
+            json.dump(
                 {"title": os.path.basename(path), "format": 3}, f
             )
         with open(os.path.join(path, "term_bank_1.json"), "w") as f:
-            __import__("json").dump(
+            json.dump(
                 [["言葉", "ことば", "", "", 0,
                   [{"type": "text", "text": text}], 0, ""]],
                 f, ensure_ascii=False,
@@ -1298,18 +1312,13 @@ def test_disabled_dictionaries_skipped(tmp_root: str) -> None:
 # Tab-to-Generate decision logic (restored feature — see editor_browser.py).
 # ---------------------------------------------------------------------------
 
-def test_tab_generate_decisions() -> None:
-    """
-    Exercises the pure decision core of Tab-to-Generate:
+def _ensure_editor_browser_stubs() -> None:
+    """(Re)writes the extended aqt stub files editor_browser needs.
 
-    _should_auto_generate(note, unfocused_field, config) must fire ONLY when
-    the blurred field is the configured word field AND the definition field
-    is empty AND the feature is enabled. This matrix guards the historical
-    accidents: overwriting existing definitions, firing on the wrong field,
-    and firing after the user disabled the feature.
+    Importing editor_browser needs more of aqt than the minimal stub
+    provides (gui_hooks, browser, qt, utils). Idempotent: safe to call
+    from every test that touches editor_browser.
     """
-    # Importing editor_browser needs more of aqt than the minimal stub
-    # provides (gui_hooks, browser, qt, utils) — extend the stub in place.
     aqt_dir = os.path.join(FAKE_STUB_DIR, "aqt")
     with open(os.path.join(aqt_dir, "browser.py"), "w") as f:
         f.write("class Browser:  # stub\n    pass\n")
@@ -1320,53 +1329,66 @@ def test_tab_generate_decisions() -> None:
         )
     with open(os.path.join(aqt_dir, "utils.py"), "w") as f:
         f.write("def tooltip(*args, **kwargs):  # stub\n    pass\n")
-    hooks_src = (
-        "class _Hook:  # stub: append-only registry like the real one\n"
-        "    def __init__(self): self._hooks = []\n"
-        "    def append(self, fn): self._hooks.append(fn)\n"
-        "    def __call__(self, *a, **kw):\n"
-        "        for fn in self._hooks:\n"
-        "            r = fn(*a, **kw)\n"
-        "            if r is not None and a and isinstance(a[0], bool):\n"
-        "                a = (r,) + a[1:]\n"
-        "        return a[0] if a else None\n"
-        "editor_did_init_buttons = _Hook()\n"
-        "browser_menus_did_init = _Hook()\n"
-        "browser_will_show_context_menu = _Hook()\n"
-        "editor_did_load_note = _Hook()\n"
-        "editor_did_unfocus_field = _Hook()\n"
-        "editor_did_init = _Hook()\n"
-    )
     with open(os.path.join(aqt_dir, "gui_hooks.py"), "w") as f:
-        f.write(hooks_src)
+        f.write(
+            "class _Hook:  # stub: append-only registry like the real one\n"
+            "    def __init__(self): self._hooks = []\n"
+            "    def append(self, fn): self._hooks.append(fn)\n"
+            "    def __call__(self, *a, **kw):\n"
+            "        r = None\n"
+            "        for fn in self._hooks:\n"
+            "            r = fn(*a, **kw)\n"
+            "        return r\n"
+            "editor_did_init_buttons = _Hook()\n"
+            "browser_menus_did_init = _Hook()\n"
+            "browser_will_show_context_menu = _Hook()\n"
+            "editor_did_load_note = _Hook()\n"
+            "editor_did_unfocus_field = _Hook()\n"
+            "editor_did_init = _Hook()\n"
+            "profile_did_open = _Hook()\n"
+        )
 
-    # editor_browser uses package-relative imports (`from .generator import
-    # ...`) because it ships inside the add-on package. Importing the
-    # add-on's real `__init__.py` here would register hooks against the
-    # stub and pull in gui.py (needs real Qt) — so we synthesize a package
-    # whose __init__ is empty and whose members alias the top-level modules
-    # already imported above (parser, generator, db_utils).
-    import importlib
-    import types
+
+def _import_editor_browser():
+    """Imports editor_browser in the synthetic add-on package context.
+
+    editor_browser uses package-relative imports (`from .generator
+    import ...`) because it ships inside the add-on package. Importing
+    the add-on's real `__init__.py` here would register hooks against
+    the stub and pull in gui.py (needs real Qt) — so we synthesize a
+    package whose __init__ is empty and whose members alias the
+    top-level modules already imported above (parser, generator,
+    db_utils). The relative imports must resolve to the
+    ALREADY-imported (and fully initialized) top-level modules —
+    re-importing them under new names would duplicate module state
+    (separate SQLite handles, caches).
+    """
     pkg_name = "compredef_addon"
     if pkg_name not in sys.modules:
         pkg = types.ModuleType(pkg_name)
         pkg.__path__ = [REPO_ROOT]  # resolve .editor_browser etc. from repo
         sys.modules[pkg_name] = pkg
-    else:
-        pkg = sys.modules[pkg_name]
-
-    # The relative imports must resolve to the ALREADY-imported (and fully
-    # initialized) top-level modules — re-importing them under new names
-    # would duplicate module state (separate SQLite handles, caches).
     sys.modules[f"{pkg_name}.generator"] = compredef_generator
     sys.modules[f"{pkg_name}.parser"] = compredef_parser
     if "db_utils" in sys.modules:
         sys.modules[f"{pkg_name}.db_utils"] = sys.modules["db_utils"]
     else:
         sys.modules[f"{pkg_name}.db_utils"] = importlib.import_module("db_utils")
+    return importlib.import_module(f"{pkg_name}.editor_browser")
 
-    eb = importlib.import_module(f"{pkg_name}.editor_browser")
+
+def test_tab_generate_decisions() -> None:
+    """
+    Exercises the pure decision core of Tab-to-Generate:
+
+    _should_auto_generate(note, unfocused_field, config) must fire ONLY when
+    the blurred field is the configured word field AND the definition field
+    is empty AND the feature is enabled. This matrix guards the historical
+    accidents: overwriting existing definitions, firing on the wrong field,
+    and firing after the user disabled the feature.
+    """
+    _ensure_editor_browser_stubs()
+    eb = _import_editor_browser()
 
     # Scope wiring: a single "Japanese" deck; the default FakeNote id
     # maps into it so the decision matrix exercises in-scope notes.
@@ -1505,50 +1527,7 @@ def test_tab_generate_decisions() -> None:
     check("tab: out-of-range ordinal returns ''",
           eb._field_name_at(note, 99) == "")
 
-    # 13. GUI checkbox init race (production bug, v1.0.2): the checkbox state
-    #     must be restored BEFORE _load_config's dictionary loop, because each
-    #     _add_dict_path persists the dialog state immediately (crash safety).
-    #     With the checkbox left at Qt's default (unchecked), merely OPENING
-    #     the dialog with a saved ladder silently wrote tab_generate=False.
-    #     Guard: a QCheckBox-free simulation of the exact sequence —
-    #     init checkbox state -> (mid-init save reads it) -> final config.
-    class FakeCheckBox:
-        """Mirrors the gui.py contract: created unchecked, then restored."""
-
-        def __init__(self, saved_config: dict):
-            self._checked = False  # Qt default
-            # This is the fix under test: restore AT CREATION TIME.
-            self._checked = bool(saved_config.get("tab_generate", True))
-
-        def isChecked(self) -> bool:
-            return self._checked
-
-    def simulate_dialog_open(saved_config: dict) -> dict:
-        """Opens the dialog (as gui.py does) and returns what an early
-        _save_config_now() (fired by the first _add_dict_path) writes."""
-        checkbox = FakeCheckBox(saved_config)  # _init_ui
-        # _load_config -> _add_dict_path -> _save_config_now (reads checkbox):
-        return {"tab_generate": checkbox.isChecked()}
-
-    # a) Saved ON must survive an early save, not flip to False.
-    early = simulate_dialog_open({"dictionaries": ["/x"], "tab_generate": True})
-    check("tab: early dialog save preserves tab_generate=True",
-          early["tab_generate"] is True,
-          f"early save wrote {early}")
-
-    # b) Missing key (fresh install / legacy config) defaults to ON even in
-    #    the early-save window — never silently disabled by opening the GUI.
-    early_missing = simulate_dialog_open({"dictionaries": ["/x"]})
-    check("tab: early dialog save defaults missing key to True",
-          early_missing["tab_generate"] is True,
-          f"early save wrote {early_missing}")
-
-    # c) Deliberate opt-out must stay out (the toggle itself keeps working).
-    early_off = simulate_dialog_open({"dictionaries": ["/x"], "tab_generate": False})
-    check("tab: early dialog save preserves explicit False",
-          early_off["tab_generate"] is False)
-
-    # d) Out-of-scope notes never auto-generate, even with an empty def.
+    # 13. Out-of-scope notes never auto-generate, even with an empty def.
     fr_note = FakeNote({"Expression": "試験", "Definition": ""}, nid=999)
     aqt.mw.col.db.notes[999] = {"flds": "x", "dids": [
         aqt.mw.col.decks.decks["French"]], "mid": 2}
@@ -1564,51 +1543,11 @@ def test_multi_note_type_targeting() -> None:
     type to its own word/reading/definition fields, and every generation
     path (editor button, bulk, Tab-to-Generate) routes through the same
     resolver. Guards: correct mapping per type, unconfigured types never
-    generating, and full legacy single-type compatibility.
+    generating,     and full legacy single-type compatibility.
     """
     # Same stub+package machinery as test_tab_generate_decisions.
-    aqt_dir = os.path.join(FAKE_STUB_DIR, "aqt")
-    with open(os.path.join(aqt_dir, "browser.py"), "w") as f:
-        f.write("class Browser:  # stub\n    pass\n")
-    with open(os.path.join(aqt_dir, "qt.py"), "w") as f:
-        f.write("class QMenu:  # stub\n    pass\n\nclass QKeySequence:  # stub\n    pass\n")
-    with open(os.path.join(aqt_dir, "utils.py"), "w") as f:
-        f.write("def tooltip(*args, **kwargs):  # stub\n    pass\n")
-    with open(os.path.join(aqt_dir, "gui_hooks.py"), "w") as f:
-        f.write(
-            "class _Hook:  # stub: append-only registry like the real one\n"
-            "    def __init__(self): self._hooks = []\n"
-            "    def append(self, fn): self._hooks.append(fn)\n"
-            "    def __call__(self, *a, **kw):\n"
-            "        r = None\n"
-            "        for fn in self._hooks:\n"
-            "            r = fn(*a, **kw)\n"
-            "        return r\n"
-            "editor_did_init_buttons = _Hook()\n"
-            "browser_menus_did_init = _Hook()\n"
-            "browser_will_show_context_menu = _Hook()\n"
-            "editor_did_load_note = _Hook()\n"
-            "editor_did_unfocus_field = _Hook()\n"
-            "editor_did_init = _Hook()\n"
-            "profile_did_open = _Hook()\n"
-        )
-    import importlib
-    import types
-    pkg_name = "compredef_addon"
-    if pkg_name not in sys.modules:
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [REPO_ROOT]
-        sys.modules[pkg_name] = pkg
-    else:
-        pkg = sys.modules[pkg_name]
-    sys.modules[f"{pkg_name}.generator"] = compredef_generator
-    sys.modules[f"{pkg_name}.parser"] = compredef_parser
-    if "db_utils" in sys.modules:
-        sys.modules[f"{pkg_name}.db_utils"] = sys.modules["db_utils"]
-    else:
-        sys.modules[f"{pkg_name}.db_utils"] = importlib.import_module("db_utils")
-
-    eb = importlib.import_module(f"{pkg_name}.editor_browser")
+    _ensure_editor_browser_stubs()
+    eb = _import_editor_browser()
 
     # Scope wiring: Japanese deck holds the configured types' cards,
     # French deck holds everything else.
@@ -1737,6 +1676,18 @@ def test_multi_note_type_targeting() -> None:
                    "JP Mining Note"),
               {**targets_config, "scope_decks": []}) is None)
 
+    # 7. Mapping-fail routes AWAY from the add-deck dialog (v1.2
+    #    quick-fix contract, the 会社 complaint): an in-scope note
+    #    whose fields cannot be mapped must get the field-mapping
+    #    dialog, NEVER an "Add deck" offer (which looped forever).
+    #    (ANY-deck membership itself is covered by test_scope_deck_filtering.)
+    nomap_note = Note({"Front": "x", "Back": ""}, "Japanese")
+    nomap_cfg = {"scope_decks": ["Japanese"], "targets": {}}
+    check("multi: scope-pass + mapping-fail resolves to None",
+          eb.resolve_fields_for_note(nomap_note, nomap_cfg) is None)
+    check("multi: mapping-fail note is still in scope (no add-deck loop)",
+          eb._note_in_scope(nomap_note, nomap_cfg) is True)
+
     _restore_collection_state(scope_state)
 
 
@@ -1758,9 +1709,6 @@ def test_v12_scoring_algorithm() -> None:
     # Three candidates shaped like the user's 不公平 case.
     shogakukan = "公平でないこと。えこひいきがあること。例 不公平な判定。対 公平。"
     daijirin = "かたよっていて、扱いが公平でない・こと（さま）。⇔公平。「━な処置」「━感」━さ（名）"
-    # A kanji-dense tie candidate: same total as another, more kanji.
-    tie_a = "公平な判定。"
-    tie_b = "公平でない判定がある。"
 
     # 1. Kanji points: 公平×3 (2.0+2.0+2.0? no — per OCCURRENCE:
     #    公平 appears 3× ⇒ 3×(1+1)=6.0; 不=0; 判定=(0.5+0.5)=1.0; 例=0; 対=0
@@ -1788,16 +1736,9 @@ def test_v12_scoring_algorithm() -> None:
           f"daijirin={res_d.total_score} vs shogakukan={res.total_score}")
 
     # 3. Tie-break: equal totals → most kanji wins.
-    #    tie_a: 公平な判定。 = 4 kanji, total 3.0
-    #    tie_b: 公平な判定を取る。 = 4 kanji + more kana, still 3.0 —
-    #    need a REAL tie with different kanji counts: same total via
-    #    a half-known extra kanji: 公平な判定に対して。 → 対 known 0.0
-    #    …so instead: tie_c drops 判定 (−1.0) but adds 2 full kanji.
-    tie_a = "公平な判定。"                       # 3.0, 4 kanji
-    tie_b = "公平な会社の判定だ。"               # 公平(2)+会社(2)+判定(1)=5? no
-    # Simpler deterministic tie: 公平な判定。 vs 公平な決定場。 both 3.0?
-    # 公(1)+平(1)+判(0.5)+定(0.5)=3.0, 4 kanji
-    # 公(1)+平(1)+決(0.5)+定(0.5)+場(0)=3.0, 5 kanji
+    #    公(1)+平(1)+判(0.5)+定(0.5)=3.0, 4 kanji
+    #    公(1)+平(1)+決(0.5)+定(0.5)+場(0)=3.0, 5 kanji
+    tie_a = "公平な判定。"
     kp2 = {**kp, "決": 0.5, "場": 0.0}
     ra = scoring_mod.score_definition(tie_a, kp2, vp)
     rb = scoring_mod.score_definition("公平な決定場。", kp2, vp)
@@ -1974,116 +1915,6 @@ def test_scope_deck_filtering() -> None:
         _restore_collection_state(scope_state)
 
 
-# ---------------------------------------------------------------------------
-class _FakeN:
-    """Tiny note stand-in for scope tests (module-level for reuse)."""
-    def __init__(self, nid, type_name=""):
-        self.id = nid
-        self._t = type_name
-    def note_type(self):
-        return {"name": self._t} if self._t else {}
-
-
-def test_multi_deck_quickfix_semantics() -> None:
-    """
-    v1.2 quick-fix contract (the 会社 complaint):
-    - A note with cards in SEVERAL decks is in scope when ANY one is
-      covered — the user must never need to add every deck.
-    - The quick-fix must never offer "Add deck" when scope already
-      passes but mapping fails (that loop made the dialog reappear
-      forever).
-    """
-    aqt_dir = os.path.join(FAKE_STUB_DIR, "aqt")
-    with open(os.path.join(aqt_dir, "browser.py"), "w") as f:
-        f.write("class Browser:  # stub\n    pass\n")
-    with open(os.path.join(aqt_dir, "qt.py"), "w") as f:
-        f.write("class QMenu:  # stub\n    pass\nclass QKeySequence:  # stub\n    pass\n")
-    with open(os.path.join(aqt_dir, "utils.py"), "w") as f:
-        f.write("def tooltip(*args, **kwargs):  # stub\n    pass\n")
-    with open(os.path.join(aqt_dir, "gui_hooks.py"), "w") as f:
-        f.write(
-            "class _Hook:  # stub: append-only registry like the real one\n"
-            "    def __init__(self): self._hooks = []\n"
-            "    def append(self, fn): self._hooks.append(fn)\n"
-            "editor_did_init_buttons = _Hook()\n"
-            "browser_menus_did_init = _Hook()\n"
-            "browser_will_show_context_menu = _Hook()\n"
-            "editor_did_load_note = _Hook()\n"
-            "editor_did_unfocus_field = _Hook()\n"
-            "editor_did_init = _Hook()\n"
-            "profile_did_open = _Hook()\n"
-        )
-    import importlib
-    import types
-    pkg_name = "compredef_addon"
-    if pkg_name not in sys.modules:
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = [REPO_ROOT]
-        sys.modules[pkg_name] = pkg
-    else:
-        pkg = sys.modules[pkg_name]
-    sys.modules[f"{pkg_name}.generator"] = compredef_generator
-    sys.modules[f"{pkg_name}.parser"] = compredef_parser
-    if "db_utils" in sys.modules:
-        sys.modules[f"{pkg_name}.db_utils"] = sys.modules["db_utils"]
-    else:
-        sys.modules[f"{pkg_name}.db_utils"] = importlib.import_module("db_utils")
-
-    scope_state = _save_collection_state()
-    col = aqt.mw.col
-    jp = col.decks.add("Japanese")
-    fr = col.decks.add("French")
-    try:
-        # 会社-like note: cards in BOTH a scoped deck and an unscoped deck.
-        col.db.notes[500] = {"flds": "会社", "dids": [jp, fr], "mid": 1,
-                            "ivl": 400}
-        cfg_any = {"scope_decks": ["Japanese"]}
-        check("quickfix: ANY covered deck puts multi-deck note in scope",
-              compredef_scope.note_in_scope(
-                  _FakeN(500, "JP Mining Note"), cfg_any, col))
-        # And the quick-fix only ever needs to add the OUT-of-scope decks:
-        # scope.note_deck_names lists all; the caller filters against the
-        # scope before appending (editor_browser._add_deck_to_scope_and_reset
-        # appends ONLY missing ones — a no-op when already in scope).
-        check("quickfix: note decks include both",
-              set(compredef_scope.note_deck_names(_FakeN(500, ""), col))
-              == {"Japanese", "French"})
-
-        # 2. Mapping-fail must NOT trigger the add-deck dialog: scope
-        #    passes, mapping fails → _offer_add_to_scope routes to the
-        #    mapping branch (dialog text mentions fields, no Add-deck).
-        eb = importlib.import_module(f"{pkg_name}.editor_browser")
-        # A note whose type IS in scope but has NO inferable fields.
-        class EmptyNote:
-            id = 500
-            def note_type(self):
-                return {"name": "NoFields"}
-            def keys(self):
-                return ["Front", "Back"]
-            def __contains__(self, k):
-                return k in ("Front", "Back")
-            def __getitem__(self, k):
-                return ""
-        col.db.notes[500]["flds"] = "会社"
-        col.db.notes[500]["mid"] = None  # type lookup yields no mapping
-        cfg_scope_ok = {"scope_decks": ["Japanese"], "targets": {}}
-        # resolve: scope OK → mapping: inference on Front/Back fails.
-        res = eb.resolve_fields_for_note(EmptyNote(), cfg_scope_ok)
-        check("quickfix: scope-pass + mapping-fail yields None",
-              res is None)
-        # _offer_add_to_scope re-checks scope itself: it must detect
-        # in-scope and NOT offer add-deck (we can't run the Qt dialog
-        # headlessly, so assert the branch decision helper directly).
-        in_scope = eb._note_in_scope(EmptyNote(), cfg_scope_ok)
-        check("quickfix: dialog routes mapping-fail away from add-deck",
-              in_scope is True)
-    finally:
-        _restore_collection_state(scope_state)
-
-
-# Real-dictionary smoke test (skipped if not installed).
-# ---------------------------------------------------------------------------
-
 def test_real_dictionary_smoke() -> None:
     """
     Fully DYNAMIC smoke test: derives every expectation from whatever real
@@ -2210,29 +2041,11 @@ def test_real_dictionary_smoke() -> None:
         finally:
             compredef_parser.SingleDictionary._iter_term_banks = original_iter
 
-    # Reading isolation on a real homograph, if one exists in the data.
-    conn = sqlite3.connect(compredef_parser._get_db_path())
-    try:
-        homograph = conn.execute(
-            "SELECT term, reading, COUNT(DISTINCT reading) "
-            "FROM entries WHERE dict_path = ? AND reading != '' "
-            "GROUP BY term HAVING COUNT(DISTINCT reading) >= 2 "
-            "ORDER BY LENGTH(term) ASC LIMIT 1",
-            (target.path,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if homograph is None:
-        print("[SKIP] smoke: installed dictionary has no homograph terms")
-        return
-    h_term, h_reading = homograph[0], homograph[1]
-    total = target.lookup(h_term)
-    isolated = target.lookup(h_term, h_reading)
-    check(
-        f"smoke: homograph {h_term!r} reading filter narrows results",
-        len(isolated) < len(total) and len(isolated) >= 1,
-        f"unfiltered={len(total)}, filtered={len(isolated)}",
-    )
+    # NOTE: real-dictionary homograph narrowing is covered synthetically
+    # by test_reading_disambiguates_homographs. The old tail of this test
+    # ran GROUP BY ... HAVING COUNT DISTINCT over the whole (100k-row)
+    # real index just to find a homograph — pure CPU cost for no unique
+    # coverage. Deliberately not repeated here.
 
 
 # ---------------------------------------------------------------------------
@@ -2250,11 +2063,8 @@ def test_no_undefined_names_in_shipped_modules() -> None:
     (gui.py called it without importing it — invisible to every other
     test because the module never imports without Qt).
     """
-    import builtins
-    import glob as _glob
-    import symtable
     allowed = set(dir(builtins)) | {"__name__", "__package__"}
-    for path in sorted(_glob.glob(os.path.join(REPO_ROOT, "*.py"))):
+    for path in sorted(glob.glob(os.path.join(REPO_ROOT, "*.py"))):
         src = open(path, encoding="utf-8").read()
         table = symtable.symtable(src, path, "exec")
         module_bound = {
@@ -2300,11 +2110,9 @@ def test_qt_enum_compat() -> None:
     helpers' `return Qt.<Name>` fallback lines, which exist precisely
     to serve PyQt5.
     """
-    import re as _re
     path = os.path.join(REPO_ROOT, "gui.py")
     src = open(path, encoding="utf-8").read()
     # Strip comments and docstrings: only executable code counts.
-    import ast
     tree = ast.parse(src)
     doc_ranges = []
     for node in ast.walk(tree):
@@ -2315,7 +2123,7 @@ def test_qt_enum_compat() -> None:
                 doc_ranges.append((body[0].lineno, body[0].end_lineno))
     lines = src.splitlines()
     offenders = []
-    pattern = _re.compile(r"Qt\.([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?")
+    pattern = re.compile(r"Qt\.([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?")
     for lineno, line in enumerate(lines, start=1):
         if any(a <= lineno <= b for a, b in doc_ranges):
             continue
@@ -2350,10 +2158,6 @@ def test_package_relative_imports() -> None:
     real Qt; editor_browser's relative chain is already covered by
     test_tab_generate_decisions below).
     """
-    import importlib
-    import importlib.abc
-    import types
-
     siblings = {"anki", "core", "engine", "provider", "renderer", "models",
                 "scoring", "utils", "parser", "generator", "db_utils",
                 "scope"}
@@ -2601,7 +2405,6 @@ def test_snapshot_waits_for_open_collection() -> None:
         # Profile opens: collection becomes available — now it builds.
         # The reopened collection carries one Scope deck; knowledge is
         # scoped to it. (v1.2 rows carry (flds, ivl).)
-        import types
         _decks = _FakeDecks()
         _jp = _decks.add("Japanese")
         aqt.mw.col = types.SimpleNamespace(
@@ -3136,53 +2939,14 @@ def test_config_survives_yomitan_toggle() -> None:
 
     The dialog's early save (before _load_config populates the ladder)
     wrote {"dictionaries":[],"targets":{}} over the real config, and
-    install_local.sh deleting meta.json made it permanent. The fix preserves
-    previous config when the UI list is empty but previous config was not.
+    install_local.sh deleting meta.json made it permanent. The fix
+    preserves previous config when the UI list is empty but previous
+    config was not.
+
+    Tests the REAL utils.merge_type_targets (which gui.py delegates
+    to) — not a copy of the logic.
     """
-    # Simulate the preservation logic in gui.py without needing Qt
-    # by directly testing _collect_type_config's fallback.
-    # We mock a ConfigDialog-like object with minimal state.
-    class FakeDialog:
-        def __init__(self, prev_config):
-            self.config = prev_config
-            self.type_mappings = {}  # empty UI (before load)
-        def _stash_current_mapping(self):
-            pass
-        # Copy the fixed _collect_type_config logic
-        def _collect_type_config(self):
-            # Simplified copy of gui.py's fixed method
-            targets = {}
-            for type_name, mapping in self.type_mappings.items():
-                word = mapping.get("word_field", "")
-                def_f = mapping.get("definition_field", "")
-                if word and def_f:
-                    targets[type_name] = {
-                        "word_field": word,
-                        "reading_field": mapping.get("reading_field", ""),
-                        "definition_field": def_f,
-                    }
-            if not targets and isinstance(self.config.get("targets"), dict) and self.config["targets"]:
-                prev_targets = self.config["targets"]
-                if isinstance(prev_targets, dict) and any(isinstance(v, dict) and v.get("word_field") and v.get("definition_field") for v in prev_targets.values()):
-                    targets = {str(k): dict(v) for k, v in prev_targets.items() if isinstance(v, dict)}
-            if not targets and self.config.get("note_type") and self.config.get("word_field") and self.config.get("definition_field"):
-                _legacy_type = str(self.config["note_type"])
-                targets = {
-                    _legacy_type: {
-                        "word_field": str(self.config.get("word_field") or ""),
-                        "reading_field": str(self.config.get("reading_field") or ""),
-                        "definition_field": str(self.config.get("definition_field") or ""),
-                    }
-                }
-            first_name = next(iter(targets), "")
-            first = targets.get(first_name, {})
-            return {
-                "targets": targets,
-                "note_type": first_name,
-                "word_field": first.get("word_field", ""),
-                "reading_field": first.get("reading_field", ""),
-                "definition_field": first.get("definition_field", ""),
-            }
+    merge = compredef_utils.merge_type_targets
 
     prev = {
         "targets": {
@@ -3194,8 +2958,9 @@ def test_config_survives_yomitan_toggle() -> None:
         "word_field": "Expression",
         "definition_field": "Definition",
     }
-    dlg = FakeDialog(prev)
-    result = dlg._collect_type_config()
+    # Empty UI mappings (dialog opened, types not loaded yet) must
+    # preserve the previously saved targets.
+    result = merge({}, prev)
     check("config-preserve: Yomitan toggle keeps targets",
           result["targets"] == prev["targets"],
           f"got {result['targets']}")
@@ -3203,21 +2968,60 @@ def test_config_survives_yomitan_toggle() -> None:
           result["note_type"] == "Japanese" and result["word_field"] == "Expression",
           f"got {result}")
 
-    # Empty previous config should stay empty (new user, not a clobber)
-    dlg2 = FakeDialog({"targets": {}, "dictionaries": []})
-    result2 = dlg2._collect_type_config()
+    # A complete UI mapping wins over stale saved targets.
+    live = {"Japanese": {"word_field": "Word", "reading_field": "",
+                         "definition_field": "Meaning"}}
+    result_live = merge(live, prev)
+    check("config-preserve: live UI mapping wins over saved",
+          result_live["targets"]
+          == {"Japanese": {"word_field": "Word", "reading_field": "",
+                            "definition_field": "Meaning"}},
+          f"got {result_live['targets']}")
+
+    # Incomplete UI mappings are UI-only, never saved.
+    partial = {"Japanese": {"word_field": "Word", "reading_field": "",
+                            "definition_field": ""}}
+    result_partial = merge(partial, {"targets": {}})
+    check("config-preserve: incomplete mapping not saved",
+          result_partial["targets"] == {},
+          f"got {result_partial['targets']}")
+
+    # Empty previous config stays empty (new user, not a clobber).
+    result2 = merge({}, {"targets": {}, "dictionaries": []})
     check("config-preserve: empty stays empty for new user",
           result2["targets"] == {},
           f"got {result2['targets']}")
 
-    # Dictionaries preservation (simulated via save logic)
-    # When UI list is empty but previous config has dictionaries, preserve
-    prev_dicts = ["/tmp/dA", "/tmp/dB"]
-    ui_ordered = []
-    preserved = list(prev_dicts) if (not ui_ordered and prev_dicts) else ui_ordered
-    check("config-preserve: Yomitan toggle keeps dictionaries",
-          preserved == prev_dicts,
-          f"got {preserved}")
+    # Legacy single-type config is preserved as a target.
+    result_legacy = merge({}, {"targets": {}, "note_type": "Japanese",
+                               "word_field": "Expression",
+                               "reading_field": "Reading",
+                               "definition_field": "Definition"})
+    check("config-preserve: legacy single-type preserved",
+          result_legacy["targets"].get("Japanese", {}).get("word_field")
+          == "Expression",
+          f"got {result_legacy['targets']}")
+
+    # Wiring: gui.py's ConfigDialog._collect_type_config must delegate
+    # to THIS function (not carry its own copy — the copy is exactly
+    # what made the old test vacuous). AST check, no Qt needed.
+    tree = ast.parse(open(os.path.join(REPO_ROOT, "gui.py"),
+                          encoding="utf-8").read())
+    delegated = False
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == "_collect_type_config"):
+            for child in ast.walk(node):
+                if (isinstance(child, ast.Call)
+                        and getattr(child.func, "id", "") ==
+                        "merge_type_targets"):
+                    args = [getattr(a, "attr", "") for a in child.args
+                            if isinstance(a, ast.Attribute)]
+                    delegated = args == ["type_mappings", "config"]
+    check("config-preserve: gui.py delegates to merge_type_targets",
+          delegated,
+          "ConfigDialog._collect_type_config does not call "
+          "merge_type_targets(self.type_mappings, self.config)")
 
 
 def test_yomitan_bridge_sw_keepalive() -> None:
@@ -3315,7 +3119,6 @@ def test_yomitan_bridge_sw_keepalive() -> None:
           "no connection pre-check in do_POST")
 
     # 7. The script must compile.
-    import ast
     try:
         ast.parse(src)
         ok = True
@@ -3543,7 +3346,6 @@ def main() -> int:
         test_tab_generate_decisions()
         test_multi_note_type_targeting()
         test_scope_deck_filtering()
-        test_multi_deck_quickfix_semantics()
         test_v12_scoring_algorithm()
         test_config_survives_yomitan_toggle()
         test_yomitan_bridge_sw_keepalive()

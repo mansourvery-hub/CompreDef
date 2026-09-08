@@ -47,6 +47,7 @@ from .anki import knowledge_summary_text, reset_caches as _reset_knowledge_cache
 from .utils import (
     find_dictionary_folders,
     is_zip_dictionary,
+    merge_type_targets,
 )
 from .provider import IndexingError
 from .parser import get_single_dictionary
@@ -1940,49 +1941,12 @@ class ConfigDialog(QDialog):
         'targets' dict plus a legacy mirror (note_type + flat fields) of
         the FIRST target so old configs and hand-edited config.json
         files keep working.
+
+        Delegates to utils.merge_type_targets (Qt-free, unit-tested)
+        after stashing the live dropdowns into the active type.
         """
         self._stash_current_mapping()  # dropdowns -> active type
-        targets: Dict[str, Dict[str, str]] = {}
-        for type_name, mapping in self.type_mappings.items():
-            word = mapping.get("word_field", "")
-            def_f = mapping.get("definition_field", "")
-            # Only complete mappings can generate; incomplete ones are
-            # kept in the UI but not saved as targets.
-            if word and def_f:
-                targets[type_name] = {
-                    "word_field": word,
-                    "reading_field": mapping.get("reading_field", ""),
-                    "definition_field": def_f,
-                }
-        # Never clobber existing targets with empty during early saves
-        # (dialog opened but types not yet loaded, or Yomitan toggle race).
-        # This was the "had to redo Note Types" bug after v1.0.20.
-        if not targets and isinstance(self.config.get("targets"), dict) and self.config["targets"]:
-            prev_targets = self.config["targets"]
-            # Sanity: only preserve if it looks like a valid targets dict
-            if isinstance(prev_targets, dict) and any(isinstance(v, dict) and v.get("word_field") and v.get("definition_field") for v in prev_targets.values()):
-                targets = {str(k): dict(v) for k, v in prev_targets.items() if isinstance(v, dict)}
-        # Also handle legacy single-type configs that were migrated to targets
-        if not targets and self.config.get("note_type") and self.config.get("word_field") and self.config.get("definition_field"):
-            # Preserve legacy single-type if we have nothing else
-            _legacy_type = str(self.config["note_type"])
-            targets = {
-                _legacy_type: {
-                    "word_field": str(self.config.get("word_field") or ""),
-                    "reading_field": str(self.config.get("reading_field") or ""),
-                    "definition_field": str(self.config.get("definition_field") or ""),
-                }
-            }
-        first_name = next(iter(targets), "")
-        first = targets.get(first_name, {})
-        return {
-            "targets": targets,
-            # Legacy mirror: first configured target in flat form.
-            "note_type": first_name,
-            "word_field": first.get("word_field", ""),
-            "reading_field": first.get("reading_field", ""),
-            "definition_field": first.get("definition_field", ""),
-        }
+        return merge_type_targets(self.type_mappings, self.config)
 
     def _save_and_accept(self) -> None:
         """Saves settings to Anki config and closes dialog."""
