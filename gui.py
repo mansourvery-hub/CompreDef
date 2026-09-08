@@ -2231,6 +2231,7 @@ class KnowledgeDialog(QDialog):
     def _build_ui(self) -> None:
         """One-time widget layout (tabs + status bar + close button)."""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, stretch=1)
@@ -2567,8 +2568,10 @@ class KnowledgeDialog(QDialog):
         val_label.setFlat(True)
         # v1.2.5: the big number buttons were vertically crushed inside
         # the grid — give them real breathing room (the same fix as
-        # _size_button, tuned taller for the 16px font).
-        val_label.setMinimumHeight(40)
+        # _size_button, tuned taller for the 16px font; v1.2.7 bumped to
+        # 48 after the user reported they were still crushed).
+        val_label.setMinimumHeight(48)
+        val_label.setContentsMargins(4, 6, 4, 6)
         # Clicking the big number jumps to the matching detail tab.
         val_label.clicked.connect(
             lambda _, name=target_tab: self._goto_tab(name))
@@ -2726,9 +2729,11 @@ def show_knowledge_dialog() -> None:
         if _knowledge_dialog_instance is None:
             _knowledge_dialog_instance = KnowledgeDialog(
                 parent=mw.app.activeWindow() if mw and mw.app else None)
-        else:
-            # Re-focus + fresh data (cached payload: near-instant).
-            _knowledge_dialog_instance._refresh_async()
+        # Singleton reuse: just re-show the existing window — NO refresh.
+        # Refresh is explicit via the dialog's Refresh button (which calls
+        # _refresh_async(force_rebuild=True)). Rebuilding on every menu
+        # open is exactly the "loading takes as long as generating" bug:
+        # warm opens must be instant (payload cache hit, 0.005 ms).
         _knowledge_dialog_instance.show()
         _knowledge_dialog_instance.raise_()
         _knowledge_dialog_instance.activateWindow()
