@@ -102,18 +102,24 @@ The regression suite verifies (among others) that definitions stay **rich Yomita
 ```
 CompreDef/
 ├── __init__.py         # Add-on entry point & hook registration
-├── gui.py              # Configuration dialog with Ladder ordering
-├── generator.py        # Ladder early-exit & kanji matrix scoring engine
-├── parser.py           # SingleDictionary loader, Yomitan parser, ZIP support, SQLite caching
-├── db_utils.py         # Native Anki database queries (interval >= 21 kanji scan)
-├── editor_browser.py   # Editor toolbar button and browser bulk menu hooks
+├── gui.py              # Config dialog, Scope picker, Learner Knowledge window
+├── editor_browser.py   # Editor button, Tab-to-Generate, Browser bulk actions
+├── core.py / engine.py # Wiring/singletons; Dictionary Ladder algorithm
+├── scoring.py          # Interval-weighted kanji/vocab scoring + filters
+├── anki.py             # Learner-knowledge snapshot (native DB wrapper only)
+├── scope.py            # Deck Scope (drives generation + knowledge)
+├── provider.py         # DictionaryProvider interface + SQLite implementation
+├── renderer.py / models.py / utils.py  # Yomitan HTML, data types, helpers
+├── parser.py           # Compat layer over provider/renderer/utils
+├── yomitan.py / yomitan_installer.py    # Optional Yomitan-API source + bridge
+├── PRODUCT.md / MVP.md / ARCHITECTURE.md / QUALITY.md  # What / scope / how / invariants
+├── TEST_STRATEGY.md / IMPLEMENTATION_PLAN.md / AGENTS.md  # Verification / work / agent ops
 ├── tests/
 │   └── test_regression.py  # Fundamental regression suite (run before committing)
+├── debug/              # On-demand diagnostics (never shipped, never in CI)
 ├── icons/              # UI toolbar icons (compredef.svg)
 ├── config.json         # Default configuration settings
-├── WIKI.md             # In-depth algorithm & architecture wiki
-├── ARCHITECTURE.md     # Architectural goals and technical constraints
-└── AGENTS.md           # Coding rules for development agents
+└── WIKI.md             # In-depth algorithm & architecture wiki
 ```
 
 ---

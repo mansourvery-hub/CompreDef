@@ -1,5 +1,17 @@
 # CompreDef - Agent Coding Rules & Best Practices
 
+> **Authority hierarchy (conflicts resolve top-down):**
+> `PRODUCT.md` (what to build) → `MVP.md` (current scope) →
+> `ARCHITECTURE.md` (technical structure) → `QUALITY.md`
+> (invariants that must hold) → `TEST_STRATEGY.md` (how they are
+> verified) → `IMPLEMENTATION_PLAN.md` (current work) → this file
+> (how to operate in this repo). **Code implements the specs; tests
+> enforce them.** Do not widen MVP scope or modify architectural
+> constraints without updating the corresponding document first.
+
+Start every task by reading the docs above that it touches; keep
+changes consistent with them.
+
 ## 1. Environment & Entry Point
 - This is an Anki add-on running within Anki's embedded Python environment. 
 - The main entry point must be `__init__.py`.

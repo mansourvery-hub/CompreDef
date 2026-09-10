@@ -35,16 +35,31 @@ Implementation (provider.py -> LocalSQLiteProvider)
   config GUI offers a compact Scope row + deck picker dialog; per-type
   field mappings ("targets") are kept only for types implied by the
   scoped decks. Generation paths resolve fields per note via
-  `resolve_fields_for_note` plus the Scope gate.
+  `resolve_fields_for_note` plus the Scope gate. Editor toolbar button,
+  Tab-to-Generate (legacy-editor unfocus hook), Browser bulk actions,
+  and the Learner Knowledge dialog (non-modal, payload-cached) live
+  here.
 - `core.py`: Application wiring and singleton management.
-- `engine.py`: Implements the Dictionary Ladder algorithm.
-- `scoring.py`: Kanji comprehension scoring and reference filtering.
-- `provider.py`: Defines the `DictionaryProvider` interface and the current SQLite-backed implementation.
-- `renderer.py`: Renders Yomitan structured content to HTML.
-- `utils.py`: Shared text cleaning and dictionary discovery utilities.
-- `anki.py`: Safe Anki database interaction for known-kanji extraction
-  (first field of every mature note INSIDE the Scope decks; on-demand
-  diagnostics and the snapshot spec live in `debug/`).- `models.py`: Shared data structures (e.g., `DictionaryEntry`).
+- `engine.py`: Implements the Dictionary Ladder algorithm (early exit
+  on first fully comprehensible definition, else argmax total score
+  with most-kanji tie-break; order-independent).
+- `scoring.py`: Interval-weighted kanji/vocab scoring (`ivl/365`
+  capped at 1.0) and reference-title filtering.
+- `provider.py`: Defines the `DictionaryProvider` interface and the
+  current SQLite-backed implementation.
+- `renderer.py`: Renders Yomitan structured content to HTML (ruby,
+  `data-sc-*`, per-dictionary scoped CSS).
+- `utils.py`: Shared text cleaning, dictionary discovery utilities,
+  and the Qt-free config-merge helper (`merge_type_targets`).
+- `anki.py`: Safe Anki database interaction for the learner-knowledge
+  snapshot — first field of every in-scope note; mastered means a
+  card interval ≥ 365 days, seen means any positive interval.
+  Session-cached with generation counter; on-demand diagnostics and
+  the snapshot spec live in `debug/`.
+- `yomitan.py`, `yomitan_installer.py`: Optional Yomitan-API
+  dictionary source — localhost bridge install/repair, keepalive
+  against service-worker suspension, anti-zombie shutdown.
+- `models.py`: Shared data structures (e.g., `DictionaryEntry`).
 
 ## Install-Time Indexing
 Indexing happens exactly ONCE per dictionary during installation via the GUI. This builds a persistent SQLite index in `user_files/cache/dictionaries.db`. Lookups are pure SQL queries, ensuring the UI never freezes during generation.
