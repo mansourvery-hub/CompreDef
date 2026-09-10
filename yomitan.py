@@ -365,7 +365,11 @@ def _entries_from_term_entries(
                 continue
             dict_title = defi.get("dictionary")
             if not isinstance(dict_title, str) or not dict_title:
-                dict_title = dent.get("dictionary") if isinstance(dent.get("dictionary"), str) else "Yomitan"
+                # dent is already narrowed to dict above; bind the
+                # fallback first so pyright can narrow Unknown -> str.
+                dent_title = dent.get("dictionary")
+                dict_title = (dent_title if isinstance(dent_title, str)
+                              and dent_title else "Yomitan")
             blocks = defi.get("entries")
             if not isinstance(blocks, list) or not blocks:
                 # Some versions put the content directly on the definition
@@ -633,6 +637,28 @@ try:
 
         def is_index_current(self, path: str) -> bool:
             return True
+
+        def _compute_signature(self, path: str) -> str:
+            # No local index exists, so there is nothing whose bytes
+            # could go stale: a constant signature is honest (and can
+            # never trigger reinstall loops). Matches the
+            # SingleDictionaryMock delegation contract in parser.py.
+            return "yomitan-api:no-local-index"
+
+        def _iter_term_banks(self, path: str):
+            # Yomitan owns its dictionaries remotely; there are no local
+            # term-bank files to stream. Empty iterator (not an error).
+            return iter(())
+
+        @property
+        def db_path(self) -> str:
+            # No local index file exists for the API provider (contrast
+            # LocalSQLiteProvider.db_path). Loud, not silent: anything
+            # reaching for a local cache DB in Yomitan mode is a logic
+            # error, and must fail visibly per the project's failure
+            # policy — never with a confusing downstream sqlite error.
+            raise NotImplementedError(
+                "Yomitan API provider keeps no local index file")
 
 except Exception:
     # In headless test stub where DictionaryProvider may not import, ignore

@@ -1779,7 +1779,8 @@ def test_v12_scoring_algorithm() -> None:
     # Order independence:
     picked_rev = engine_mod._pick_best(list(reversed(entries)), kp, vp)
     check("v12: engine argmax is order-independent",
-          picked_rev is not None and picked_rev[1] == picked[1])
+          picked_rev is not None and picked is not None
+          and picked_rev[1] == picked[1])
 
 
 def test_scope_deck_filtering() -> None:
@@ -2011,7 +2012,7 @@ def test_real_dictionary_smoke() -> None:
                 "no structured-content entry with a reading found",
             )
             if row is not None:
-                term, reading = row
+                term, _reading = row
                 t0 = time.time()
                 defs = target.lookup(term)
                 elapsed = time.time() - t0
@@ -2052,6 +2053,33 @@ def test_real_dictionary_smoke() -> None:
 # Main entry point.
 # ---------------------------------------------------------------------------
 
+def _check_scope_names(scope, missing: set, module_bound: set,
+                       allowed: set) -> None:
+    """Recursive symtable walk: collects referenced-but-unbound names.
+
+    Module-level (not nested in the per-file loop) so it can never
+    capture a stale loop iteration's `missing`/`module_bound` sets
+    (B023 closure hazard — behavior identical, structure safe).
+    """
+    for s in scope.get_symbols():
+        name = s.get_name()
+        if name.startswith("_") or name in allowed:
+            continue
+        if not s.is_referenced() or s.is_namespace():
+            continue
+        if scope.get_type() == "module":
+            if not (s.is_assigned() or s.is_imported()):
+                missing.add(name)
+            continue
+        if s.is_local() or s.is_free() or s.is_imported():
+            continue
+        if name in module_bound:
+            continue
+        missing.add(name)
+    for child in scope.get_children():
+        _check_scope_names(child, missing, module_bound, allowed)
+
+
 def test_no_undefined_names_in_shipped_modules() -> None:
     """
     Static guard for modules that cannot be imported in this suite
@@ -2072,27 +2100,8 @@ def test_no_undefined_names_in_shipped_modules() -> None:
             if s.is_assigned() or s.is_imported() or s.is_namespace()
         }
         missing = set()
+        _check_scope_names(table, missing, module_bound, allowed)
 
-        def check_scope(scope) -> None:
-            for s in scope.get_symbols():
-                name = s.get_name()
-                if name.startswith("_") or name in allowed:
-                    continue
-                if not s.is_referenced() or s.is_namespace():
-                    continue
-                if scope.get_type() == "module":
-                    if not (s.is_assigned() or s.is_imported()):
-                        missing.add(name)
-                    continue
-                if s.is_local() or s.is_free() or s.is_imported():
-                    continue
-                if name in module_bound:
-                    continue
-                missing.add(name)
-            for child in scope.get_children():
-                check_scope(child)
-
-        check_scope(table)
         check(
             f"static-names: {os.path.basename(path)} "
             "has no undefined names",
@@ -2197,7 +2206,7 @@ def test_package_relative_imports() -> None:
             "provider": ["LocalSQLiteProvider", "IndexingError"],
             "renderer": ["render_yomitan_definition_html",
                          "render_structured_content_node"],
-            "models": ["DictionaryEntry", "RENDERER_VERSION"],
+            "models": ["DictionaryEntry"],
             "scoring": ["calculate_kanji_score", "is_reference_title"],
             "scope": ["get_scope_decks", "expand_scope_names",
                       "note_in_scope", "implied_note_types", "scope_dids",
@@ -2606,7 +2615,7 @@ def test_knowledge_summary_text() -> None:
               totals3["kanji"] == 5 and totals3["scope_notes"] == 3 and
               totals3["mature_notes"] == 2,
               f"totals3={totals3}")
-        seen_kpts, seen_vpts = anki._seen_points()
+        seen_kpts, _seen_vpts = anki._seen_points()
         check("seen: young in-scope kanji is seen but not mastered",
               "若" in seen_kpts and "若" not in anki.get_kanji_points(),
               f"seen={sorted(seen_kpts)}")
@@ -3024,6 +3033,44 @@ def test_config_survives_yomitan_toggle() -> None:
           "merge_type_targets(self.type_mappings, self.config)")
 
 
+def test_yomitan_provider_implements_full_surface() -> None:
+    """
+    pyright found a latent AttributeError: parser.py's compat Mock
+    delegates install/_compute_signature/_iter_term_banks to whatever
+    get_provider() returns, but YomitanApiProvider lacked the latter
+    two (and db_path). Unreachable in normal flows today (the engine
+    bypasses the local ladder in Yomitan mode), but one GUI path away
+    from a crash — so the no-network surface is asserted directly.
+    (is_installed/lookup are skipped: they hit the network/bridge.)
+    """
+    import yomitan
+
+    provider_cls = getattr(yomitan, "YomitanApiProvider", None)
+    check("yomitan-iface: YomitanApiProvider importable",
+          provider_cls is not None)
+    if provider_cls is None:
+        return
+    prov = provider_cls()
+    check("yomitan-iface: _compute_signature is stable (no local index)",
+          prov._compute_signature("anything") == "yomitan-api:no-local-index",
+          )
+    check("yomitan-iface: _iter_term_banks yields nothing (no local files)",
+          list(prov._iter_term_banks("anything")) == [])
+    check("yomitan-iface: install reports 0 entries (nothing indexed)",
+          prov.install("anything") == 0)
+    check("yomitan-iface: uninstall is a silent no-op",
+          prov.uninstall("anything") is None)
+    check("yomitan-iface: entry count is 0",
+          prov.get_entry_count("anything") == 0)
+    try:
+        prov.db_path
+        db_path_raises = False
+    except NotImplementedError:
+        db_path_raises = True
+    check("yomitan-iface: db_path fails LOUDLY (no silent fake path)",
+          db_path_raises)
+
+
 def test_yomitan_bridge_sw_keepalive() -> None:
     """
     Regression for the 2026-09-04 "Yomitan completely dead" incident.
@@ -3430,6 +3477,7 @@ def main() -> int:
         test_scope_deck_filtering()
         test_v12_scoring_algorithm()
         test_config_survives_yomitan_toggle()
+        test_yomitan_provider_implements_full_surface()
         test_yomitan_bridge_sw_keepalive()
         test_yomitan_glossary_split_per_dictionary()
         test_yomitan_term_list_loses_to_real_definition()

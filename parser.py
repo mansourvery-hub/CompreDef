@@ -88,7 +88,8 @@ def get_single_dictionary(path):
 # Aliasing SingleDictionary to the Mock class for legacy tests
 class SingleDictionary:
     @staticmethod
-    def _iter_term_banks(self): pass # stub
+    def _iter_term_banks(_path_ignored): pass # stub (signature mirrors the
+        # instance method so monkeypatched spies keep working)
 
 def install_dictionary(path, progress_cb=None, cancel_check=None, plain_text=None):
     return get_provider().install(path, progress_cb, cancel_check, plain_text=plain_text)

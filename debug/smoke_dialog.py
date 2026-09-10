@@ -123,7 +123,6 @@ def make_fake_mw(col, scope_decks):
                 on_done(fut)
             return fut
 
-    import aqt
     return types.SimpleNamespace(
         col=col,
         addonManager=_FakeAddonManager(),
@@ -194,17 +193,22 @@ def check_dialog(gui_mod, res: SmokeResult) -> object:
 
 def _desc_order():
     from aqt.qt import Qt
-    return getattr(getattr(Qt, "SortOrder", Qt), "DescendingOrder")
+    # noqa: B009 — nested getattr is intentional PyQt5/6 compat: on
+    # PyQt5 Qt has no SortOrder enum, so we fall back to Qt itself.
+    # Ruff's suggested flattening would crash PyQt5 with AttributeError.
+    return getattr(getattr(Qt, "SortOrder", Qt), "DescendingOrder")  # noqa: B009
 
 
 def _asc_order():
     from aqt.qt import Qt
-    return getattr(getattr(Qt, "SortOrder", Qt), "AscendingOrder")
+    # noqa: B009 — same PyQt5/6 compat rationale as _desc_order.
+    return getattr(getattr(Qt, "SortOrder", Qt), "AscendingOrder")  # noqa: B009
 
 
 def _user_role():
     from aqt.qt import Qt
-    return getattr(getattr(Qt, "ItemDataRole", Qt), "UserRole")
+    # noqa: B009 — same PyQt5/6 compat rationale as _desc_order.
+    return getattr(getattr(Qt, "ItemDataRole", Qt), "UserRole")  # noqa: B009
 
 
 def _numeric_column(table, limit=200):

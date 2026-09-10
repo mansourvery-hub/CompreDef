@@ -404,7 +404,7 @@ class ConfigDialog(QDialog):
         # installs during load persist dialog state immediately
         # (crash-safety) and those early saves read both attributes.
         self.scope_decks: List[str] = []
-        self.type_mappings: Dict[str, Dict[str, str]] = {}
+        self.type_mappings: Dict[str, Dict[str, Any]] = {}
         self._active_type: Optional[str] = None
 
         self._init_ui()
@@ -1453,7 +1453,7 @@ class ConfigDialog(QDialog):
                     self.yomitan_status_label.setText(f"✗ Install failed: {err}")
                     self.yomitan_status_label.setStyleSheet("color: red; font-size: 11px;")
                     print(f"CompreDef: Yomitan bridge install failed:\n{err}")
-                    tooltip(f"Yomitan bridge install failed — see console", parent=self)
+                    tooltip("Yomitan bridge install failed — see console", parent=self)
                     return
                 # Clear Yomitan negative cache so Test retries immediately
                 try:
@@ -1889,7 +1889,6 @@ class ConfigDialog(QDialog):
         # has indexed dictionaries, restore them so user doesn't need to re-import.
         if not saved_dicts:
             try:
-                from .provider import LocalSQLiteProvider
                 import os as _os
                 _addon_dir = _os.path.dirname(_os.path.abspath(__file__))
                 _cache_dir = _os.path.join(_addon_dir, "user_files", "cache")
@@ -2023,7 +2022,6 @@ class ConfigDialog(QDialog):
                 else:
                     # Last resort: try DB recovery even for save
                     try:
-                        from .provider import LocalSQLiteProvider
                         import os as _os2
                         _addon_dir2 = _os2.path.dirname(_os2.path.abspath(__file__))
                         _cache_dir2 = _os2.path.join(_addon_dir2, "user_files", "cache")

@@ -22,11 +22,22 @@ class IndexingError(Exception):
 
 class DictionaryProvider(abc.ABC):
     """Interface for dictionary lookups and management."""
-    
+
     @abc.abstractmethod
     def lookup(self, word: str, reading: str = "") -> List[DictionaryEntry]:
         """Find definitions for a word, optionally filtered by reading."""
         pass
+
+    def lookup_by_path(self, path: str, word: str,
+                       reading: str = "") -> List[DictionaryEntry]:
+        """Find definitions for a word in ONE dictionary path.
+
+        Concrete default delegates to lookup() (path-agnostic
+        providers like the Yomitan API ignore it); LocalSQLiteProvider
+        overrides with a path-scoped query. Declared here (not just
+        duck-typed) so engine.py's per-path ladder loop type-checks.
+        """
+        return self.lookup(word, reading)
 
     @abc.abstractmethod
     def get_title(self, path: str) -> str:

@@ -1,0 +1,11 @@
+# Ruff config for CompreDef — run `ruff check .` before finalizing
+# edits (see AGENTS.md). Intentionally ignored rules (project policy,
+# not oversights):
+# - BLE001 (blind `except Exception`): REQUIRED by AGENTS.md — every API
+#   call and file read is wrapped so an uncaught exception can never
+#   crash Anki. Failures log loudly via print()/tooltip, never silently.
+# - S110/S112 (try-except-pass/continue): same rationale — best-effort
+#   fallbacks (headless tooltips, read-only niceties, scope fallbacks)
+#   must degrade gracefully, never raise.
+[lint]
+ignore = ["BLE001", "S110", "S112"]

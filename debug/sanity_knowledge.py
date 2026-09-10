@@ -159,6 +159,20 @@ def fresh_state() -> None:
 SEP = "\x1f"
 
 
+def _mark_docstrings(node, docstrings: set) -> None:
+    """Records ids of docstring constants so SQL scans skip prose.
+
+    Module-level (not nested in the per-file loop) so it can never
+    capture a stale loop iteration's set (B023 closure hazard —
+    behavior identical, structure safe).
+    """
+    body = getattr(node, "body", None)
+    if body and isinstance(body[0], ast.Expr):
+        val = body[0].value
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            docstrings.add(id(val))
+
+
 def s1_no_legacy_models_table_sql() -> None:
     """No shipped module may embed SQL naming the legacy 'models' table.
 
@@ -175,18 +189,11 @@ def s1_no_legacy_models_table_sql() -> None:
         tree = ast.parse(open(path, encoding="utf-8").read())
         docstrings = set()
 
-        def mark_docstrings(node) -> None:
-            body = getattr(node, "body", None)
-            if body and isinstance(body[0], ast.Expr):
-                val = body[0].value
-                if isinstance(val, ast.Constant) and isinstance(val.value, str):
-                    docstrings.add(id(val))
-
-        mark_docstrings(tree)
+        _mark_docstrings(tree, docstrings)
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
                                  ast.ClassDef)):
-                mark_docstrings(node)
+                _mark_docstrings(node, docstrings)
         for node in ast.walk(tree):
             text, lineno = None, getattr(node, "lineno", "?")
             if isinstance(node, ast.Constant) and isinstance(node.value, str):

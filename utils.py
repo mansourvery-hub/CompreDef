@@ -175,7 +175,7 @@ def find_dictionary_folders(parent_or_dict_path: str) -> List[str]:
     return found
 
 
-def merge_type_targets(type_mappings: Dict[str, Dict[str, str]],
+def merge_type_targets(type_mappings: Dict[str, Dict[str, Any]],
                        prev_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Builds the note-type portion of the config: the multi-type

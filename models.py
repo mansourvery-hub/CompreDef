@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 
-# The version of the HTML rendering output. 
-# Bump this whenever rendering changes to invalidate stale SQLite caches.
-RENDERER_VERSION = "yomitan_html_v2_reading"
+# NOTE: there is intentionally NO RENDERER_VERSION here. The single
+# source of truth lives on provider.LocalSQLiteProvider (used by
+# _compute_signature); parser.py re-exports it by reference. A second
+# literal copy here once existed and could silently desync — removed
+# (ruff-driven cleanup).
 
 @dataclass(frozen=True)
 class DictionaryEntry:

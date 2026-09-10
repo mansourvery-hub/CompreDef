@@ -61,7 +61,7 @@ import sys
 import threading
 import time
 import traceback
-import urllib
+import urllib.parse  # explicit: urlparse/parse_qs (bare 'import urllib' does NOT bind the submodule)
 
 ADDR = "127.0.0.1"
 PORT = 19633
