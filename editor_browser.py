@@ -621,20 +621,22 @@ def _apply_definition_to_editor(editor, note, def_field: str, definition_html: s
 
     Ordering contract (fixes the 'definition disappears' bug):
     1. Write the field on the Note object.
-    2. Persist to the collection FIRST (update_note) for existing notes.
+    2. Persist to the collection FIRST (update_note).
     3. THEN refresh the editor UI. A reload can never discard the change
        because it is already durably stored.
     """
     note[def_field] = definition_html
 
-    # Persist existing notes immediately; new (unsaved) notes in the Add
-    # window are written by Anki itself when the user confirms the add —
-    # updating them here would fail since they have no collection row yet.
-    if getattr(note, "id", 0) and mw and mw.col:
+    # Persist to collection immediately for ALL notes.
+    # For unsaved notes (id 0, no collection row yet) update_note raises
+    # and is skipped via the except path — the in-memory object assigned
+    # above is what the Add window saves on confirm.
+    if mw and mw.col:
         try:
             mw.col.update_note(note)
         except Exception:
-            print(f"CompreDef: update_note failed for note {note.id}:\n{traceback.format_exc()}")
+            # Log but don't fail - the note object is already modified
+            print(f"CompreDef: update_note failed for note {getattr(note, 'id', 'unknown')}:\n{traceback.format_exc()}")
 
     # Refresh the visible editor. run_in_background's on_done runs on the
     # main thread, so touching the webview here is thread-safe.
@@ -705,6 +707,8 @@ def _find_editor_for_note(note) -> Optional[Any]:
     window where unsaved notes all share id 0 and an id-only match could
     pick a different open Add window. The id fallback covers any editor
     generation that resolves notes through the collection.
+    For unsaved notes (id=0), we also check for the temporary _cd_editor
+    attachment set during processing.
     """
     # Pass 1: exact object identity (legacy editors).
     for editor in reversed(_live_editors):  # most recently loaded wins
@@ -712,6 +716,11 @@ def _find_editor_for_note(note) -> Optional[Any]:
             return editor
     # Pass 2: match by note id (collection-resolved notes, same id).
     target_nid = getattr(note, "id", None)
+    # For unsaved notes, also check for our temporary attachment
+    if target_nid == 0:
+        for editor in reversed(_live_editors):
+            if getattr(editor, "_cd_editor", None) is note:
+                return editor
     if not target_nid:  # 0/None = unsaved note; identity pass already failed
         return None
     for editor in reversed(_live_editors):

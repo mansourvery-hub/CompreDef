@@ -3167,21 +3167,25 @@ def test_yomitan_glossary_split_per_dictionary() -> None:
     check("yomitan-split: titles extracted in order",
           [t for t, _ in parts] == ["Dict A", "Dict B", "Dict C"],
           f"got {[t for t, _ in parts]}")
-    check("yomitan-split: slices are verbatim substrings",
-          all(s in blob for _, s in parts))
-    check("yomitan-split: slices tile the <li> region exactly",
-          "".join(s for _, s in parts) == blob[blob.find("<li"):blob.rfind("</ol>")])
+    check("yomitan-split: each slice keeps ONLY its own <style> block",
+          "color:red" in parts[0][1]
+          and "color:green" in parts[1][1]
+          and "color:blue" in parts[2][1]
+          and "color:green" not in parts[0][1]
+          and "color:blue" not in parts[0][1]
+          and "color:red" not in parts[1][1]
+          and "color:blue" not in parts[1][1]
+          and "color:red" not in parts[2][1]
+          and "color:green" not in parts[2][1],
+          "styles leaked across slices or own style lost")
+    check("yomitan-split: dictionary content survives within its slice",
+          "贔屓があって" in parts[0][1]
+          and "公で平でないこと" in parts[1][1]
+          and "公平を欠く状態" in parts[2][1])
     check("yomitan-split: nested inner <li> does not over-split",
           "nested example without marker" in parts[1][1])
     check("yomitan-split: no <ol> wrapper leaks into slices",
           all("<ol" not in s.lower() for _, s in parts))
-    check("yomitan-split: each slice carries its OWN <style> block",
-          "color:green" in parts[1][1]
-          and "color:red" not in parts[1][1]
-          and "color:blue" not in parts[1][1]
-          and "color:red" in parts[0][1]
-          and "color:blue" in parts[2][1],
-          f"styles leaked across slices")
 
     single = '<div class="yomitan-glossary">単独の定義文です。</div>'
     check("yomitan-split: marker-less blob falls back to whole",
@@ -3192,6 +3196,84 @@ def test_yomitan_glossary_split_per_dictionary() -> None:
           yomitan.split_glossary_by_dictionary(custom) == [(None, custom)])
     check("yomitan-split: empty input falls back",
           yomitan.split_glossary_by_dictionary("") == [(None, "")])
+
+    # SPEC tests for yomitan.split_glossary_by_dictionary.
+    # NOTE: blobs below use REAL Yomitan syntax (<li data-dictionary="X">
+    # attributes). An earlier draft used square-bracket pseudo-markers
+    # ([data-dictionary="X"]) which _LI_DICT_RE never matches — every
+    # spec silently fell back to one slice. If you add cases here, copy
+    # real /ankiFields output shape.
+    # 1. style-scoping guard: <style> between </li> and next <li> should be kept only if it targets current dictionary
+    spec_style_blob = ('<div class="yomitan-glossary">'
+                       '<ol>'
+                       '<li data-dictionary="DicA">{text}</li>'
+                       '<style>[data-dictionary="DicA"]{color:red;}</style>'
+                       '<li data-dictionary="DicB">{text}</li>'
+                       '<style>[data-dictionary="DicB"]{color:blue;}</style>'
+                       '</ol>'
+                       '</div>')
+    spec_parts = yomitan.split_glossary_by_dictionary(spec_style_blob)
+    check("yomitan-split: spec style-scoping - exactly two slices",
+          len(spec_parts) == 2, f"got {len(spec_parts)}")
+    check("yomitan-split: spec style-scoping - DicA slice keeps its own style",
+          len(spec_parts) == 2
+          and "[data-dictionary=\"DicA\"]{color:red;}" in spec_parts[0][1])
+    check("yomitan-split: spec style-scoping - DicA slice does NOT keep DicB style",
+          len(spec_parts) == 2
+          and "[data-dictionary=\"DicB\"]" not in spec_parts[0][1])
+    check("yomitan-split: spec style-scoping - DicB slice keeps its own style",
+          len(spec_parts) == 2
+          and "[data-dictionary=\"DicB\"]{color:blue;}" in spec_parts[1][1])
+    check("yomitan-split: spec style-scoping - DicB slice does NOT keep DicA style",
+          len(spec_parts) == 2
+          and "[data-dictionary=\"DicA\"]" not in spec_parts[1][1])
+
+    # 2. adjacent <li> no-intermediate-markup: if two <li> are adjacent with no markup between,
+    #    split must still occur (no false merge)
+    spec_adj_blob = ('<div class="yomitan-glossary">'
+                     '<ol>'
+                     '<li data-dictionary="X">{first}</li>'
+                     '<li data-dictionary="Y">{second}</li>'
+                     '</ol>'
+                     '</div>')
+    spec_adj_parts = yomitan.split_glossary_by_dictionary(spec_adj_blob)
+    check("yomitan-split: spec adjacent <li> - exactly two slices",
+          len(spec_adj_parts) == 2)
+    check("yomitan-split: spec adjacent <li> - first slice contains 'first'",
+          any("first" in s for _, s in spec_adj_parts))
+    check("yomitan-split: spec adjacent <li> - second slice contains 'second'",
+          any("second" in s for _, s in spec_adj_parts))
+
+    # 3. empty <li> handling: <li> with only whitespace should still yield a slice
+    spec_empty_blob = ('<div class="yomitan-glossary">'
+                       '<ol>'
+                       '<li data-dictionary="Real">{real}</li>'
+                       '<li data-dictionary="Empty">{   }</li>'
+                       '<li data-dictionary="AlsoReal">{also}</li>'
+                       '</ol>'
+                       '</div>')
+    spec_empty_parts = yomitan.split_glossary_by_dictionary(spec_empty_blob)
+    check("yomitan-split: spec empty <li> - three slices despite middle being whitespace-only",
+          len(spec_empty_parts) == 3)
+    check("yomitan-split: spec empty <li> - middle slice title is 'Empty'",
+          len(spec_empty_parts) == 3 and spec_empty_parts[1][0] == "Empty")
+    check("yomitan-split: spec empty <li> - whitespace content survives in its own slice",
+          len(spec_empty_parts) == 3 and "{   }" in spec_empty_parts[1][1])
+
+    # 4. unordered fallback: if no [data-dictionary] markers present, fall back to returning whole blob as one slice
+    spec_fallback_blob = ('<div class="yomitan-glossary">'
+                          '<ol>'
+                          '<li>no marker here</li>'
+                          '<li>nor here</li>'
+                          '</ol>'
+                          '</div>')
+    spec_fallback_parts = yomitan.split_glossary_by_dictionary(spec_fallback_blob)
+    check("yomitan-split: spec unordered fallback - exactly one slice",
+          len(spec_fallback_parts) == 1)
+    check("yomitan-split: spec unordered fallback - slice title is None",
+          spec_fallback_parts[0][0] is None)
+    check("yomitan-split: spec unordered fallback - slice contains original content",
+          "no marker here" in spec_fallback_parts[0][1] and "nor here" in spec_fallback_parts[0][1])
 
 
 def _yomitan_child_list_blob() -> str:
