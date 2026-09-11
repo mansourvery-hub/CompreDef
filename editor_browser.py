@@ -624,14 +624,28 @@ def _apply_definition_to_editor(editor, note, def_field: str, definition_html: s
     2. Persist to the collection FIRST (update_note).
     3. THEN refresh the editor UI. A reload can never discard the change
        because it is already durably stored.
+
+    Refresh contract (fixes the 'rendered field not updating' bug):
+    prefer the editor's OWN reload entry points. On the legacy editor,
+    loadNoteKeepingFocus() is exactly what Anki itself runs after a
+    changed unfocus hook (saveSession + full field/meta state +
+    focusField + triggerChanges), so BOTH the rendered field AND any
+    HTML-source view refresh together — the same reason Japanese
+    Support's furigana Tab works flawlessly in one go. The old bare
+    setFields() eval only updated the field stores, leaving rendered
+    Svelte components stale until the next focus event. The raw eval
+    survives only as the last resort for editor generations exposing
+    no reload method.
     """
     note[def_field] = definition_html
 
-    # Persist to collection immediately for ALL notes.
-    # For unsaved notes (id 0, no collection row yet) update_note raises
-    # and is skipped via the except path — the in-memory object assigned
-    # above is what the Add window saves on confirm.
-    if mw and mw.col:
+    # Persist existing notes immediately. New (unsaved) notes in the Add
+    # window are written by Anki itself when the user confirms the add —
+    # there is no collection row yet, so update_note would only raise a
+    # noisy (but harmless) traceback on every Add-window Tab. The
+    # in-memory object assigned above is what the Add window saves.
+    note_id = getattr(note, "id", 0)
+    if note_id and mw and mw.col:
         try:
             mw.col.update_note(note)
         except Exception:
@@ -639,20 +653,42 @@ def _apply_definition_to_editor(editor, note, def_field: str, definition_html: s
             print(f"CompreDef: update_note failed for note {getattr(note, 'id', 'unknown')}:\n{traceback.format_exc()}")
 
     # Refresh the visible editor. run_in_background's on_done runs on the
-    # main thread, so touching the webview here is thread-safe.
-    try:
-        names = list(note.keys())
-        values = [note[name] for name in names]
-        editor.web.eval(
-            f"setFields({json.dumps(names)}, {json.dumps(values)});"
-        )
-    except Exception:
-        # Legacy editor fallback (refresh keeping user focus)
+    # main thread, so touching Qt/the webview here is thread-safe. Each
+    # mechanism is attempted in preference order with its own guard, so
+    # a closed editor (or a missing method) falls through silently
+    # instead of raising.
+    refreshed = False
+    for method_name in ("loadNoteKeepingFocus", "loadNote"):
         try:
-            if hasattr(editor, "loadNoteKeepingFocus"):
-                editor.loadNoteKeepingFocus()
-            elif hasattr(editor, "loadNote"):
-                editor.loadNote()
+            method = getattr(editor, method_name, None)
+            if callable(method):
+                method()
+                refreshed = True
+                break
+        except Exception:
+            continue
+    if not refreshed:
+        # NewEditor (Svelte): reload by note id — but ONLY for saved
+        # notes. reloadNote() re-fetches from the collection, which an
+        # unsaved Add-window note (no row yet) would not survive.
+        try:
+            reload_method = getattr(editor, "reload_note", None)
+            if note_id and callable(reload_method):
+                reload_method()
+                refreshed = True
+        except Exception:
+            pass
+    if not refreshed:
+        # Last resort: raw field-store update. triggerChanges() is
+        # included so Svelte field components re-render (bare setFields
+        # alone left the rendered view stale — the reported bug).
+        try:
+            names = list(note.keys())
+            values = [note[name] for name in names]
+            editor.web.eval(
+                f"setFields({json.dumps(names)}, {json.dumps(values)});"
+                f"triggerChanges();"
+            )
         except Exception:
             print(f"CompreDef: editor refresh failed:\n{traceback.format_exc()}")
 

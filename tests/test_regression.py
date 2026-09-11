@@ -1538,6 +1538,190 @@ def test_tab_generate_decisions() -> None:
     _restore_collection_state(scope_state)
 
 
+def test_apply_definition_refresh_order() -> None:
+    """
+    Refresh contract for _apply_definition_to_editor (the 'rendered
+    field not updating' bug): after Tab-generation the definition must
+    appear in BOTH the rendered field and any HTML-source view in one
+    go — like Japanese Support's furigana Tab, which works because
+    Anki itself reloads the note (loadNoteKeepingFocus) after a
+    changed unfocus hook.
+
+    Our hook must still return `changed` untouched (no reload race),
+    so on_done must drive Anki's OWN reload entry points instead of a
+    bare setFields() eval (which updated field stores but left the
+    rendered components stale until the next focus event).
+    """
+    _ensure_editor_browser_stubs()
+    eb = _import_editor_browser()
+
+    order_log: list = []
+
+    class RecNote:
+        """Note stand-in supporting field assignment like anki.notes.Note."""
+
+        def __init__(self, fields: dict, nid: int):
+            self._fields = dict(fields)
+            self.id = nid
+
+        def __contains__(self, name):
+            return name in self._fields
+
+        def __getitem__(self, name):
+            return self._fields[name]
+
+        def __setitem__(self, name, value):
+            order_log.append(("note-set", name))
+            self._fields[name] = value
+
+        def keys(self):
+            return list(self._fields)
+
+    class RecWeb:
+        def eval(self, js):
+            order_log.append(("web.eval", js))
+
+    class LegacyEditor:
+        """Legacy Editor surface: native reload entry points."""
+
+        def __init__(self):
+            self.web = RecWeb()
+
+        def loadNoteKeepingFocus(self):
+            order_log.append(("loadNoteKeepingFocus",))
+
+        def loadNote(self, focusTo=None):
+            order_log.append(("loadNote",))
+
+    class NewEditorish:
+        """Svelte NewEditor surface: reload_note only, no legacy methods."""
+
+        def __init__(self):
+            self.web = RecWeb()
+
+        def reload_note(self):
+            order_log.append(("reload_note",))
+
+    class BareEditor:
+        """Unknown generation: only web.eval available."""
+
+        def __init__(self):
+            self.web = RecWeb()
+
+    class DeadEditor:
+        """Closed editor: every touch raises (sip-wrapped C++ gone)."""
+
+        @property
+        def web(self):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        def loadNoteKeepingFocus(self):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        def loadNote(self, focusTo=None):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+    # update_note recorder on the stub collection (restored afterwards).
+    col = aqt.mw.col
+    had_update = hasattr(col, "update_note")
+
+    def _rec_update_note(n):
+        order_log.append(("update_note", getattr(n, "id", None)))
+
+    col.update_note = _rec_update_note  # type: ignore[attr-defined]
+    try:
+        # 1. Legacy + saved note: field written, persisted, then the
+        #    NATIVE reload runs — and no raw setFields eval happens.
+        order_log.clear()
+        note = RecNote({"Expression": "不公平", "Definition": ""}, 123)
+        eb._apply_definition_to_editor(
+            LegacyEditor(), note, "Definition", "<b>def</b>")
+        check("refresh: note field updated",
+              note["Definition"] == "<b>def</b>")
+        check("refresh: update_note runs BEFORE the UI refresh",
+              order_log[:2] == [("note-set", "Definition"),
+                                ("update_note", 123)],
+              f"got {order_log[:2]}")
+        check("refresh: legacy editor uses loadNoteKeepingFocus",
+              ("loadNoteKeepingFocus",) in order_log,
+              f"got {order_log}")
+        check("refresh: native path needs no setFields eval",
+              not any(kind == "web.eval" for kind, *_ in order_log),
+              f"got {order_log}")
+
+        # 2. Legacy + UNSAVED note (Add window, id 0): no update_note
+        #    call, but the native refresh still runs (reads the
+        #    in-memory note object — no collection row needed).
+        order_log.clear()
+        new_note = RecNote({"Expression": "不公平", "Definition": ""}, 0)
+        eb._apply_definition_to_editor(
+            LegacyEditor(), new_note, "Definition", "<b>def</b>")
+        check("refresh: unsaved note skips update_note",
+              not any(kind == "update_note" for kind, *_ in order_log),
+              f"got {order_log}")
+        check("refresh: unsaved note still gets native refresh",
+              ("loadNoteKeepingFocus",) in order_log,
+              f"got {order_log}")
+
+        # 3. NewEditor-ish + saved note: reload_note (never the raw eval).
+        order_log.clear()
+        note3 = RecNote({"Expression": "不公平", "Definition": ""}, 456)
+        eb._apply_definition_to_editor(
+            NewEditorish(), note3, "Definition", "<b>def</b>")
+        check("refresh: svelte editor uses reload_note for saved notes",
+              ("reload_note",) in order_log
+              and not any(kind == "web.eval" for kind, *_ in order_log),
+              f"got {order_log}")
+
+        # 4. NewEditor-ish + UNSAVED note: reload_note would re-fetch a
+        #    nonexistent row, so it must NOT run — raw eval instead.
+        order_log.clear()
+        note4 = RecNote({"Expression": "不公平", "Definition": ""}, 0)
+        eb._apply_definition_to_editor(
+            NewEditorish(), note4, "Definition", "<b>def</b>")
+        check("refresh: unsaved note never triggers reload_note",
+              not any(kind == "reload_note" for kind, *_ in order_log),
+              f"got {order_log}")
+        evals = [js for kind, js in order_log if kind == "web.eval"]
+        check("refresh: fallback eval carries setFields AND triggerChanges",
+              len(evals) == 1 and "setFields(" in evals[0]
+              and "triggerChanges" in evals[0],
+              f"got {evals}")
+
+        # 5. Bare editor (no reload methods at all): same eval fallback.
+        order_log.clear()
+        note5 = RecNote({"Expression": "不公平", "Definition": ""}, 789)
+        eb._apply_definition_to_editor(
+            BareEditor(), note5, "Definition", "<b>def</b>")
+        check("refresh: method-less editor falls back to eval",
+              any(kind == "web.eval" and "triggerChanges" in js
+                  for kind, js in order_log),
+              f"got {order_log}")
+
+        # 6. Dead (closed) editor: nothing may raise; persistence to the
+        #    collection still happened (the note survives in the DB even
+        #    though no window could show it).
+        order_log.clear()
+        note6 = RecNote({"Expression": "不公平", "Definition": ""}, 321)
+        try:
+            eb._apply_definition_to_editor(
+                DeadEditor(), note6, "Definition", "<b>def</b>")
+            raised = False
+        except Exception as e:  # noqa: BLE001 — the failure IS the test
+            raised = e  # type: ignore[assignment]
+        check("refresh: closed editor never raises",
+              raised is False, f"raised {raised!r}")
+        check("refresh: closed editor still persists the note",
+              ("update_note", 321) in order_log,
+              f"got {order_log}")
+    finally:
+        if not had_update:
+            try:
+                delattr(col, "update_note")
+            except AttributeError:
+                pass
+
+
 def test_multi_note_type_targeting() -> None:
     """
     Multi-note-type support: the 'targets' config shape maps EACH note
@@ -3571,6 +3755,7 @@ def main() -> int:
         test_no_undefined_names_in_shipped_modules()
         test_qt_enum_compat()
         test_tab_generate_decisions()
+        test_apply_definition_refresh_order()
         test_multi_note_type_targeting()
         test_scope_deck_filtering()
         test_v12_scoring_algorithm()
