@@ -17,6 +17,9 @@ Coverage contract (no duplication with the regression suite — each
 pure function is pinned in exactly ONE place):
 - COVERED HERE: every pure function with NO isolated coverage in
   test_regression.py (see each test's docstring for the gap it fills).
+  rank_definitions key edges live here; its end-to-end agreement with
+  engine._pick_best on real captured data lives there
+  (test_picker_audit_strict).
 - COVERED THERE (referenced, not repeated): extract_base_text,
   extract_clean_word, parse_furigana_field, merge_type_targets
   (utils); is_reference_title, extract_kanji_words, score_definition
@@ -46,6 +49,7 @@ sys.modules.setdefault("aqt", types.SimpleNamespace(mw=None))
 import anki as compredef_anki
 import engine as compredef_engine
 import models as compredef_models
+import picker as compredef_picker
 import renderer as compredef_renderer
 import scope as compredef_scope
 import scoring as compredef_scoring
@@ -445,6 +449,40 @@ def test_yomitan_error_state() -> None:
           compredef_yomitan.get_last_yomitan_error() is None)
 
 
+def test_rank_definitions() -> None:
+    """picker.rank_definitions: deterministic total order (gap: new in
+    the picker-audit work; engine._pick_best agreement is pinned in
+    Ring 1 on real captured data)."""
+    rk = compredef_picker.rank_definitions
+    kp = {"公": 1.0, "平": 1.0}
+    cands = [("B", "公平だ。"), ("A", "公平だ。"), ("C", "かなだけ。")]
+    ranked = rk(cands, kp, {})
+    titles = [t for (t, _), _ in ranked]
+    check("unit: richer definition ranks first",
+          titles[0] in ("A", "B") and titles[-1] == "C",
+          f"got {titles}")
+    check("unit: full tie breaks by title, not input order",
+          titles[:2] == ["A", "B"], f"got {titles}")
+    check("unit: shuffled input ranks identically",
+          [t for (t, _), _ in rk(list(reversed(cands)), kp, {})] == titles)
+    check("unit: empty in -> empty out", rk([], kp, {}) == [])
+    # Density (v1.3 default): a succinct fully-known definition beats
+    # a long mostly-unknown one — raw sums ranked the reverse
+    # (3.0 vs 2.0 for the long one).
+    short = "公平だ。"
+    long_unknown = "公平な不透明不平等。"
+    ranked2 = rk([("long", long_unknown), ("short", short)], kp, {})
+    check("unit: succinct known beats long unknown (density)",
+          ranked2[0][0][0] == "short",
+          f"got {[t for (t, _), _ in ranked2]}")
+    # Legacy strategy keeps the old length-favoring order (A/B switch).
+    ranked3 = rk([("long", long_unknown), ("short", short)], kp, {},
+                 strategy=compredef_picker.LegacySumPicker())
+    check("unit: legacy strategy still favors raw mass",
+          ranked3[0][0][0] == "long",
+          f"got {[t for (t, _), _ in ranked3]}")
+
+
 def main() -> int:
     import shutil as _sh
     import tempfile as _tf
@@ -467,6 +505,7 @@ def main() -> int:
         test_extract_plain_text_node()
         test_render_definition_text()
         test_filter_valid_entries()
+        test_rank_definitions()
         test_maturity_points()
         test_first_field_text()
         test_yomitan_normalize_reading()

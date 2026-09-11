@@ -67,16 +67,22 @@ def score_definition(
     For a definition's clean base text:
     - kanji score  = sum(point(k) for each kanji occurrence), where
       point(k) = max_interval(k)/365 capped at 1.0 (0 when unknown).
-    - vocab score  = sum(point(w) for each multi-kanji compound
-      occurrence), same weighting. Compounds unknown to the learner
+    - vocab score  = sum(point(w) for each DISTINCT multi-kanji
+      compound), same weighting. Compounds unknown to the learner
       contribute 0.
-    - total = kanji_score + vocab_score; the engine picks the highest
-      total; ties break toward the definition with the MOST kanji
-    (longest, most kanji-dense prose — the user's stated preference).
+    - total = kanji_score + vocab_score (raw sums; kept for
+      compatibility and diagnostics).
+
+    v1.3 densities (what the picker actually ranks by — raw sums grow
+    with length, so a 20-paragraph 5%-known definition always beat a
+    succinct 90%-known one):
+    - kanji_density = kanji_score / kanji_count (fraction known, 0..1),
+    - vocab_density = vocab_score / distinct-compound count
+      (0.0 when the definition holds no compounds),
+    - density_total = kanji_density + vocab_density.
 
     Kept for compatibility: `score` (normalized 0..1 over the kanji
-    count) and `is_perfect` so legacy call sites keep working; the
-    engine now ranks by (total, kanji_count) instead.
+    count) and `is_perfect` so legacy call sites keep working.
     """
     clean_text = extract_base_text(html_or_text)
     kanji_in_text = _KANJI_RE.findall(clean_text)
@@ -85,19 +91,23 @@ def score_definition(
     for ch in kanji_in_text:
         kanji_score += float(kanji_points.get(ch, 0.0))
 
+    compounds = extract_kanji_words(clean_text)
     vocab_score = 0.0
-    for word in extract_kanji_words(clean_text):
+    for word in compounds:
         vocab_score += float(vocab_points.get(word, 0.0))
 
     kanji_count = len(kanji_in_text)
     total = kanji_score + vocab_score
+    kanji_density = kanji_score / kanji_count if kanji_count else 0.0
+    vocab_density = vocab_score / len(compounds) if compounds else 0.0
 
     if kanji_count == 0:
         # Kana-only definitions carry no kanji signal: neutral score.
         return ScoringResult(definition=html_or_text, score=1.0,
                              is_perfect=True, kanji_score=0.0,
                              vocab_score=0.0, total_score=0.0,
-                             kanji_count=0)
+                             kanji_count=0, kanji_density=0.0,
+                             vocab_density=0.0, density_total=0.0)
 
     return ScoringResult(
         definition=html_or_text,
@@ -107,6 +117,9 @@ def score_definition(
         vocab_score=vocab_score,
         total_score=total,
         kanji_count=kanji_count,
+        kanji_density=kanji_density,
+        vocab_density=vocab_density,
+        density_total=kanji_density + vocab_density,
     )
 
 
@@ -121,7 +134,8 @@ def calculate_kanji_score(html_or_text: str, known_kanji: Set[str]) -> ScoringRe
     if not kanji_in_text:
         return ScoringResult(definition=html_or_text, score=1.0, is_perfect=True,
                              kanji_score=0.0, vocab_score=0.0, total_score=0.0,
-                             kanji_count=0)
+                             kanji_count=0, kanji_density=0.0,
+                             vocab_density=0.0, density_total=0.0)
 
     known_count = sum(1 for char in kanji_in_text if char in known_kanji)
     score = known_count / len(kanji_in_text)
@@ -133,4 +147,7 @@ def calculate_kanji_score(html_or_text: str, known_kanji: Set[str]) -> ScoringRe
         vocab_score=0.0,
         total_score=float(known_count),
         kanji_count=len(kanji_in_text),
+        kanji_density=score,
+        vocab_density=0.0,
+        density_total=score,
     )

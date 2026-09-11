@@ -6,82 +6,117 @@ CompreDef is designed around Stephen Krashen's **$i+1$ Comprehensible Input Hypo
 
 Traditional Japanese-Japanese (国語) dictionaries (like 大辞林, 大辞泉, or 広辞苑) frequently define target words using obscure literary vocabulary or unlearned kanji. For a beginner or intermediate learner, looking up a word in such a dictionary creates an infinite lookup loop. Conversely, children's dictionaries (like 例解学習国語) provide simpler explanations using elementary kanji and grammar, but lack coverage of advanced terms.
 
-CompreDef solves this deterministically through the **Dictionary Ladder with Early Exit & Kanji Matrix Scoring**.
+CompreDef solves this deterministically through the **Dictionary Ladder with Comprehension-Density Scoring**.
 
 ---
-
 ## 1. The Algorithm
 
 ```mermaid
 flowchart TD
-    Start([User Requests Definition for Target Word]) --> ScanDB[Scan Anki DB for Known Kanji<br>Cards with interval > 0]
-    ScanDB --> LoopDicts[Inspect Next Dictionary in User Ladder Order]
-
-    LoopDicts --> LookupWord{Does Dictionary<br>contain Target Word?}
-    LookupWord -- No --> HasMoreDicts{More Dictionaries<br>in Ladder?}
-
-    LookupWord -- Yes --> FilterRefs[Filter out cross-reference titles]
-    FilterRefs --> ScoreDefs[Score each Definition in Dictionary<br>Score = Known Base Kanji / Total Base Kanji]
-
-    ScoreDefs --> Check100{Any Definition<br>has Score = 1.0?<br>100% Known Kanji}
-
-    Check100 -- Yes --> EarlyExit([EARLY EXIT: Return Definition Immediately!<br>Skip all subsequent dictionaries])
-
-    Check100 -- No --> TrackBest[Update Maximal Definition if<br>Score > Best Score so far]
-    TrackBest --> HasMoreDicts
-
-    HasMoreDicts -- Yes --> LoopDicts
-    HasMoreDicts -- No --> ReturnMaximal([Return Maximal Definition<br>Least complicated candidate found])
+    Start([User Requests Definition for Target Word]) --> Snapshot[Learner Knowledge Snapshot<br>interval-weighted kanji + vocab points]
+    Snapshot --> Collect[Collect EVERY Dictionary's Candidates<br>ladder order kept, never rewritten]
+    Collect --> FilterRefs[Filter Out Cross-Reference Titles<br>short titles / child-entry lists]
+    FilterRefs --> ScoreDefs[Score Each Survivor<br>comprehension density, see equations]
+    ScoreDefs --> ArgMax([ARGMAX: Return Highest-Density Definition<br>order-independent — ladder position never decides])
 ```
+
+There is no early exit: with weighted scores, a dictionary-order
+fluke must never beat a strictly better definition (the 不公平 case —
+see worked example). The ladder order decides *where to look*, the
+score decides *what wins*.
 
 ### Step-by-Step Execution
 
-1. **Known Kanji Extraction (The Kanji Matrix)**:
-   - The add-on queries Anki's native database:
+1. **Learner Knowledge (The Kanji Matrix)**:
+   - The add-on queries Anki's native database wrapper (`mw.col.db` —
+   never a raw sqlite3 connection) for mature notes inside the user's
+   Scope decks:
      ```sql
-     SELECT DISTINCT notes.id, notes.flds
-     FROM notes
-     JOIN cards ON notes.id = cards.nid
-     WHERE cards.ivl > 0
+     SELECT notes.flds, MAX(cards.ivl) FROM notes
+     JOIN cards ON cards.nid = notes.id
+     WHERE cards.ivl >= 365 AND cards.did IN (<scope>)
+     GROUP BY notes.id
      ```
-   - Only cards with `interval > 0` are analyzed (ensuring only reviewed/retained material is counted as "known").
-   - A compiled C-level regular expression `[\u4e00-\u9fff]` extracts all kanji from the field blobs in **0.18 seconds** across 60,000+ card rows.
-   - The result is a set $\mathcal{K}_{\text{known}}$ of all kanji the learner currently knows.
+   - Mature = a card interval ≥ 365 days (one full year). Only the
+   FIRST field of each note counts (never definitions or examples —
+   CompreDef's own output must not mark unknown kanji known).
+   - Each kanji / multi-kanji compound earns mastery points:
+     $$\mathrm{point}(x) = \min\left(1, \frac{\mathrm{max\_interval}(x)}{365}\right),\quad 0 \text{ when unknown}$$
+     A year-old interval is full mastery (1.0); younger intervals count
+     proportionally. Kana-only words earn nothing (inflection-hostile:
+     やめる vs やめて); single kanji are covered by kanji points, so
+     vocab points track multi-kanji compounds only.
 
-2. **The Dictionary Ladder Traversal**:
-   - The user arranges their installed dictionaries in any order they prefer — order is a *preference*, not a difficulty rating:
-     1. **Recommended top rung**: the richest dictionary the user can comfortably read (e.g., 三省堂国語辞典) — its definitions win whenever they pass the comprehension gate.
-     2. **Fallback rungs**: progressively simpler dictionaries (e.g., 小学館例解学習国語) that catch words the richer sources explain with too-difficult kanji.
-   - The generator iterates through this ladder **one dictionary at a time**.
+2. **Candidate Collection (The Dictionary Ladder)**:
+   - The user orders dictionaries top-to-bottom (richest readable
+   first); every dictionary contributes its entries for the word
+   (local SQLite index via `lookup_by_path`, or the Yomitan bridge
+   slices). Uninstalled/disabled dictionaries are skipped; a missing
+   word simply yields no candidates.
 
 3. **HTML Processing for Scoring**:
-   - Before scoring, definitions are processed to extract **base text** for comprehension scoring:
+   - Before scoring, definitions are reduced to **base text** for
+   comprehension scoring:
      - Strip all `<rt>` (furigana) and `<rp>` tags.
      - Remove remaining HTML tags.
      - Unescape HTML entities.
-   - This ensures only base kanji are counted for the Kanji Matrix Scoring, while the full rich HTML with furigana is preserved for Anki display.
+   - Furigana readings never pollute kanji scores; the full rich HTML
+   (ruby, `data-sc-*`) is preserved for Anki display.
 
 4. **Candidate Filtering**:
-   - Short cross-reference headwords (e.g., `"会社更生法"`, `"参照"`) that do not contain sentence punctuation (`。`, `、`) are filtered out so that real explanatory sentences are always selected.
+   - Short cross-reference headwords (e.g., `"会社更生法"`) and
+   pipe-separated child-entry lists (`会社員 | 会社組合 | …`) are not
+   readable definitions and are dropped — unless they are the ONLY
+   candidate, in which case the lone entry is still allowed. Real
+   prose always ends in 。？！ and is never filtered.
 
-5. **Kanji Comprehension Scoring**:
-   - For every candidate definition HTML string $D$, let $K(D)$ be the multiset of kanji characters appearing in $D$ (base text only, no furigana).
-   - The comprehension score $S(D)$ is calculated as:
-     $$S(D) = \begin{cases} 1.0 & \text{if } |K(D)| = 0 \\ \frac{\sum_{c \in K(D)} [c \in \mathcal{K}_{\text{known}}]}{|K(D)|} & \text{if } |K(D)| > 0 \end{cases}$$
-   - Pure hiragana/katakana definitions have $S(D) = 1.0$ (fully readable).
+5. **Comprehension-Density Scoring (v1.3)**:
+   - For a definition $D$, let $K(D)$ be its kanji occurrences
+   ($|K|$ = kanji_count) and $W(D)$ its distinct multi-kanji
+   compounds. The single decision metric is:
+     $$\mathrm{kanji\_density}(D) = \frac{\sum_{k \in K(D)} \mathrm{point}(k)}{|K(D)|} \in [0,1]$$
+     $$\mathrm{vocab\_density}(D) = \frac{\sum_{w \in W(D)} \mathrm{point}(w)}{|W(D)|} \in [0,1]\quad (0 \text{ when } W = \emptyset)$$
+     $$\mathrm{score}(D) = \mathrm{kanji\_density}(D) + \mathrm{vocab\_density}(D)$$
+   - **Kana = known (first approximation).** Kana length never punishes
+   a definition; kana-only definitions ($|K| = 0$) score neutral 0 —
+   they never win on merit, so a kana gloss can't beat real prose, but
+   a kana-heavy explanation of known kanji is not penalized either.
+   - Why density, not raw sums: raw sums grow with length, so a
+   20-paragraph 5%-known definition always beat a succinct 90%-known
+   one. Density measures the *fraction the learner can actually read*.
+   (The v1.2 raw-sum ranking survives as `LegacySumPicker` for A/B via
+   the `picker_strategy` config key.)
 
-6. **Early Exit (Short-Circuit Evaluation)**:
-   - If a definition yields $S(D) = 1.0$ (100% of the kanji are known):
-     - **The loop immediately halts and returns that definition.**
-     - Dictionaries further down the ladder are **never queried**.
-     - **Benefits**:
-       - *Comprehension-tailored*: The learner receives the preferred (top-of-ladder) dictionary's definition whenever they can fully read it, and falls back to simpler rungs exactly when they cannot. Since $S(D)$ measures kanji only — kana words are not checked — the ladder order is the user's control for stylistic difficulty.
-       - *Computational*: Avoiding further lookups keeps execution time at **0.05 seconds**.
+6. **Ranking (strict total order, best first)**:
+   1. highest $\mathrm{score}(D)$,
+   2. tie-break: most kanji (richer prose),
+   3. tie-break: dictionary title, then definition text.
+   - Keys 2–3 use input *properties*, never input positions, so
+   shuffling the ladder can never change the winner
+   (order-independence). Given $N$ definitions and one learner there
+   is exactly one correct ordering.
 
-7. **The Maximal Fallback**:
-   - If no dictionary in the entire ladder yields a 100% match, the algorithm returns the candidate definition with the highest comprehension score $S(D)$ found across all evaluated dictionaries.
-   - This fallback is **order-independent**: every dictionary contributes its best candidate, and the highest score wins regardless of ladder position.
-   - This ensures the learner always receives the **least complicated definition available**.
+7. **Swapping the method**: everything above lives in the
+   self-contained `picker.py` (depends only on
+   `scoring`/`models`/`utils`). A new picking idea subclasses
+   `PickerStrategy` (one method: `rank_key`) and becomes active via
+   `get_active_strategy()` / the `picker_strategy` config key —
+   no other module changes.
+
+### Worked example (real data, learner = repo owner)
+
+Word 不公平, 4 local candidates, learner knows 1379 kanji / 1310 compounds:
+
+| dictionary | raw sum (old) | kanji | **score = density (new)** | picked? |
+|---|---|---|---|---|
+| 大辞泉 第二版 | 49.0 | 59 | 0.9225 | — (longest, least readable fraction) |
+| デジタル大辞泉 | 20.0 | 18 | 1.4000 | — |
+| 小学館例解学習国語 | 19.0 | 17 | 1.5000 | — |
+| 三省堂国語辞典 | 14.0 | 11 | **2.0000** | ★ (every kanji + compound known) |
+
+Raw sums crown 大辞泉 (49.0); density crowns 三省堂 (2.0 = 1.0 kanji
++ 1.0 vocab — the whole definition is readable). That flip *is* the
+v1.3 change.
 
 ---
 
@@ -103,9 +138,9 @@ The cache database (`user_files/cache/dictionaries.db`) contains:
 
 ### Cache Invalidation
 
-- **Signature**: Computed from dictionary source (file modification times and sizes for folders, mtime + size for ZIPs).
-- **Update Trigger**: When dictionary files change, the signature updates, triggering re-indexing.
-- **Performance**: First lookup (~0.5s) indexes the dictionary; subsequent lookups are **instant (0.08ms)** via indexed B-tree queries.
+- **Signature**: Computed from dictionary source (file modification times and sizes for folders, mtime + size for ZIPs), with the renderer version embedded (a renderer change invalidates every index).
+- **Update Trigger**: Dictionaries are indexed ONCE at install time via the GUI; generation is pure SQLite lookups and never parses files. When dictionary files change, the signature updates, triggering re-indexing on explicit reinstall.
+- **Performance**: Lookups are instant indexed B-tree queries; a lookup never triggers indexing (verified by `test_lookup_never_indexes`).
 
 ### Yomitan HTML Rendering
 
@@ -129,14 +164,15 @@ In strict accordance with Anki development standards:
 
 ## 4. Regression Testing Mandate
 
-The fundamental regression suite lives at `tests/test_regression.py` and **must be run green before every commit** (`python3 tests/test_regression.py`). Each test maps to a real historical bug:
+The fundamental regression suite lives at `tests/test_regression.py` (plus isolated Ring 0 units at `tests/test_units.py`) and **must be run green before every commit** (`python3 tests/test_units.py && python3 tests/test_regression.py`). Each test maps to a real historical bug:
 
 | Historical bug | Guarding test |
 |---|---|
 | Plain-text definitions (121 chars) served instead of rich Yomitan HTML (~7000 chars) | `test_structured_content_html_fidelity` + real-dictionary `先ず` smoke test |
 | Renderer upgraded but SQLite cache kept serving stale plain text forever | `test_renderer_version_invalidates_cache` (verifies `RENDERER_VERSION` is embedded in signatures) |
 | Furigana `<rt>` readings polluted the kanji comprehension score | `test_scoring_ignores_furigana` |
-| Ladder fell through to an advanced dictionary despite a simpler comprehensible definition | `test_ladder_early_exit_order` |
+| Ladder fell through to an advanced dictionary despite a simpler comprehensible definition | `test_ladder_early_exit_order` (now pins order-independent argmax) |
+| Raw-sum scoring favored 20-paragraph 5%-known definitions over succinct 90%-known ones | `test_v12_scoring_algorithm` §7 + `test_picker_audit_strict` (density ordering over the real-deck fixture) |
 | Cross-reference titles ("see also") won over real definitions | `test_reference_title_filtering` |
 | ZIP archive and unzipped folder produced different output | `test_zip_folder_parity` |
 | `data-sc-*` attributes drifted from Yomitan's DOM naming (breaking the user's CSS compactor) | `test_data_sc_attribute_names` |
@@ -150,8 +186,9 @@ The suite stubs `aqt` so it runs on both system Python and Anki's bundled Python
 ## 5. On-Demand Debugging
 
 Beyond the per-commit suite, `debug/` holds the learner-knowledge
-snapshot spec (SP1–SP6), use cases (U1–U5), copy-paste Debug Console
-recipes for the live collection (`console_snippets.md`), and a
-standalone sanity script (`python3 debug/sanity_knowledge.py`) that is
-deliberately **not** run by CI — it is for triage when something looks
-wrong (e.g. 0 known kanji after an Anki upgrade).
+snapshot spec (SP1–SP7), use cases (U1–U5), copy-paste Debug Console
+recipes for the live collection (`console_snippets.md`), a standalone
+sanity script (`python3 debug/sanity_knowledge.py`), and the
+dictionary-picker audit (`python3 debug/audit_picker.py --capture
+--html`, fixture at `tests/fixtures/picker_audit.json`) — all
+deliberately **not** run by CI except through their frozen fixtures.

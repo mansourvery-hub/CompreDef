@@ -4,12 +4,12 @@ from typing import Dict, List, Optional, Set, Tuple
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .provider import DictionaryProvider
-    from .scoring import is_reference_title, score_definition
+    from .picker import collect_ladder_candidates, filter_valid_entries, pick_best
     from .utils import extract_clean_word, extract_base_text
     from .models import DictionaryEntry, ScoringResult
 else:
     from provider import DictionaryProvider
-    from scoring import is_reference_title, score_definition
+    from picker import collect_ladder_candidates, filter_valid_entries, pick_best
     from utils import extract_clean_word, extract_base_text
     from models import DictionaryEntry, ScoringResult
 
@@ -87,66 +87,31 @@ def _to_plain_text(html_or_text: str) -> str:
 def _filter_valid_entries(entries: List[DictionaryEntry]) -> List[DictionaryEntry]:
     """Reference-title filter shared by every scoring path.
 
-    Cross-reference titles and pipe-separated child-entry lists are not
-    readable definitions (the 会社 incident) — drop them unless they are
-    the ONLY candidate, in which case a lone entry is still allowed.
+    Thin delegate to picker.filter_valid_entries (kept here so existing
+    callers and tests keep working; the picker module owns the logic).
     """
-    non_ref = [e for e in entries if not is_reference_title(e.definition)]
-    return non_ref if non_ref else (entries if len(entries) == 1 else [])
+    return filter_valid_entries(entries)
 
 
 def _pick_best(entries: List[DictionaryEntry],
                kanji_points: Dict[str, float],
                vocab_points: Dict[str, float]) -> Optional[Tuple[ScoringResult, str]]:
-    """v1.2 argmax picker over candidate definitions.
+    """Active-strategy argmax picker over candidate definitions.
 
-    Scores every candidate with score_definition (interval-weighted
-    kanji + vocab points) and returns the winner by:
-      1. highest total_score (kanji pts + vocab pts),
-      2. tie-break: most kanji occurrences (kanji_count).
-    The old early-exit ("first 100% known wins") is gone — with weighted
-    scores, a dictionary-order fluke must never beat a strictly better
-    definition (the 不公平 case: 小学館 won by order, not quality).
-    Returns (best_result, best_definition) or None when empty.
+    Thin delegate to picker.pick_best (kept here so existing callers
+    and tests keep working; the picker module owns the ranking).
     """
-    best: Optional[Tuple[ScoringResult, str]] = None
-    for entry in entries:
-        res = score_definition(entry.definition, kanji_points, vocab_points)
-        if best is None:
-            best = (res, entry.definition)
-            continue
-        cur = best[0]
-        # Strictly better total, or equal total with more kanji (tie-break).
-        if (res.total_score > cur.total_score
-                or (res.total_score == cur.total_score
-                    and res.kanji_count > cur.kanji_count)):
-            best = (res, entry.definition)
-    return best
+    return pick_best(entries, kanji_points, vocab_points)
 
 
 def _collect_local_candidates(provider, ladder_paths: List[str],
-                              word: str, reading: str = "") -> list:
+                               word: str, reading: str = "") -> list:
     """Walks the local ladder with the given provider — never raises.
 
-    Shared by the main local path and the Yomitan->local fail-safe so
-    Tab and button can never diverge. One corrupt dictionary must not
-    kill the whole ladder (or the fallback), so each path is isolated.
-    A None provider (headless tests) simply yields no candidates.
+    Thin delegate to picker.collect_ladder_candidates (kept here so
+    existing callers keep working; the picker module owns gathering).
     """
-    all_candidates: List[DictionaryEntry] = []
-    if provider is None:
-        return all_candidates
-    for path in ladder_paths or []:
-        try:
-            if hasattr(provider, 'lookup_by_path'):
-                entries = provider.lookup_by_path(path, word, reading)
-            else:
-                entries = provider.lookup(word, reading)
-        except Exception:
-            continue
-        if entries:
-            all_candidates.extend(_filter_valid_entries(entries))
-    return all_candidates
+    return collect_ladder_candidates(provider, ladder_paths, word, reading)
 
 
 class DefinitionGenerator:

@@ -42,10 +42,12 @@ Answers: *what properties must remain true?*
 - **Q-G1 — Never overwrite user content.** Tab/bulk never fill a
   non-empty definition field; unmapped types are skipped, not
   guessed.
-- **Q-G2 — Ladder order respected, argmax wins.** User order is never
-  reordered; early exit on first fully comprehensible definition,
-  else highest total score; ties break toward most kanji; order of
-  evaluation must not change the winner.
+- **Q-G2 — Ladder + density argmax.** Dictionaries are collected,
+  never reordered; the winner is the highest comprehension DENSITY
+  (known-kanji fraction + known-compound fraction, v1.3 — raw sums
+  favored length); ties break toward most kanji, then (title, text);
+  order of evaluation must not change the winner. The strategy lives
+  in `picker.py` and is swappable without touching other modules.
 - **Q-G3 — Kana never scores.** Kana-only words are not vocab
   candidates (inflection mismatch); furigana `<rt>` never pollutes
   kanji scores; reference titles lose to real prose.

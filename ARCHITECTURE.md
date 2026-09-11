@@ -6,9 +6,79 @@ Build an Anki 2.1+ Python add-on named "CompreDef" that automatically generates 
 ## Core Philosophy: The Dictionary Ladder
 CompreDef uses an ordered **Dictionary Ladder** of local JSON dictionaries paired with **Kanji Matrix Scoring**:
 
-1. **User-Configured Ladder**: Dictionaries are tried top to bottom; the first whose definition passes the comprehension gate wins.
-2. **Early Exit**: If a definition has 100% known kanji, search terminates immediately.
-3. **Maximal Fallback**: If no 100% match is found, the definition with the highest comprehension score is returned.
+1. **User-Configured Ladder**: Every dictionary contributes its
+   candidates; the ladder order is never rewritten by the add-on.
+2. **Comprehension wins**: Each candidate is scored against the
+   learner's interval-weighted knowledge (see Picker algorithm
+   below); the most comprehensible definition wins, regardless of
+   which dictionary it came from (pure argmax — the v1.2 不公平 fix:
+   a ladder-order fluke must never beat a strictly better definition).
+3. **Maximal Fallback**: If nothing is fully known, the
+   highest-density definition still wins (never nothing when a
+   dictionary has the word).
+
+## Dictionary Picker algorithm (the value of this add-on)
+
+The ladder says WHERE to look; the picker (`picker.py`, self-contained —
+depends only on `scoring`/`models`/`utils`) decides WHICH single
+definition the learner reads. Pipeline per word:
+
+1. **Collect** every dictionary's entries (`lookup_by_path`, or the
+   Yomitan bridge slices).
+2. **Filter** cross-reference titles (`is_reference_title`: short
+   punctuation-less titles, pipe-separated child lists — never real
+   prose, which always ends in 。？！). Filtered titles lose unless
+   they are the only candidate.
+3. **Score** each survivor against the learner's interval-weighted
+   knowledge and **rank** by comprehension density (below).
+
+### Learner knowledge
+
+```
+point(x) = 0                                   if x unknown
+point(x) = min(1, max_interval(x) / 365)       otherwise
+```
+
+Mastered = a card interval ≥ 365 days (full point); younger intervals
+count proportionally. Kanji points come from first fields; vocab
+points ONLY from multi-kanji compounds (kana-only words are
+inflection-hostile, single kanji are already covered by kanji points).
+
+### Comprehension density (v1.3, default `DensityPicker`)
+
+For a definition with kanji occurrences K (|K| = kanji_count) and
+distinct compounds W:
+
+```
+kanji_density  = Σ_{k ∈ K} point(k) / |K|          (fraction known, 0..1)
+vocab_density  = Σ_{w ∈ W} point(w) / |W|          (0 when W is empty)
+comprehension  = kanji_density + vocab_density
+```
+
+Kana-only definitions (|K| = 0) hold no kanji signal: comprehension 0
+(neutral — never wins on merit, so a kana gloss can't beat real prose).
+
+Ranking (strict total order, best first): highest comprehension, then
+most kanji (richer prose), then dictionary title, then definition
+text. The last two keys use input PROPERTIES, never input positions —
+shuffling the ladder can never change the winner (order-independence).
+
+Why density, not raw sums: raw sums (v1.2 `LegacySumPicker`, still
+available via the `picker_strategy` config key for A/B) grow with
+length, so a 20-paragraph 5%-known definition always beat a succinct
+90%-known one. Density measures the fraction the learner can actually
+read; the kanji-count tie-break still prefers richer prose among equals.
+
+### Swapping the method
+
+New picking ideas subclass `picker.PickerStrategy` (one method:
+`rank_key(result, title, definition)`) and become active via
+`get_active_strategy()` / the `picker_strategy` config key. Nothing
+outside `picker.py` changes; `engine.py` only delegates. Ladder
+gathering (`collect_ladder_candidates`, per-path isolation so one
+corrupt dictionary never kills the run) lives in `picker.py` too —
+`engine.DefinitionGenerator` keeps only Anki/config wiring (source
+selection, Yomitan fallbacks, plain-text mode).
 
 ## Architecture Structure
 
@@ -40,11 +110,17 @@ Implementation (provider.py -> LocalSQLiteProvider)
   and the Learner Knowledge dialog (non-modal, payload-cached) live
   here.
 - `core.py`: Application wiring and singleton management.
-- `engine.py`: Implements the Dictionary Ladder algorithm (early exit
-  on first fully comprehensible definition, else argmax total score
-  with most-kanji tie-break; order-independent).
+- `engine.py`: Implements the Dictionary Ladder algorithm (pure
+  argmax over comprehension density via `picker.py`, order-independent;
+  thin delegates `_pick_best` / `_filter_valid_entries` kept for
+  compatibility).
 - `scoring.py`: Interval-weighted kanji/vocab scoring (`ivl/365`
-  capped at 1.0) and reference-title filtering.
+  capped at 1.0), raw sums AND length-normalized densities, plus
+  reference-title filtering.
+- `picker.py`: The self-contained picking strategies
+  (`DensityPicker` default, `LegacySumPicker` for A/B) with
+  rank/pick/filter over scored candidates; the ONLY module that
+  decides which definition wins.
 - `provider.py`: Defines the `DictionaryProvider` interface and the
   current SQLite-backed implementation.
 - `renderer.py`: Renders Yomitan structured content to HTML (ruby,

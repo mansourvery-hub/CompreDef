@@ -46,8 +46,23 @@ T11 covers all (release)
 
 ## Backlog
 
-Empty. New ideas arrive as user requests; each becomes a T-item
-here (goal → slices → status) before any code is written.
+- **T12 — Dictionary-picker audit (SHIPPED v1.3).** Offline grading rig
+  for the picker: `debug/audit_picker.py` captures every dictionary's
+  definitions for each card of the real 11-note deck
+  (`My Life Decks::Japanese::anki-japanese-template`) under 3 profiles
+  (mine/beginner/native) x 2 sources (local ladder/Yomitan) into
+  `tests/fixtures/picker_audit.json`, renders
+  `debug/reports/picker_audit_<ts>.html` (winners matrix + collapsed
+  rankings + ok/bad grading radios with JSON export +
+  `--import-grades`), and `test_picker_audit_strict` (Ring 1) pins the
+  full frozen rankings plus human-grade agreement.
+- **T13 — Density scoring + swappable picker (SHIPPED v1.3).**
+  Length-normalized comprehension density replaces raw-sum argmax
+  (succinct 90%-known beats 20-paragraph 5%-known); deterministic
+  tertiary tie-break (title, text); `picker.py` owns filter/rank/pick
+  behind a `PickerStrategy` interface (`DensityPicker` default,
+  `LegacySumPicker` for A/B via the `picker_strategy` config key);
+  algorithm + equations documented in ARCHITECTURE.md.
 
 ## Working agreements (from experience)
 

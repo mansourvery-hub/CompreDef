@@ -1952,6 +1952,7 @@ def test_v12_scoring_algorithm() -> None:
     # 6. Engine-level argmax with the 不公平-style dictionary set:
     #    two fully-readable defs; the one with more kanji+compounds wins.
     import engine as engine_mod
+    import picker as picker_mod
     from models import DictionaryEntry
     entries = [
         DictionaryEntry("不公平", "ふこうへい", daijirin, "大辞林", "x"),
@@ -1966,6 +1967,240 @@ def test_v12_scoring_algorithm() -> None:
     check("v12: engine argmax is order-independent",
           picked_rev is not None and picked is not None
           and picked_rev[1] == picked[1])
+
+    # 7. v1.3 DENSITY (default strategy): the user's core critique —
+    #    a succinct 90%-known definition must beat a 20-paragraph
+    #    5%-known one, even though raw sums favor the long one.
+    dense_short = "公平だ。"            # kc=2, all known -> density 1.0
+    sparse_long = "公平な不透明不平等。"  # kc=8, 3 known -> density 0.375
+    res_short = scoring_mod.score_definition(dense_short, kp, vp)
+    res_long = scoring_mod.score_definition(sparse_long, kp, vp)
+    check("v12: density numbers (1.0 vs 0.375)",
+          abs(res_short.density_total - 1.0) < 1e-9
+          and abs(res_long.density_total - 0.375) < 1e-9,
+          f"got {res_short.density_total} vs {res_long.density_total}")
+    check("v12: raw sums favor the long one (2.0 vs 3.0)",
+          abs(res_short.total_score - 2.0) < 1e-9
+          and abs(res_long.total_score - 3.0) < 1e-9)
+    density_entries = [
+        DictionaryEntry("w", "", sparse_long, "long", "x"),
+        DictionaryEntry("w", "", dense_short, "short", "y"),
+    ]
+    picked_d = engine_mod._pick_best(density_entries, kp, vp)
+    check("v12: density strategy picks the succinct known definition",
+          picked_d is not None and picked_d[1] == dense_short,
+          f"got {(picked_d[1][:30] if picked_d else None)!r}")
+    picked_legacy = picker_mod.pick_best(
+        density_entries, kp, vp,
+        strategy=picker_mod.LegacySumPicker())
+    check("v12: legacy strategy still picks the long one (raw mass)",
+          picked_legacy is not None and picked_legacy[1] == sparse_long)
+    # Density tie-break: equal density -> most kanji wins.
+    tie_long = picker_mod.pick_best(
+        [DictionaryEntry("w", "", "公平公平。", "A", "x"),
+         DictionaryEntry("w", "", "公平だ。", "B", "y")], kp, vp)
+    check("v12: density tie-break prefers more kanji",
+          tie_long is not None and tie_long[1] == "公平公平。",
+          f"got {(tie_long[1] if tie_long else None)!r}")
+
+
+PICKER_AUDIT_FIXTURE = os.path.join(
+    REPO_ROOT, "tests", "fixtures", "picker_audit.json")
+
+
+def _picker_audit_points(fixture: dict, profile: str,
+                         candidates: list) -> tuple:
+    """(kanji_points, vocab_points) for one audit profile.
+
+    Mirrors debug/audit_picker.py (which never ships, so the suite
+    cannot import it — this 10-line twin is the price of that rule).
+    mine = frozen interval-weighted snapshot; beginner = nothing;
+    native = every kanji/compound in the candidates at 1.0.
+    """
+    import scoring as scoring_mod
+    import utils as utils_mod
+    if profile == "mine":
+        return fixture["mine"]["kanji"], fixture["mine"]["vocab"]
+    if profile == "beginner":
+        return {}, {}
+    kanji: dict = {}
+    vocab: dict = {}
+    for _, definition in candidates:
+        base = utils_mod.extract_base_text(definition)
+        for ch in set(c for c in base if "\u4e00" <= c <= "\u9fff"):
+            kanji[ch] = 1.0
+        for word in scoring_mod.extract_kanji_words(base):
+            vocab[word] = 1.0
+    return kanji, vocab
+
+
+def test_picker_audit_strict() -> None:
+    """
+    Strict dictionary-picker audit over the user's REAL 11-note deck
+    (My Life Decks::Japanese::anki-japanese-template — every card,
+    including the nonsense word, the full-sentence note and the
+    zero-hit words), frozen in tests/fixtures/picker_audit.json by
+    debug/audit_picker.py --capture.
+
+    For each source (local ladder / Yomitan) x word x profile (mine /
+    beginner / native) the test recomputes the FULL ranking with
+    scoring.rank_definitions and pins it exactly (order, winner,
+    totals): given N definitions and one learner there is exactly ONE
+    correct comprehensibility ordering, so ANY move is a loud FAIL —
+    never a silent behavior change. It also pins:
+    - rank()[0] == engine._pick_best() (picker/rank agreement);
+    - order-independence (reversed input, same winner — Q-G2);
+    - profile sanity (beginner: all totals 0, most-kanji wins;
+      native: kanji_score == kanji_count);
+    - empty words rank empty and pick None (missing-word contract).
+    Refresh workflow: change dictionaries/knowledge legitimately, then
+    re-run debug/audit_picker.py --capture --html and review the HTML
+    diff — the fixture diff shows exactly which picks moved and why.
+    """
+    import scoring as scoring_mod
+    import engine as engine_mod
+    import picker as picker_mod
+    from models import DictionaryEntry
+
+    if not os.path.isfile(PICKER_AUDIT_FIXTURE):
+        check("audit: fixture present", False,
+              f"missing {PICKER_AUDIT_FIXTURE} — run "
+              "debug/audit_picker.py --capture")
+        return
+    with open(PICKER_AUDIT_FIXTURE, encoding="utf-8") as f:
+        fixture = json.load(f)
+
+    # The frozen rankings belong to ONE strategy: a hand-switched
+    # picker_strategy must never silently compare one strategy's
+    # expectations against another strategy's code — re-freeze instead.
+    check("audit: code strategy matches frozen strategy",
+          picker_mod.get_active_strategy().name == fixture.get(
+              "meta", {}).get("strategy"),
+          f"code={picker_mod.get_active_strategy().name!r} "
+          f"fixture={fixture.get('meta', {}).get('strategy')!r}")
+
+    # Capture-completeness guards: a half capture (e.g. Yomitan taken
+    # while the browser was closed) must fail LOUD, never freeze
+    # vacuous all-empty expectations as "correct".
+    local_total = sum(len(v) for v in fixture["local"].values())
+    check("audit: local capture non-empty", local_total > 0,
+          "re-run debug/audit_picker.py --capture")
+    yomitan_total = sum(len(v) for v in fixture["yomitan"].values())
+    check("audit: yomitan capture non-empty (browser open at capture?)",
+          yomitan_total > 0,
+          "re-run --capture with the browser + Yomitan running")
+    check("audit: three profiles frozen",
+          set(fixture["expected"]["local"]
+              [str(fixture["words"][0]["note_id"])]) == {
+              "mine", "beginner", "native"})
+
+    for source in ("local", "yomitan"):
+        for item in fixture["words"]:
+            nid = str(item["note_id"])
+            label = f"{source}:{item['word'] or '(empty)'}"
+            raw = fixture[source].get(nid, [])
+            entries = [DictionaryEntry(
+                word="", reading="", definition=c["definition"],
+                dictionary_title=c["dict"],
+                dictionary_path=c.get("path", "")) for c in raw]
+            valid = engine_mod._filter_valid_entries(entries)
+            cands = [(e.dictionary_title, e.definition) for e in valid]
+            for profile in ("mine", "beginner", "native"):
+                kp, vp = _picker_audit_points(fixture, profile, cands)
+                ranked = picker_mod.rank_definitions(cands, kp, vp)
+                scored = [(t, scoring_mod.score_definition(d, kp, vp))
+                          for (t, d), _ in ranked]
+                live = [(t, round(res.density_total, 4),
+                         round(res.total_score, 3), res.kanji_count)
+                        for t, res in scored]
+                frozen = fixture["expected"][source][nid][profile]
+                # The frozen rows store rounded densities; recompute the
+                # comparison on the same rounding so float repr can
+                # never cause a phantom drift.
+                live_rows = [(t, d, n) for t, d, _, n in live]
+                frozen_rows = [(r["dict"], r["density"], r["kanji_count"])
+                               for r in frozen]
+                check(f"audit: {label}/{profile} ranking frozen",
+                      live_rows == frozen_rows,
+                      f"live={live_rows[:3]} frozen={frozen_rows[:3]}")
+                picked = engine_mod._pick_best(valid, kp, vp)
+                live_winner = ranked[0][0][1] if ranked else None
+                check(f"audit: {label}/{profile} picker agrees with rank",
+                      (picked[1] if picked else None) == live_winner)
+                if valid:
+                    rev = engine_mod._pick_best(
+                        list(reversed(valid)), kp, vp)
+                    check(f"audit: {label}/{profile} order-independent",
+                          rev is not None and picked is not None
+                          and rev[1] == picked[1])
+                else:
+                    check(f"audit: {label}/{profile} empty picks None",
+                          picked is None and ranked == [])
+                if profile == "beginner" and ranked:
+                    densities = {round(res.density_total, 9)
+                                 for _, res in scored}
+                    counts = [n for _, _, _, n in live]
+                    check(f"audit: {label}/beginner all-zero, most-kanji wins",
+                          densities == {0.0}
+                          and live[0][0] == ranked[0][0][0]
+                          and live[0][3] == max(counts))
+                if profile == "native" and ranked:
+                    ok = all(
+                        abs(res.kanji_score - n) < 1e-9
+                        for (_, res), (_, _, _, n) in zip(ranked, live))
+                    check(f"audit: {label}/native kanji fully known", ok)
+
+    _check_picker_grades(fixture)
+
+
+def _check_picker_grades(fixture: dict) -> None:
+    """Human grades vs algorithm picks (the grading loop).
+
+    Grades are recorded in the HTML report (export grades JSON, merge
+    with debug/audit_picker.py --import-grades): per source x word x
+    profile, {"hash": <frozen winner hash>, "verdict": "correct"|"wrong"}.
+    - no grades yet -> single PASS (nothing to agree with);
+    - grade hash != frozen winner hash -> FAIL (stale grade: the
+      definition changed since grading — re-grade);
+    - verdict "wrong" -> FAIL (the algorithm's pick is judged incorrect;
+      suite stays red until the picker is fixed — strict by design);
+    - verdict "correct" -> PASS, counted in the agreement summary.
+    """
+    grades = fixture.get("grades", {})
+    total = sum(len(words) for words in grades.values())
+    if not total:
+        check("audit: no human grades recorded yet", True)
+        return
+    correct = 0
+    for source, words in grades.items():
+        for nid, profiles in words.items():
+            frozen_profiles = fixture["expected"].get(source, {}).get(nid)
+            if frozen_profiles is None:
+                check(f"audit: grade references known word {source}/{nid}",
+                      False)
+                continue
+            for profile, grade in profiles.items():
+                frozen = frozen_profiles.get(profile, [])
+                winner_hash = frozen[0]["hash"] if frozen else None
+                if grade.get("verdict") not in ("correct", "wrong"):
+                    check(f"audit: grade {source}/{nid}/{profile} "
+                          f"has a verdict", False,
+                          f"got {grade.get('verdict')!r}")
+                    continue
+                check(f"audit: grade {source}/{nid}/{profile} "
+                      f"matches frozen winner",
+                      grade.get("hash") == winner_hash,
+                      "re-grade: the definition changed since")
+                if grade.get("hash") == winner_hash:
+                    if grade["verdict"] == "correct":
+                        correct += 1
+                        check(f"audit: human agrees {source}/{nid}/{profile}",
+                              True)
+                    else:
+                        check(f"audit: human agrees {source}/{nid}/{profile}",
+                              False, "graded WRONG — fix the picker")
+    check(f"audit: human agreement {correct}/{total}", correct == total,
+          "see the WRONG lines above")
 
 
 def test_scope_deck_filtering() -> None:
@@ -2353,7 +2588,7 @@ def test_package_relative_imports() -> None:
     test_tab_generate_decisions below).
     """
     siblings = {"anki", "core", "engine", "provider", "renderer", "models",
-                "scoring", "utils", "parser", "generator", "db_utils",
+                "scoring", "picker", "utils", "parser", "generator", "db_utils",
                 "scope"}
 
     class _BlockSiblingImports(importlib.abc.MetaPathFinder):
@@ -2393,6 +2628,9 @@ def test_package_relative_imports() -> None:
                          "render_structured_content_node"],
             "models": ["DictionaryEntry"],
             "scoring": ["calculate_kanji_score", "is_reference_title"],
+            "picker": ["PickerStrategy", "DensityPicker", "LegacySumPicker",
+                       "rank_definitions", "pick_best", "collect_ladder_candidates",
+                       "filter_valid_entries", "get_active_strategy"],
             "scope": ["get_scope_decks", "expand_scope_names",
                       "note_in_scope", "implied_note_types", "scope_dids",
                       "is_scope_empty", "note_deck_names",
@@ -3759,6 +3997,7 @@ def main() -> int:
         test_multi_note_type_targeting()
         test_scope_deck_filtering()
         test_v12_scoring_algorithm()
+        test_picker_audit_strict()
         test_config_survives_yomitan_toggle()
         test_yomitan_provider_implements_full_surface()
         test_yomitan_bridge_sw_keepalive()

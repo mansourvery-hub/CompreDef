@@ -12,5 +12,10 @@ dist/
 *.json
 !config.json
 !manifest.json
+# ... except the frozen picker-audit fixture: the strict Ring 1 test
+# reads it on every run (including CI), so it must be committable.
+!tests/fixtures/*.json
+# Human audit reports are timestamped personal copies, not test data.
+debug/reports/
 user_files/
 

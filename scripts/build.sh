@@ -78,7 +78,7 @@ with zipfile.ZipFile("dist/CompreDef.ankiaddon", "r") as z:
     # package and the add-on crashed with ImportError on the user machine.
     REQUIRED = [
         "__init__.py", "core.py", "engine.py", "provider.py", "renderer.py",
-        "models.py", "scoring.py", "utils.py", "anki.py", "parser.py",
+        "models.py", "scoring.py", "picker.py", "utils.py", "anki.py", "parser.py",
         "generator.py", "gui.py", "editor_browser.py", "scope.py",
     ]
     missing = [m for m in REQUIRED if m not in names]
