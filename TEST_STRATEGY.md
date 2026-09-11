@@ -50,7 +50,7 @@ single source of truth; keep it current when adding functions.
   density-beats-length case + legacy-strategy contrast. Ring 1:
   strategy/rank/`pick_best` agreement, frozen winners,
   order-independence, human-grade agreement (`test_picker_audit_strict`,
-  `test_v12_scoring_algorithm` §7). Ladder gathering
+  `test_v12_scoring_algorithm` §7). Candidate gathering
   (`collect_ladder_candidates`) is covered through `generate` paths;
   engine keeps only thin delegates.
 - `scope.py` — Ring 0: `get_scope_decks`, `expand_scope_names`,
@@ -98,7 +98,7 @@ single source of truth; keep it current when adding functions.
 | Q-D3 visible failure | `test_indexing_failure_reported`, `_warn_db_error` paths |
 | Q-D4 graceful degradation | Empty-scope / missing-field / malformed-row cases across suite |
 | Q-G1 never overwrite | Tab decision matrix (`test_tab_generate_decisions`), bulk skip paths |
-| Q-G2 ladder + argmax | `test_ladder_early_exit_order`, `test_v12_scoring_algorithm` (§7 density), `test_disabled_dictionaries_skipped`, `test_picker_audit_strict` (frozen full density orderings + picker/rank agreement + order-independence + human grades on the real-deck fixture) |
+| Q-G2 density argmax | `test_order_independent_argmax`, `test_v12_scoring_algorithm` (§7 density), `test_disabled_dictionaries_skipped`, `test_picker_audit_strict` (frozen full density orderings + picker/rank agreement + order-independence + human grades on the real-deck fixture) |
 | Q-G3 kana never scores | `test_scoring_ignores_furigana`, `test_parse_furigana_field_formats`, `test_reference_title_filtering`, `test_extract_clean_word_formats`, `test_reading_disambiguates_homographs` |
 | Q-G4 non-blocking UI | `test_sync_reset_is_thread_safe` (taskman main-thread rule), dialog `run_in_background` paths |
 | Q-G5 rendering fidelity | `test_structured_content_html_fidelity`, `test_renderer_version_invalidates_cache`, `test_data_sc_attribute_names`, `test_zip_folder_parity`, Yomitan split/pick tests, real-dictionary smoke |

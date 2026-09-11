@@ -42,7 +42,7 @@ Answers: *what properties must remain true?*
 - **Q-G1 — Never overwrite user content.** Tab/bulk never fill a
   non-empty definition field; unmapped types are skipped, not
   guessed.
-- **Q-G2 — Ladder + density argmax.** Dictionaries are collected,
+- **Q-G2 — Density argmax.** Dictionaries are collected,
   never reordered; the winner is the highest comprehension DENSITY
   (known-kanji fraction + known-compound fraction, v1.3 — raw sums
   favored length); ties break toward most kanji, then (title, text);

@@ -27,7 +27,7 @@ HISTORICAL BUG MAP (bug -> test):
   3. Furigana <rt> readings polluted kanji scores
                                   -> test_scoring_ignores_furigana
   4. Ladder returned advanced def when a simpler one existed
-                                  -> test_ladder_early_exit_order
+                                  -> test_order_independent_argmax
   5. Cross-reference titles won over real definitions
                                   -> test_reference_title_filtering
   6. ZIP and folder produced different output
@@ -953,12 +953,12 @@ def test_scoring_ignores_furigana() -> None:
     )
 
 
-def test_ladder_early_exit_order(tmp_root: str) -> None:
+def test_order_independent_argmax(tmp_root: str) -> None:
     """Historical bug #4 → v1.2 SEMANTICS CHANGE: with argmax scoring the
     BETTER-comprehension definition wins regardless of dictionary order.
     Known 会/社: the 'easy' dictionary's definition uses only known
     kanji and MORE vocab compounds (会社), so argmax picks it — but it
-    must win on QUALITY, not on being first in the ladder (reversed
+    must win on QUALITY, not on being enumerated first (reversed
     order must produce the same winner)."""
     # db_utils returns no known kanji in the test env, so monkeypatch.
     original = compredef_generator.get_known_kanji_set
@@ -969,10 +969,10 @@ def test_ladder_early_exit_order(tmp_root: str) -> None:
 
     compredef_generator.get_known_kanji_set = fake_known  # type: ignore
     try:
-        easy = os.path.join(tmp_root, "ladder_easy")
+        easy = os.path.join(tmp_root, "order_easy")
         os.makedirs(easy, exist_ok=True)
         with open(os.path.join(easy, "index.json"), "w") as f:
-            json.dump({"title": "ladder_easy", "format": 3}, f)
+            json.dump({"title": "order_easy", "format": 3}, f)
         with open(os.path.join(easy, "term_bank_1.json"), "w") as f:
             json.dump([
                 ["会社", "かいしゃ", "", "", 0,
@@ -981,10 +981,10 @@ def test_ladder_early_exit_order(tmp_root: str) -> None:
             ], f, ensure_ascii=False)
         compredef_parser.get_single_dictionary(easy).install()
 
-        hard = os.path.join(tmp_root, "ladder_hard")
+        hard = os.path.join(tmp_root, "order_hard")
         os.makedirs(hard, exist_ok=True)
         with open(os.path.join(hard, "index.json"), "w") as f:
-            json.dump({"title": "ladder_hard", "format": 3}, f)
+            json.dump({"title": "order_hard", "format": 3}, f)
         with open(os.path.join(hard, "term_bank_1.json"), "w") as f:
             json.dump([
                 ["会社", "かいしゃ", "", "", 0,
@@ -997,22 +997,22 @@ def test_ladder_early_exit_order(tmp_root: str) -> None:
             "会社", dictionaries=[easy, hard]
         )
         check(
-            "ladder: a definition was chosen",
+            "order: a definition was chosen",
             chosen is not None,
         )
         # With all these kanji known, BOTH definitions are fully known;
         # argmax tie-break: most kanji → the hard/kanji-dense one wins.
         check(
-            "ladder: argmax tie-break picks most-kanji definition",
+            "order: argmax tie-break picks most-kanji definition",
             chosen is not None and "むずかしい" in chosen,
             f"got: {chosen[:40] if chosen else None}",
         )
-        # Order-independence: reversed ladder must pick the same winner.
+        # Order-independence: reversed enumeration must pick the same winner.
         chosen_rev = compredef_generator.generate_definition(
             "会社", dictionaries=[hard, easy]
         )
         check(
-            "ladder: argmax is order-independent",
+            "order: argmax is order-independent",
             chosen_rev == chosen,
             f"forward={chosen[:20] if chosen else None!r} "
             f"reversed={chosen_rev[:20] if chosen_rev else None!r}",
@@ -3973,7 +3973,7 @@ def main() -> int:
         test_structured_content_html_fidelity(tmp_root)
         test_renderer_version_invalidates_cache(tmp_root)
         test_scoring_ignores_furigana()
-        test_ladder_early_exit_order(tmp_root)
+        test_order_independent_argmax(tmp_root)
         test_reference_title_filtering()
         test_zip_folder_parity(tmp_root)
         test_data_sc_attribute_names()
