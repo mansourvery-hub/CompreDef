@@ -124,6 +124,31 @@ def _pick_best(entries: List[DictionaryEntry],
     return best
 
 
+def _collect_local_candidates(provider, ladder_paths: List[str],
+                              word: str, reading: str = "") -> list:
+    """Walks the local ladder with the given provider — never raises.
+
+    Shared by the main local path and the Yomitan->local fail-safe so
+    Tab and button can never diverge. One corrupt dictionary must not
+    kill the whole ladder (or the fallback), so each path is isolated.
+    A None provider (headless tests) simply yields no candidates.
+    """
+    all_candidates: List[DictionaryEntry] = []
+    if provider is None:
+        return all_candidates
+    for path in ladder_paths or []:
+        try:
+            if hasattr(provider, 'lookup_by_path'):
+                entries = provider.lookup_by_path(path, word, reading)
+            else:
+                entries = provider.lookup(word, reading)
+        except Exception:
+            continue
+        if entries:
+            all_candidates.extend(_filter_valid_entries(entries))
+    return all_candidates
+
+
 class DefinitionGenerator:
     """
     Orchestrates the definition generation process.
@@ -185,8 +210,8 @@ class DefinitionGenerator:
                 return _to_plain_text(definition)
             return definition
 
-        # If user selected Yomitan as primary source, bypass local ladder
-        # entirely and query Yomitan directly (single fetch, then score).
+        # If user selected Yomitan as primary source, query Yomitan
+        # directly (single fetch, then score).
         if _get_dictionary_source() == "yomitan":
             if fetch_yomitan_definitions is not None:
                 try:
@@ -199,17 +224,38 @@ class DefinitionGenerator:
                                          self.vocab_points)
                     if picked is not None:
                         return _finalize(picked[1])
+            # v1.2.15 fail-safe (mirrors the local->Yomitan one below):
+            # Yomitan selected but unreachable (browser closed) or with
+            # no entry for this word => default to the LOCAL ladder
+            # instead of returning nothing. Only fires when local
+            # dictionaries are actually configured.
+            if ladder_paths:
+                local_provider = None
+                try:
+                    # Lazy import: core imports this module at load, so a
+                    # top-level import would be circular.
+                    if __package__:
+                        from .core import get_local_provider
+                    else:
+                        from core import get_local_provider  # type: ignore
+                    local_provider = get_local_provider()
+                except Exception:
+                    local_provider = None
+                if local_provider is not None:
+                    print(f"CompreDef: Yomitan gave nothing for '{word}' — "
+                          f"falling back to local ladder.")
+                    local_candidates = _collect_local_candidates(
+                        local_provider, ladder_paths, word, reading)
+                    picked_local = _pick_best(
+                        local_candidates, self.kanji_points,
+                        self.vocab_points)
+                    if picked_local is not None:
+                        return _finalize(picked_local[1])
             return None
 
         # Local ladder: collect ALL candidates, then argmax (v1.2).
-        all_candidates: List[DictionaryEntry] = []
-        for path in ladder_paths:
-            if hasattr(self.provider, 'lookup_by_path'):
-                entries = self.provider.lookup_by_path(path, word, reading)
-            else:
-                entries = self.provider.lookup(word, reading)
-            if entries:
-                all_candidates.extend(_filter_valid_entries(entries))
+        all_candidates = _collect_local_candidates(
+            self.provider, ladder_paths, word, reading)
 
         picked = _pick_best(all_candidates, self.kanji_points,
                             self.vocab_points)

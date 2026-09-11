@@ -56,6 +56,23 @@ echo "=== Installing CompreDef locally ==="
 echo "Source: $ANKIADDON ($(du -h "$ANKIADDON" | cut -f1))"
 echo "Target: $TARGET_DIR"
 
+# v1.2.15 diagnosis aid: the #1 cause of "local install did nothing"
+# is a STALE Anki process — closing the window often just minimizes
+# to the system tray, so the OLD code stays loaded and the user
+# concludes the install failed (then "fixes" it via AnkiWeb, which
+# only works because that flow forces a real restart). Files on disk
+# were always fine. Detect it LOUDLY instead of silently succeeding.
+if pgrep -f "[/]usr/bin/anki|[/]anki$" > /dev/null 2>&1 || pgrep -x anki > /dev/null 2>&1; then
+    echo ""
+    echo "!!! WARNING: Anki appears to be RUNNING right now."
+    echo "!!! Closing its window is NOT enough — it often keeps running"
+    echo "!!! in the system tray with the OLD code loaded."
+    echo "!!! After this install you MUST fully quit Anki"
+    echo "!!! (tray icon -> Quit, or: pkill -f '/usr/bin/anki')"
+    echo "!!! and reopen it, or the new version will NOT load."
+    echo ""
+fi
+
 mkdir -p "$TARGET_DIR"
 
 # Preserve user_files and meta.json — they contain the user's dictionaries,
@@ -138,6 +155,12 @@ fi
 
 echo "Local install OK: $TARGET_DIR"
 echo "  $(ls -1 "$TARGET_DIR"/*.py 2>/dev/null | wc -l) Python modules, manifest $(cat "$TARGET_DIR/manifest.json" | tr -d '\n' | cut -c1-80)..."
+echo ""
+INSTALLED_VER="$(python3 -c "import json;print(json.load(open('$TARGET_DIR/manifest.json')).get('human_version','?'))" 2>/dev/null || echo '?')"
+echo "Installed CompreDef v${INSTALLED_VER} locally."
+echo "Verify after restart: Tools -> Add-ons -> CompreDef must show ${INSTALLED_VER}."
+echo "  (If it shows an older version, Anki did NOT restart fully —"
+echo "  quit via the tray icon, or run: pkill -f '/usr/bin/anki')"
 echo ""
 echo "Restart Anki once to load the new code (no double-restart needed — this is already local)."
 echo "If Anki was running, close it fully (check system tray) then reopen."

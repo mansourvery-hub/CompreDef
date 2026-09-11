@@ -3063,7 +3063,7 @@ def test_yomitan_provider_implements_full_surface() -> None:
     check("yomitan-iface: entry count is 0",
           prov.get_entry_count("anything") == 0)
     try:
-        prov.db_path
+        _ = prov.db_path  # touch the property: must raise, not return junk
         db_path_raises = False
     except NotImplementedError:
         db_path_raises = True
@@ -3433,6 +3433,78 @@ def test_yomitan_returns_single_best_definition() -> None:
           f"got: {(result or '')[:80]!r}")
 
 
+def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
+    """v1.2.15 fail-safe: Yomitan source + dead bridge => local ladder.
+
+    The user's report: Yomitan selected, Chrome closed, Tab on a word
+    present in a local dictionary silently produced nothing. Now the
+    Yomitan-primary path falls back to the local ladder (mirroring the
+    existing local->Yomitan fail-safe) instead of returning None.
+    Priority stays Yomitan-first: a working bridge still wins even
+    when local dictionaries are configured.
+    """
+    import engine as engine_mod
+    from models import DictionaryEntry
+
+    dict_dir = build_synthetic_dict(os.path.join(tmp_root, "y2l_fallback"))
+    compredef_parser.get_single_dictionary(dict_dir).install()
+
+    original_fetch = engine_mod.fetch_yomitan_definitions
+    cfgs = aqt.mw.addonManager.configs
+    had_key = "1619602654" in cfgs
+    old_cfg = cfgs.get("1619602654")
+    try:
+        # 1. Bridge down (empty list): local ladder must produce.
+        engine_mod.fetch_yomitan_definitions = lambda w, r="": []  # type: ignore
+        cfgs["1619602654"] = {"dictionary_source": "yomitan"}
+        gen = engine_mod.DefinitionGenerator(
+            provider=None, known_kanji={"先", "ず", "最", "初"})
+        result = gen.generate("先ず", ladder_paths=[dict_dir],
+                              reading="まず")
+        check("y2l: dead bridge + local dict => local definition",
+              result is not None and "structured-content" in result,
+              f"got: {(result or '')[:80]!r}")
+
+        # 2. Bridge raising (not just empty): identical behavior.
+        def _boom(w, r=""):
+            raise ConnectionError("browser closed")
+        engine_mod.fetch_yomitan_definitions = _boom  # type: ignore
+        gen2 = engine_mod.DefinitionGenerator(
+            provider=None, known_kanji={"先", "ず", "最", "初"})
+        result2 = gen2.generate("先ず", ladder_paths=[dict_dir],
+                                reading="まず")
+        check("y2l: raising bridge + local dict => local definition",
+              result2 is not None and "structured-content" in result2,
+              f"got: {(result2 or '')[:80]!r}")
+
+        # 3. Working bridge still wins over local (priority unchanged).
+        y_entries = [DictionaryEntry(
+            word="先ず", reading="まず", definition="YOMITAN wins here",
+            dictionary_title="Yomitan", dictionary_path="yomitan://api")]
+        engine_mod.fetch_yomitan_definitions = lambda w, r="": y_entries  # type: ignore
+        gen3 = engine_mod.DefinitionGenerator(
+            provider=None, known_kanji={"先", "ず", "最", "初"})
+        result3 = gen3.generate("先ず", ladder_paths=[dict_dir],
+                                reading="まず")
+        check("y2l: working bridge still beats local ladder",
+              result3 == "YOMITAN wins here",
+              f"got: {(result3 or '')[:80]!r}")
+
+        # 4. Dead bridge + NO local dictionaries => None (unchanged).
+        engine_mod.fetch_yomitan_definitions = lambda w, r="": []  # type: ignore
+        gen4 = engine_mod.DefinitionGenerator(provider=None,
+                                              known_kanji=set())
+        result4 = gen4.generate("先ず", ladder_paths=[], reading="まず")
+        check("y2l: dead bridge + no local dicts => None (unchanged)",
+              result4 is None, f"got: {(result4 or '')[:80]!r}")
+    finally:
+        engine_mod.fetch_yomitan_definitions = original_fetch  # type: ignore
+        if had_key:
+            cfgs["1619602654"] = old_cfg
+        else:
+            cfgs.pop("1619602654", None)
+
+
 def main() -> int:
     print("=" * 70)
     print("CompreDef fundamental regression suite")
@@ -3482,6 +3554,7 @@ def main() -> int:
         test_yomitan_glossary_split_per_dictionary()
         test_yomitan_term_list_loses_to_real_definition()
         test_yomitan_returns_single_best_definition()
+        test_yomitan_source_falls_back_to_local(tmp_root)
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.

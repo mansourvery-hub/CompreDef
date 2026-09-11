@@ -48,6 +48,18 @@ if mw:
     mw.addonManager.setConfigAction(__name__, show_config_dialog)
     setup_editor_browser_hooks()
     _add_tools_menu_entry()
+    # One-line load banner: answers "which version is actually running?"
+    # from the debug console. v1.2.15 diagnosis aid — users repeatedly
+    # mistook a stale (tray-resident) Anki process for a broken install.
+    try:
+        import json as _json
+        import os as _os
+        with open(_os.path.join(_os.path.dirname(__file__),
+                               "manifest.json"),
+                  encoding="utf-8") as _mf:
+            print(f"CompreDef {(_json.load(_mf) or {}).get('human_version', '?')} loaded.")
+    except Exception:
+        pass
 
 
 def _on_profile_opened() -> None:
