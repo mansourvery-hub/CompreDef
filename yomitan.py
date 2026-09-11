@@ -575,7 +575,14 @@ def fetch_yomitan_definitions(
 
 
 def clear_yomitan_cache() -> None:
-    """Clears all Yomitan caches — useful for tests or manual refresh."""
+    """Clears all Yomitan caches — useful for tests or manual refresh.
+
+    Also clears the last error: it is cached state like the rest, and
+    a stale message must never outlive an explicit refresh (found by
+    Ring 0 unit test — get_last_yomitan_error() kept returning the
+    pre-clear failure).
+    """
+    _set_last_error(None)
     with _word_lock:
         _word_cache.clear()
     with _avail_lock:

@@ -18,8 +18,8 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-echo "=== [1/5] Running regression tests ==="
-python3 tests/test_regression.py
+echo "=== [1/5] Running unit tests (Ring 0) + regression tests ==="
+python3 tests/test_units.py && python3 tests/test_regression.py
 
 echo "=== [2/5] Committing and pushing changes ==="
 git add .

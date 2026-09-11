@@ -35,8 +35,10 @@ changes consistent with them.
 - Anki versions differ in their Qt backend. When importing UI components, always import from `aqt.qt` (e.g., `from aqt.qt import QDialog, QVBoxLayout, QPushButton`) rather than hardcoding `PyQt5` or `PyQt6`.
 
 ## 6. Regression Test & Build Mandate
-- **BEFORE committing and pushing**, run the fundamental regression suite and ensure it is fully green:
-  `python3 tests/test_regression.py`
+- **BEFORE committing and pushing**, run both suites and ensure they are fully green:
+  `python3 tests/test_units.py && python3 tests/test_regression.py`
+  (Ring 0 isolated unit tests, then the Ring 1 regression suite —
+  `scripts/build.sh` and `scripts/ci.sh` run both automatically.)
 - Alternatively, run the CI script to test, commit, and push in one go:
   `./scripts/ci.sh`
 - **At the END of every code-change session**, build the installable package so the user can test locally:

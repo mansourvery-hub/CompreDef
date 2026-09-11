@@ -23,14 +23,15 @@ trap 'echo ""; echo "!!! build.sh FAILED at: $BASH_COMMAND (line $LINENO)"' ERR
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-echo "=== [1/4] Running regression tests ==="
+echo "=== [1/4] Running unit tests (Ring 0) + regression tests ==="
 # Stream live output AND capture it, so failures can be re-summarized.
 TEST_LOG="$(mktemp)"
-if python3 tests/test_regression.py 2>&1 | tee "$TEST_LOG"; then
+if python3 tests/test_units.py 2>&1 | tee "$TEST_LOG" \
+    && python3 tests/test_regression.py 2>&1 | tee -a "$TEST_LOG"; then
     rm -f "$TEST_LOG"
 else
     echo ""
-    echo "!!! REGRESSION TESTS FAILED — failing checks:"
+    echo "!!! TESTS FAILED — failing checks:"
     grep -E '^\[FAIL\]' "$TEST_LOG" || echo "  (no [FAIL] lines captured — see full output above)"
     rm -f "$TEST_LOG"
     exit 1

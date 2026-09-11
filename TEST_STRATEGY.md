@@ -10,17 +10,68 @@ TEST_STRATEGY.md (HOW it is verified)
 tests / linters / smoke scripts / CI
 ```
 
-## Layers (cheap → expensive)
+## The rings (cheap → expensive)
 
-| Layer | What | When | Cost |
+Every behavior in this repo is verified in exactly one ring — the
+cheapest ring that can observe it. A new check goes in the innermost
+ring that can see the behavior; it moves outward only when it needs
+more of the real world (DB, Qt, network, collection).
+
+| Ring | What | Runs where / when | Cost |
 |---|---|---|---|
-| Targeted checks | `check()` cases for the touched area | While iterating | seconds |
-| `tests/test_regression.py` | Full suite, exit 0 = gate | Before every commit | ~2 s |
-| `debug/smoke_dialog.py` | Headless Learner-Knowledge window check (tabs, sorting, Browser search) | After gui.py/anki.py dialog changes | ~30 s, local Anki needed |
-| `debug/sanity_knowledge.py` | Standalone snapshot sanity (Anki stubbed) | After `anki.py` DB changes | seconds |
-| `debug/console_snippets.md` | Copy-paste Debug Console recipes | Live-collection triage | manual |
-| Offscreen real-collection run | Dialog + scoring against the real 57k-note collection | Before releases touching scoring/knowledge | minutes |
-| `./scripts/ci.sh` | Suite → commit → push → version bump → GitHub Release → AnkiWeb upload verify → local install | Every finished session | minutes |
+| **Ring 0 — units** (`tests/test_units.py`) | Every PURE function called in isolation with plain parameters (strings, dicts, lists, tmp files): text helpers, scorer edges, scope config/name math, dataclass contracts, renderer nodes, candidate filter, mastery math, reading normalization, error-state roundtrips. No Anki, no collection, no DB, no Qt, no network. Exit 0 = gate, alongside the regression suite. | `python3 tests/test_units.py`, before every commit | milliseconds |
+| **Ring 1 — regressions** (`tests/test_regression.py`) | Incident-named tests against fakes (stub `aqt`/collection/DB): decision matrices, snapshots, scoring algorithms, hook wiring, static guards. A bug fixed here earns a permanent test named after the incident. Exit 0 = gate. | `python3 tests/test_regression.py`, before every commit | ~2 s |
+| **Ring 2 — debug tooling** (`debug/`) | On-demand, symptom-driven: `sanity_knowledge.py` (snapshot sanity, Anki stubbed), `smoke_dialog.py` (headless offscreen Learner-Knowledge window: tabs, sorting, Browser search — needs local Anki + collection), `console_snippets.md` (live-collection Debug Console recipes). Never in CI. | After touching the area they cover | seconds–minutes |
+| **Ring 3 — real-collection verification** | Offscreen runs of dialog + scoring against the real 57k-note collection (ad-hoc heredocs following the `smoke_dialog.py` pattern). Catches environment-specific issues hermetic fixtures cannot. | Before releases touching scoring/knowledge | minutes |
+| **Ring 4 — release pipeline** (`./scripts/ci.sh`) | Units + regressions → commit → push → version bump → GitHub Release → watched AnkiWeb upload → local auto-install. | Every finished session | minutes |
+
+While iterating, run targeted checks first, then Ring 0, then Ring 1,
+then `./verify`-equivalent (`build.sh`) before declaring done:
+`tiny test → targeted suite → full suites → CI`.
+
+## Per-function coverage map
+
+Ring 0 covers a function **iff** it is pure (plain in/out, stdlib
+only). Everything needing Anki/DB/Qt/network lives in Ring 1+ with
+fakes. No function is tested in two places — the map below is the
+single source of truth; keep it current when adding functions.
+
+- `utils.py` — Ring 0: `normalize_reading`, `resolve_ladder_paths`,
+  `is_zip_dictionary`, `is_directory_dictionary`,
+  `find_dictionary_folders` (+ `extract_base_text` edges). Ring 1:
+  `extract_clean_word`, `parse_furigana_field`, `merge_type_targets`
+  (matrices need richer fixtures than plain params allow).
+- `scoring.py` — Ring 0: `calculate_kanji_score` edges. Ring 1:
+  `is_reference_title`, `extract_kanji_words`, `score_definition`
+  (spec-level behavior with realistic prose).
+- `scope.py` — Ring 0: `get_scope_decks`, `expand_scope_names`,
+  `missing_scope_decks`, `is_scope_empty`, `_note_type_name` (bare
+  stand-in notes). Ring 1: every `col`-backed path
+  (`note_in_scope`, `implied_note_types`, `resolve_deck_for_note`,
+  …) via the fake collection.
+- `models.py` — Ring 0: dataclass construction, defaults,
+  frozen-ness.
+- `renderer.py` — Ring 0: `_style_to_css`, `_extract_plain_text_node`,
+  `render_yomitan_definition_text`. Ring 1:
+  `render_structured_content_node`,
+  `render_yomitan_definition_html` (need full-template context).
+- `engine.py` — Ring 0: `_filter_valid_entries`. Ring 1: `_pick_best`
+  + `DefinitionGenerator.generate` (need entries + points dicts).
+- `anki.py` — Ring 0: `_maturity_points`, `_first_field_text`
+  (minimal `aqt` stub for the import only — never touched). Ring 1:
+  every snapshot/totals/summary path (needs the fake DB).
+- `yomitan.py` — Ring 0: `_normalize_reading` (+ agreement with the
+  `utils` twin — the two copies must never drift), error
+  set/get/clear roundtrip. Ring 1: split/strip/glossary/pick paths;
+  bridge/network paths are mocked or self-skipping.
+- `core.py`, `provider.py`, `generator.py`, `db_utils.py` —
+  singletons/SQLite/thin wrappers by design; Ring 1 only
+  (integration through public entry points).
+- `editor_browser.py` — Ring 1 only (needs the `aqt` stub + FakeNote
+  stand-ins for hooks, scope, and inference paths).
+- `gui.py`, `__init__.py` — not unit-testable (Qt); covered by
+  Ring 2 (`smoke_dialog.py`) + `test_qt_enum_compat` /
+  `test_no_undefined_names` static guards in Ring 1.
 
 ## Requirement → enforcement map
 
