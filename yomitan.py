@@ -25,11 +25,11 @@ Performance contract (user explicitly asked to think carefully):
 import html
 import json
 import re
-import time
 import threading
-import urllib.request
+import time
 import urllib.error
-from typing import List, Dict, Tuple, Optional
+import urllib.request
+from typing import Dict, List, Optional, Tuple
 
 # Dual-context sibling imports (see core.py for why)
 if __package__:
@@ -237,14 +237,22 @@ def split_glossary_by_dictionary(
     Yomitan glues every dictionary's definition into ONE blob (one
     <li data-dictionary="..."> per dictionary inside an <ol>), so scoring
     the blob as a whole can never pick a single winner. Each returned slice
-    keeps the <li> element verbatim, then strips the trailing Yomitan
-    <style>...</style> block so engine.py can score clean slices and return
-    the winner in native rich Yomitan HTML (no CSS bloat).
+    keeps the <li> element verbatim so engine.py can score clean slices
+    and return the winner in native rich Yomitan HTML.
+
+    EVERY <style>...</style> element is stripped from every slice, no
+    exceptions. Rationale (user-observed on real output, v1.2.x): Yomitan
+    inlines its entire structured-content stylesheet per glossary item —
+    a real 不公平 blob measured 31,333 bytes of CSS inside a 34,245-byte
+    slice (91% dead weight) — and it adds nothing inside Anki (ruby
+    renders natively; our own local renderer never emits <style>
+    elements either, so both dictionary sources stay consistent).
+    An earlier version kept each slice's "own" style block for fidelity;
+    the kept block WAS the bloat, so the scoping was removed entirely.
 
     Cheap by design, per the performance contract: a single pass to find
     <li data-dictionary=...> markers, then each slice spans from the current
-    marker to the next (or end of blob). <style> elements are removed
-    afterward by strip_style_blocks().
+    marker to the next (or end of blob), then one regex sub per slice.
 
     Returns [(dict_title_or_None, html_slice), ...]. Unsplittable input
     (fewer than 2 markers: single-dictionary results, kanji fallback,
@@ -254,7 +262,7 @@ def split_glossary_by_dictionary(
     """
     if not glossary or "<li" not in glossary.lower():
         return [(None, glossary)]
-    
+
     # Find all <li data-dictionary="..."> markers with their positions
     matches = list(_LI_DICT_RE.finditer(glossary))
     if len(matches) < 2:
@@ -262,45 +270,16 @@ def split_glossary_by_dictionary(
         # whole blob but still strip any <style> block so the definition is
         # never polluted with Yomitan CSS.
         return [(None, strip_style_blocks(glossary))]
-    
-    # Build slices: from each marker to the next marker (or end)
-    slices: List[Tuple[Optional[str], Tuple[int, int]]] = []  # (title, (start, end))
+
+    # Build slices: from each marker to the next marker (or end), with
+    # every <style> element removed (see rationale above).
+    out: List[Tuple[Optional[str], str]] = []
     for i, m in enumerate(matches):
         start = m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(glossary)
         title = html.unescape(m.group(1)).strip() or None
-        slices.append((title, (start, end)))
-    
-    # Extract raw slices and then apply style-scoping guard
-    raw_slices = [(title, glossary[start:end]) for title, (start, end) in slices]
-    
-    # Apply style-scoping: remove <style> blocks that don't belong to current dictionary
-    scoped_slices: List[Tuple[Optional[str], str]] = []
-    for dict_title, slice_html in raw_slices:
-        # Remove ALL <style> blocks first, then add back only those that belong to this dictionary
-        cleaned = _STYLE_TAG_RE.sub("", slice_html)
-        
-        # Find all <style> blocks in the original slice with their content
-        style_matches = list(_STYLE_TAG_RE.finditer(slice_html))
-        for style_match in style_matches:
-            style_content = style_match.group(0)  # Full <style>...</style>
-            # Check if this style block targets the current dictionary
-            # Look for [data-dictionary="current_dict"] selector in the style
-            if dict_title and f'[data-dictionary="{dict_title}"]' in style_content:
-                # Find where to insert this style block - it should go right after the closing </li> tag
-                # Find the position of the closing </li> tag
-                li_close_match = re.search(r'</li\s*>', cleaned, re.IGNORECASE)
-                if li_close_match:
-                    insert_pos = li_close_match.end()
-                    # Insert the style block right after the closing </li> tag
-                    cleaned = cleaned[:insert_pos] + style_content + cleaned[insert_pos:]
-                else:
-                    # Fallback: if no closing </li> found, append to end
-                    cleaned += style_content
-        
-        scoped_slices.append((dict_title, cleaned))
-    
-    return scoped_slices
+        out.append((title, strip_style_blocks(glossary[start:end])))
+    return out
 
 
 def _entries_from_term_entries(

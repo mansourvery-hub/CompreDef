@@ -55,20 +55,20 @@ HISTORICAL BUG MAP (bug -> test):
 No Anki/PyQt required: db_utils' Anki dependency is stubbed before import.
 """
 
+import ast
+import builtins
+import glob
+import importlib
+import importlib.abc
+import json
 import os
 import re
-import sys
-import ast
-import json
-import glob
 import shutil
 import sqlite3
 import symtable
-import builtins
+import sys
 import tempfile
 import time
-import importlib
-import importlib.abc
 import types
 
 # ---------------------------------------------------------------------------
@@ -286,11 +286,12 @@ def _install_aqt_stub() -> None:
 
 _install_aqt_stub()
 import aqt  # noqa: E402  (the stub)
+
 aqt.mw = _FakeMW()  # type: ignore[attr-defined]
 
 # Modules under test (imports must come AFTER the stub is in place)
-import parser as compredef_parser  # noqa: E402
 import generator as compredef_generator  # noqa: E402
+import parser as compredef_parser  # noqa: E402
 import provider  # noqa: E402
 import scope as compredef_scope  # noqa: E402
 import utils as compredef_utils  # noqa: E402
@@ -2451,8 +2452,9 @@ def test_sync_reset_is_thread_safe() -> None:
     refresh. sync_reset_caches() must rebuild WITHOUT ever touching
     taskman, and still produce a ready, scoped snapshot.
     """
-    import anki
     import threading
+
+    import anki
 
     prev_kanji = set(anki._known_kanji_cache)
     prev_vocab = set(anki._known_vocab_cache)
@@ -2894,8 +2896,9 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
     by rejecting ANY query that names the legacy table, then asserts the
     snapshot still builds correctly.
     """
-    import anki
     import sqlite3 as _sqlite3
+
+    import anki
 
     prev_db_all = aqt.mw.col.db.all
     prev_kanji = set(anki._known_kanji_cache)
@@ -3214,17 +3217,11 @@ def test_yomitan_glossary_split_per_dictionary() -> None:
     check("yomitan-split: titles extracted in order",
           [t for t, _ in parts] == ["Dict A", "Dict B", "Dict C"],
           f"got {[t for t, _ in parts]}")
-    check("yomitan-split: each slice keeps ONLY its own <style> block",
-          "color:red" in parts[0][1]
-          and "color:green" in parts[1][1]
-          and "color:blue" in parts[2][1]
-          and "color:green" not in parts[0][1]
-          and "color:blue" not in parts[0][1]
-          and "color:red" not in parts[1][1]
-          and "color:blue" not in parts[1][1]
-          and "color:red" not in parts[2][1]
-          and "color:green" not in parts[2][1],
-          "styles leaked across slices or own style lost")
+    check("yomitan-split: NO <style> element survives in any slice",
+          all("<style" not in s.lower() for _, s in parts),
+          "a <style> element survived — definitions must never carry "
+          "Yomitan CSS (the 不公平 incident: 31KB of stylesheet inside "
+          "a 34KB slice)")
     check("yomitan-split: dictionary content survives within its slice",
           "贔屓があって" in parts[0][1]
           and "公で平でないこと" in parts[1][1]
@@ -3250,7 +3247,11 @@ def test_yomitan_glossary_split_per_dictionary() -> None:
     # ([data-dictionary="X"]) which _LI_DICT_RE never matches — every
     # spec silently fell back to one slice. If you add cases here, copy
     # real /ankiFields output shape.
-    # 1. style-scoping guard: <style> between </li> and next <li> should be kept only if it targets current dictionary
+    # 1. style stripping: EVERY <style> element is removed from every
+    #    slice, no exceptions — including blocks that target the slice's
+    #    own dictionary. (An earlier version kept "own" styles for
+    #    fidelity; real output proved the kept block IS the bloat —
+    #    tens of KB per definition with zero visual effect in Anki.)
     spec_style_blob = ('<div class="yomitan-glossary">'
                        '<ol>'
                        '<li data-dictionary="DicA">{text}</li>'
@@ -3260,20 +3261,20 @@ def test_yomitan_glossary_split_per_dictionary() -> None:
                        '</ol>'
                        '</div>')
     spec_parts = yomitan.split_glossary_by_dictionary(spec_style_blob)
-    check("yomitan-split: spec style-scoping - exactly two slices",
+    check("yomitan-split: spec style-strip - exactly two slices",
           len(spec_parts) == 2, f"got {len(spec_parts)}")
-    check("yomitan-split: spec style-scoping - DicA slice keeps its own style",
+    check("yomitan-split: spec style-strip - no <style> in DicA slice",
           len(spec_parts) == 2
-          and "[data-dictionary=\"DicA\"]{color:red;}" in spec_parts[0][1])
-    check("yomitan-split: spec style-scoping - DicA slice does NOT keep DicB style",
+          and "<style" not in spec_parts[0][1].lower())
+    check("yomitan-split: spec style-strip - no <style> in DicB slice",
           len(spec_parts) == 2
-          and "[data-dictionary=\"DicB\"]" not in spec_parts[0][1])
-    check("yomitan-split: spec style-scoping - DicB slice keeps its own style",
+          and "<style" not in spec_parts[1][1].lower())
+    check("yomitan-split: spec style-strip - content survives",
           len(spec_parts) == 2
-          and "[data-dictionary=\"DicB\"]{color:blue;}" in spec_parts[1][1])
-    check("yomitan-split: spec style-scoping - DicB slice does NOT keep DicA style",
-          len(spec_parts) == 2
-          and "[data-dictionary=\"DicA\"]" not in spec_parts[1][1])
+          and "{text}" in spec_parts[0][1]
+          and "{text}" in spec_parts[1][1]
+          and spec_parts[0][0] == "DicA"
+          and spec_parts[1][0] == "DicB")
 
     # 2. adjacent <li> no-intermediate-markup: if two <li> are adjacent with no markup between,
     #    split must still occur (no false merge)
@@ -3322,6 +3323,31 @@ def test_yomitan_glossary_split_per_dictionary() -> None:
     check("yomitan-split: spec unordered fallback - slice contains original content",
           "no marker here" in spec_fallback_parts[0][1] and "nor here" in spec_fallback_parts[0][1])
 
+    # 5. THE 不公平 incident (v1.2.x): real Yomitan output inlines its
+    #    ENTIRE structured-content stylesheet per glossary item — measured
+    #    live: 31,333 bytes of CSS inside a 34,245-byte slice (91% dead
+    #    weight), stored verbatim into the Anki field on every generation.
+    #    It renders identically without it (ruby is native; our own local
+    #    renderer never emits <style>), so NO slice may carry ANY of it.
+    big_css = "\n".join(f".gloss-{i} {{ color: red; }}" for i in range(300))
+    big_blob = ('<div class="yomitan-glossary"><ol>'
+                '<li data-dictionary="BigA">本文A</li>'
+                f'<style>[data-dictionary="BigA"]{{{big_css}}}</style>'
+                '<li data-dictionary="BigB">本文B</li>'
+                f'<style>[data-dictionary="BigB"]{{{big_css}}}</style>'
+                '</ol></div>')
+    big_parts = yomitan.split_glossary_by_dictionary(big_blob)
+    check("yomitan-split: incident blob splits into two slices",
+          len(big_parts) == 2, f"got {len(big_parts)}")
+    check("yomitan-split: incident slices carry zero <style> elements",
+          all("<style" not in s.lower() for _, s in big_parts))
+    check("yomitan-split: incident slices are small (CSS gone)",
+          all(len(s) < 500 for _, s in big_parts),
+          f"sizes={[len(s) for _, s in big_parts]}")
+    check("yomitan-split: incident content survives sans CSS",
+          any("本文A" in s for _, s in big_parts)
+          and any("本文B" in s for _, s in big_parts))
+
 
 def _yomitan_child_list_blob() -> str:
     """Synthetic blob mirroring the 会社 incident: one dictionary contributes
@@ -3345,8 +3371,8 @@ def test_yomitan_term_list_loses_to_real_definition() -> None:
     ((子) 会社員 | 会社組合 | …) outscored the genuine 小学館 definition
     because every kanji in the list was already known. Term lists are not
     readable definitions — they must be filtered like reference titles."""
-    import yomitan
     import engine as engine_mod
+    import yomitan
     from models import DictionaryEntry
 
     junk = "(子) 会社員 | 会社組合 | 会社更生法 | 会社整理 | 会社説明会"
@@ -3395,8 +3421,8 @@ def test_yomitan_term_list_loses_to_real_definition() -> None:
 
 def test_yomitan_returns_single_best_definition() -> None:
     """Engine scores per-dictionary slices, returns winner in native HTML."""
-    import yomitan
     import engine as engine_mod
+    import yomitan
     from models import DictionaryEntry
 
     blob = _yomitan_multi_dict_blob()
