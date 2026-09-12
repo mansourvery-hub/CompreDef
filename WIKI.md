@@ -192,47 +192,101 @@ any list — shuffling the input can never change the winner.
 
 ---
 
-## Worked example (real data, learner = repo owner)
+## Worked example — making the sausage, step by step
 
-Word **不公平**, 4 definitions, learner knows 1379 kanji and 1310
-compounds. Unknown kanji are marked **bold**.
+Word **不公平**, 4 definitions, one learner: the repo owner, whose
+snapshot holds **1379 kanji and 1310 compounds** (totals only — the
+full lists live in the Learner Knowledge dialog, not here).
 
-### 三省堂国語辞典 — score 2.000 ★ winner
+### Pass 1 — clean each definition
 
-> ふこうへい［不公平］｟名・ダナ｠あつかいが平等でないこと。（↔公平）不公平さ。
+Raw base text first, then what cleaning removes:
 
-- Kanji: 11 occurrences, all known → $11 / 11 = 1.0$.
-- Compounds: 平等, 不公平, 公平 — all known → $3 / 3 = 1.0$.
-- Score: $1.0 + 1.0 = 2.0$. The whole definition is readable.
+- **三省堂国語辞典** (39 chars): no boilerplate. Headword 不公平
+  appears twice (［不公平］ header, 不公平さ) → removed. Left:
+  `ふこうへい［］｟名・ダナ｠あつかいが平等でないこと。（↔公平）さ。`
+  (33 chars)
+- **小学館例解学習国語** (57 chars): no boilerplate. Headword
+  twice (【不公平】 header, 不公平な判定) → removed. (51 chars)
+- **デジタル大辞泉** (67 chars): no boilerplate. Headword twice
+  (【不公平】 header, 不公平な扱い) → removed. (61 chars)
+- **大辞泉 第二版** (168 chars): the 類語 block goes first — 93
+  characters of synonym links (先入観・贔屓目・偏見・偏頗 …),
+  including 5 kanji the learner does **not** know (**偏**, **僻**,
+  **屓**, **贔**, **頗**) and 19 unknown compounds. Then the
+  headword (【不公平】 header) → removed. Left: 72 characters of
+  actual explanation.
 
-### 小学館例解学習国語 — score 1.500
+What stays: 三省堂's plain-text POS tag ｟名・ダナ｠ has no HTML
+markers, so its 名 survives as scoring input (known — harmless,
+documented noise).
 
-> ５ふこうへい【不公平】 名・形動だな フコーヘー公平でないこと。えこひいきがあること。例 不公平な判定。対 公平。
+### Pass 2 — kanji view: type each definition, highlight what is known
 
-- Kanji: 17 occurrences, all known → $17 / 17 = 1.0$.
-- Compounds: 不公平, 公平 known; 判定, 形動 unknown → $2 / 4 = 0.5$.
-- Score: $1.0 + 0.5 = 1.5$.
+Same cleaned text as Pass 1, typed a first time with every **known**
+kanji highlighted and every **unknown** kanji bold. Kana and
+punctuation stay plain — they are never scored.
 
-### デジタル大辞泉 — score 1.400
+**三省堂国語辞典** — 5 occurrences, all known → $5/5 = 1.0$:
 
-> ふ‐こうへい【不公平】［名・形動］公平でないこと。片寄りがあること。また、そのさま。「不公平な扱いを受ける」[派生]ふこうへいさ［名］
+> ふこうへい［］｟<mark>名</mark>・ダナ｠あつかいが<mark>平</mark><mark>等</mark>でないこと。（↔<mark>公</mark><mark>平</mark>）さ。
 
-- Kanji: 18 occurrences, all known → $18 / 18 = 1.0$.
-- Compounds: 不公平, 公平 known; 派生, 片寄, 形動 unknown → $2 / 5 = 0.4$.
-- Score: $1.0 + 0.4 = 1.4$.
+**小学館例解学習国語** — 11 occurrences, all known → $11/11 = 1.0$:
 
-### 大辞泉 第二版 — score 0.9225
+> ５ふこうへい【】 <mark>名</mark>・<mark>形</mark><mark>動</mark>だな フコーヘー<mark>公</mark><mark>平</mark>でないこと。えこひいきがあること。<mark>例</mark> な<mark>判</mark><mark>定</mark>。<mark>対</mark> <mark>公</mark><mark>平</mark>。
 
-> ふ‐こうへい【不公平】…「―な扱いを受ける」派生ふこうへいさ 類語 先入観・先入主・先入見・**僻**目・**贔屓**目・欲目・固定観念・**偏**る・不平等・**偏**る・**偏**する・**偏**向・**僻**する・**偏**見・**偏**在・**偏**重・**偏頗**・差別・片手落ち・バイアス・アンフェア
+**デジタル大辞泉** — 12 occurrences, all known → $12/12 = 1.0$:
 
-- Kanji: 59 occurrences, 5 unknown (**偏**, **僻**, **屓**, **贔**, **頗**).
-- Compounds: 22 distinct, only 不公平, 公平, 不平等 known.
-- Score: $0.92…$ — the long synonym list drags readability down.
+> ふ‐こうへい【】［<mark>名</mark>・<mark>形</mark><mark>動</mark>］<mark>公</mark><mark>平</mark>でないこと。<mark>片</mark><mark>寄</mark>りがあること。また、そのさま。「な<mark>扱</mark>いを<mark>受</mark>ける」[<mark>派</mark><mark>生</mark>]ふこうへいさ［<mark>名</mark>］
 
-The old raw-sum ranking crowned 大辞泉 (49.0 points of known-kanji
-mass); density crowns 三省堂 (2.0 — fully readable). That flip is the
-entire point: the learner reads 三省堂 without a single lookup, while
-大辞泉 sends them chasing 偏頗 and 贔屓目.
+**大辞泉 第二版** — 12 occurrences, all known → $12/12 = 1.0$:
+
+> ふ‐こうへい【】アクセント ふこ↓うへい <mark>名</mark>・<mark>形</mark><mark>動</mark>〙<mark>公</mark><mark>平</mark>でないこと。<mark>片</mark><mark>寄</mark>りがあること。また、そのさま。「―な<mark>扱</mark>いを<mark>受</mark>ける」<mark>派</mark><mark>生</mark> ふこうへいさ<mark>名</mark>〙
+
+Nobody has an unknown kanji left — the cleaning pass deleted every
+one, so every kanji lights up. Kanji alone cannot separate these
+four; the decision moves to compounds entirely.
+
+### Pass 3 — compound view: type each definition again, highlight the words
+
+Same text typed a second time, now with every **known compound**
+highlighted and every **unknown** compound bold. Single kanji stay
+plain here — they already had their turn in Pass 2; only
+multi-kanji runs score as words.
+
+**三省堂国語辞典** — ✓公平, ✓平等 → $2/2 = 1.0$:
+
+> ふこうへい［］｟名・ダナ｠あつかいが<mark>平等</mark>でないこと。（↔<mark>公平</mark>）さ。
+
+**小学館例解学習国語** — ✓公平 | ✗判定, ✗形動 → $1/3 = 0.333$:
+
+> ５ふこうへい【】 名・**形動**だな フコーヘー<mark>公平</mark>でないこと。えこひいきがあること。例 な**判定**。対 <mark>公平</mark>。
+
+**デジタル大辞泉** — ✓公平 | ✗形動, ✗派生, ✗片寄 → $1/4 = 0.25$:
+
+> ふ‐こうへい【】［名・**形動**］<mark>公平</mark>でないこと。**片寄**りがあること。また、そのさま。「な扱いを受ける」[**派生**]ふこうへいさ［名］
+
+**大辞泉 第二版** — ✓公平 | ✗形動, ✗派生, ✗片寄 → $1/4 = 0.25$:
+
+> ふ‐こうへい【】アクセント ふこ↓うへい 名・**形動**〙<mark>公平</mark>でないこと。**片寄**りがあること。また、そのさま。「―な扱いを受ける」**派生** ふこうへいさ名〙
+
+### Pass 4 — score and rank
+
+| dictionary | kanji | vocab | **score** |
+|---|---|---|---|
+| 三省堂国語辞典 | $5/5 = 1.0$ | $2/2 = 1.0$ | **2.0** ★ |
+| 小学館例解学習国語 | $11/11 = 1.0$ | $1/3 = 0.333$ | 1.333 |
+| デジタル大辞泉 | $12/12 = 1.0$ | $1/4 = 0.25$ | 1.25 |
+| 大辞泉 第二版 | $12/12 = 1.0$ | $1/4 = 0.25$ | 1.25 |
+
+デジタル大辞泉 and 大辞泉 tie on everything (1.25, 12 kanji) — the
+tertiary key decides: デジタル大辞泉 sorts before 大辞泉 第二版.
+
+三省堂 wins because it is the only definition whose every compound
+is known. Under the old raw sums 大辞泉 won with 49 points of
+known-kanji mass while being the least readable of the four — that
+flip is the v1.3 change, and you can reproduce every number above
+with `python3 debug/audit_picker.py --html`.
 
 ---
 
