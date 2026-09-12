@@ -53,9 +53,8 @@ T11 covers all (release)
   (mine/beginner/native) x 2 sources (local dictionaries/Yomitan) into
   `tests/fixtures/picker_audit.json`, renders
   `debug/reports/picker_audit_<ts>.html` (winners matrix + collapsed
-  rankings + ok/bad grading radios with JSON export +
-  `--import-grades`), and `test_picker_audit_strict` (Ring 1) pins the
-  full frozen rankings plus human-grade agreement.
+  rankings), and `test_picker_audit_strict` (Ring 1) pins the frozen
+  winners plus human-grade agreement.
 - **T13 — Density scoring + swappable picker (SHIPPED v1.3).**
   Length-normalized comprehension density replaces raw-sum argmax
   (succinct 90%-known beats 20-paragraph 5%-known); deterministic

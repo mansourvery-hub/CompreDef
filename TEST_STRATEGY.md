@@ -99,7 +99,7 @@ single source of truth; keep it current when adding functions.
 | Q-D3 visible failure | `test_indexing_failure_reported`, `_warn_db_error` paths |
 | Q-D4 graceful degradation | Empty-scope / missing-field / malformed-row cases across suite |
 | Q-G1 never overwrite | Tab decision matrix (`test_tab_generate_decisions`), bulk skip paths |
-| Q-G2 density argmax | `test_order_independent_argmax`, `test_v12_scoring_algorithm` (§7 density), `test_disabled_dictionaries_skipped`, `test_picker_audit_strict` (frozen full density orderings + picker/rank agreement + order-independence + human grades on the real-deck fixture) |
+| Q-G2 density argmax | `test_order_independent_argmax`, `test_v12_scoring_algorithm` (§7 density), `test_disabled_dictionaries_skipped`, `test_picker_audit_strict` (frozen winners + picker/rank agreement + order-independence + human grades on the real-deck fixture) |
 | Q-G3 kana never scores | `test_scoring_ignores_furigana`, `test_parse_furigana_field_formats`, `test_reference_title_filtering`, `test_extract_clean_word_formats`, `test_reading_disambiguates_homographs` |
 | Q-G4 non-blocking UI | `test_sync_reset_is_thread_safe` (taskman main-thread rule), dialog `run_in_background` paths |
 | Q-G5 rendering fidelity | `test_structured_content_html_fidelity`, `test_renderer_version_invalidates_cache`, `test_data_sc_attribute_names`, `test_zip_folder_parity`, Yomitan split/pick tests, real-dictionary smoke |
@@ -132,5 +132,5 @@ without its regression test is incomplete.
   exception is FROZEN data: `tests/fixtures/picker_audit.json` captures
   a one-time offline export (11 real words, 37 local + live-Yomitan
   candidates, the user's real knowledge snapshot) so Ring 1 can pin
-  strict full rankings hermetically — the live export itself lives in
+  strict winners hermetically — the live export itself lives in
   `debug/audit_picker.py` and never runs in CI.

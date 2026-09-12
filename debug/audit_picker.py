@@ -532,19 +532,11 @@ def _html_word(fixture: dict, item: dict, open_first: bool) -> str:
         for profile in PROFILES:
             kp, vp = _profile_points(profile, mine, cands, exclude)
             ranked = _ranked(cands, kp, vp, exclude)
-            frozen = fixture["expected"][source][nid][profile]
-            live_order = [r["hash"] for r in ranked]
-            frozen_order = [r["hash"] for r in frozen]
-            if live_order == frozen_order:
-                badge = '<span class="badge ok">MATCH</span>'
-            else:
-                badge = '<span class="badge drift">DRIFT vs frozen</span>'
             chunks.append(
                 f'<details {"open" if open_first and profile == "mine" and source == "local" else ""}>'
                 f"<summary><strong>{profile}</strong> "
                 f'winner: <span class="badge">{html_mod.escape(_short_dict(ranked[0]["dict"]))}</span> '
-                f'score {ranked[0]["density"]:.3f} '
-                f'{badge}</summary>'
+                f'score {ranked[0]["density"]:.3f}</summary>'
                 f'<table><tr><th>#</th><th>dictionary</th>'
                 f"<th>score</th><th>n</th>"
                 f"<th>definition</th></tr>")
