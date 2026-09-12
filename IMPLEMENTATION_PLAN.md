@@ -1,6 +1,6 @@
 # CompreDef — Implementation Plan
 
-Product status: **shipped and stable (v1.2.11+)**. Every slice below
+Product status: **shipped and stable (v1.2.18)**. Every slice below
 is COMPLETE, tested, and released. New work enters only via the
 Backlog at the bottom — never by silent scope creep mid-session.
 
@@ -9,7 +9,24 @@ Backlog at the bottom — never by silent scope creep mid-session.
 - **T1 — Install-time dictionary indexing** (folder/ZIP, SQLite
   cache, signature + renderer-version invalidation)
 - **T2 — Definition generation** (density argmax scoring with
-  maximal fallback, order-independent tie-breaks)
+  maximal fallback; most-kanji tie-break, encounter order beyond that)
+- **T12 — Dictionary-picker audit.** Offline grading rig for the
+  picker: `debug/audit_picker.py` captures every dictionary's
+  definitions for each card of the real 11-note deck
+  (`My Life Decks::Japanese::anki-japanese-template`) under 3 profiles
+  (mine/beginner/native) x 2 sources (local dictionaries/Yomitan) into
+  `tests/fixtures/picker_audit.json`, renders
+  `debug/reports/picker_audit_<ts>.html` (winners matrix + collapsed
+  rankings), and `test_picker_audit_strict` (Ring 1) pins the frozen
+  winners plus human-grade agreement.
+- **T13 — Density scoring + swappable picker.**
+  Length-normalized comprehension density replaces raw-sum argmax
+  (succinct 90%-known beats 20-paragraph 5%-known); `picker.py` owns
+  gather/filter/rank/pick behind a `PickerStrategy` interface
+  (`DensityPicker` default, `LegacySumPicker` for A/B via the
+  `picker_strategy` config key); algorithm + equations documented in
+  ARCHITECTURE.md and the wiki; every definition ranked with one
+  logic, dictionary order never decides.
 - **T3 — Learner knowledge snapshot** (first-field extraction,
   mastered ≥ 365d / seen > 0, Scope-bounded, session-cached)
 - **T4 — Deck Scope + quick-fix** (subdeck expansion, ANY-card
@@ -30,6 +47,11 @@ Backlog at the bottom — never by silent scope creep mid-session.
   ZIP ≡ folder parity)
 - **T11 — Release pipeline** (regression gate, packaging + verify,
   GitHub Release, AnkiWeb upload watch, local auto-install)
+- **T14 — Scoring fat removal.** Scoring runs on cleaned text:
+  tagged boilerplate (thesaurus `$c-ruigo` sections, `data-sc-hinshi`
+  POS tags) stripped via a depth-counted HTML parser, headword
+  self-mentions excluded (multi-char terms only), shared
+  `scoring_base_text` for kanji + vocab paths.
 
 ## Dependency graph (historical — all edges satisfied)
 
@@ -41,33 +63,19 @@ T1 ─┬─→ T2 ─→ T6 ─→ T7
     ├─→ T10 ──┘
     └─→ T5 ───→ T8
 T9 ──→ T2 (alternate dictionary source)
+T12 ──→ T2 (audit guards the picker)
+T13 ──→ T2 (density strategies)
+T14 ──→ T2 (cleaned scoring text)
 T11 covers all (release)
 ```
 
 ## Backlog
 
-- **T12 — Dictionary-picker audit (SHIPPED v1.3).** Offline grading rig
-  for the picker: `debug/audit_picker.py` captures every dictionary's
-  definitions for each card of the real 11-note deck
-  (`My Life Decks::Japanese::anki-japanese-template`) under 3 profiles
-  (mine/beginner/native) x 2 sources (local dictionaries/Yomitan) into
-  `tests/fixtures/picker_audit.json`, renders
-  `debug/reports/picker_audit_<ts>.html` (winners matrix + collapsed
-  rankings), and `test_picker_audit_strict` (Ring 1) pins the frozen
-  winners plus human-grade agreement.
-- **T13 — Density scoring + swappable picker (SHIPPED v1.3).**
-  Length-normalized comprehension density replaces raw-sum argmax
-  (succinct 90%-known beats 20-paragraph 5%-known); deterministic
-  tertiary tie-break (title, text); `picker.py` owns gather/filter/
-  rank/pick behind a `PickerStrategy` interface (`DensityPicker`
-  default, `LegacySumPicker` for A/B via the `picker_strategy` config
-  key); algorithm + equations documented in ARCHITECTURE.md and the
-  wiki; the dictionary set is never ordered by rank (order-free).
-- **T14 — Scoring fat removal (SHIPPED v1.3).** Scoring runs on
-  cleaned text: tagged boilerplate (thesaurus `$c-ruigo` sections,
-  `data-sc-hinshi` POS tags) stripped via a depth-counted HTML
-  parser, headword self-mentions excluded (multi-char terms only),
-  shared `scoring_base_text` for kanji + vocab paths.
+- **T15 — Human grading verdicts (OPEN — owner's homework).** Grade
+  the ★ picks in `debug/reports/picker_audit_*.html` as correct/wrong
+  in chat; verdicts are recorded via
+  `debug/audit_picker.py --import-grades` and the suite checks
+  agreement (a `wrong` FAILs until the picker is fixed).
 
 ## Working agreements (from experience)
 
