@@ -71,21 +71,21 @@ okurigana inflections (偏る → 偏) stay out of vocab by construction;
 adjacent compounds with no separator can glue (rare in prose, and
 synonym lists are stripped first). Deterministic on every machine.
 
-Ranking (strict total order, best first): highest comprehension, then
-most kanji (richer prose), then dictionary title, then definition
-text. The last two keys use input PROPERTIES, never input positions —
-shuffling the input can never change the winner (order-independence).
+Ranking, best first: highest comprehension, then most kanji.
+Exact ties keep encounter order (stable sort / first-best scan), so a
+fixed input always yields the same winner; shuffling only matters when
+two definitions tie exactly.
 
 Why density, not raw sums: raw sums (v1.2 `LegacySumPicker`, still
 available via the `picker_strategy` config key for A/B) grow with
 length, so a 20-paragraph 5%-known definition always beat a succinct
 90%-known one. Density measures the fraction the learner can actually
-read; the kanji-count tie-break still prefers richer prose among equals.
+read.
 
 ### Swapping the method
 
 New picking ideas subclass `picker.PickerStrategy` (one method:
-`rank_key(result, title, definition)`) and become active via
+`rank_key(result)`) and become active via
 `get_active_strategy()` / the `picker_strategy` config key. Nothing
 outside `picker.py` changes; `engine.py` only delegates. Candidate
 gathering (`collect_dictionary_candidates`, per-path isolation so one

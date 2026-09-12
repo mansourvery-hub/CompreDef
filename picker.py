@@ -69,17 +69,17 @@ def collect_dictionary_candidates(provider, dictionary_paths: List[str],
 class PickerStrategy(abc.ABC):
     """One way to order candidate definitions, best first.
 
-    rank_key() must be a TOTAL order over (result, title, definition)
-    built from input PROPERTIES only — never input positions — so
-    dictionary order can never change the winner (Q-G2
-    order-independence). lower key == more comprehensible.
+    rank_key() orders by (score, kanji count) — lower key == more
+    comprehensible. Exact ties keep encounter order (Python sort is
+    stable; single-pass pick keeps the first best), so winners are
+    deterministic for a fixed input. Q-G2 order-independence holds
+    whenever the best score is unique.
     """
 
     name: str = "base"
 
     @abc.abstractmethod
-    def rank_key(self, result: ScoringResult, title: str,
-                 definition: str) -> tuple:
+    def rank_key(self, result: ScoringResult) -> tuple:
         """Sort key for one scored candidate (lower wins)."""
         raise NotImplementedError
 
@@ -92,8 +92,7 @@ class DensityPicker(PickerStrategy):
       vocab_density = sum(point(w)) / (# distinct compounds), 0..1,
       point(x)      = min(1, max_interval(x) / 365), 0 when unknown.
     Kana-only definitions hold no kanji signal: density 0 (neutral,
-    never wins on merit). Ties break toward more kanji (richer prose),
-    then (title, text) for a strict total order.
+    never wins on merit). The only tie-break is most kanji.
 
     Why density, not raw sums: raw sums grow with length, so a
     20-paragraph 5%-known definition always beat a succinct 90%-known
@@ -102,10 +101,8 @@ class DensityPicker(PickerStrategy):
 
     name = "density"
 
-    def rank_key(self, result: ScoringResult, title: str,
-                 definition: str) -> tuple:
-        return (-result.density_total, -result.kanji_count,
-                title, definition)
+    def rank_key(self, result: ScoringResult) -> tuple:
+        return (-result.density_total, -result.kanji_count)
 
 
 class LegacySumPicker(PickerStrategy):
@@ -119,10 +116,8 @@ class LegacySumPicker(PickerStrategy):
 
     name = "legacy_sum"
 
-    def rank_key(self, result: ScoringResult, title: str,
-                 definition: str) -> tuple:
-        return (-result.total_score, -result.kanji_count,
-                title, definition)
+    def rank_key(self, result: ScoringResult) -> tuple:
+        return (-result.total_score, -result.kanji_count)
 
 
 _STRATEGIES: Dict[str, PickerStrategy] = {
@@ -166,10 +161,11 @@ def rank_definitions(
     strategy: Optional[PickerStrategy] = None,
     exclude: Iterable[str] = (),
 ) -> List[Tuple[Tuple[str, str], ScoringResult]]:
-    """Deterministic TOTAL order over candidates, best first.
+    """Ordered candidates, best first.
 
     Scores each (dictionary_title, definition) with score_definition
     and sorts by the strategy key (default: the active strategy).
+    The sort is stable: exact ties keep encounter order.
     `exclude` surface forms (the defined headword) earn no points.
     Returns [((title, definition), ScoringResult), ...].
     """
@@ -178,8 +174,7 @@ def rank_definitions(
                score_definition(definition, kanji_points, vocab_points,
                                 exclude))
               for title, definition in candidates]
-    scored.sort(key=lambda item: active.rank_key(
-        item[1], item[0][0], item[0][1]))
+    scored.sort(key=lambda item: active.rank_key(item[1]))
     return scored
 
 
@@ -200,7 +195,7 @@ def pick_best(entries: List[DictionaryEntry],
     for entry in entries:
         res = score_definition(entry.definition, kanji_points, vocab_points,
                                (entry.word,) if entry.word else ())
-        key = active.rank_key(res, entry.dictionary_title, entry.definition)
+        key = active.rank_key(res)
         if best is None or key < best[0]:
             best = (key, res, entry.definition)
     if best is None:

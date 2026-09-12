@@ -14,7 +14,7 @@
    "/home/mohamed/Desktop/Dicts/[JA-JA] 大辞泉 第二版[2025-04-29]",
    "/home/mohamed/Desktop/Dicts/[JA-JA] 小学館例解学習国語 第十二版[2025-08-18]"
   ],
-  "refrozen_at": "2026-09-12T19:01:05"
+  "refrozen_at": "2026-09-12T20:52:59"
  },
  "words": [
   {
@@ -4096,15 +4096,15 @@
       "kanji_count": 21
      },
      {
-      "dict": "大辞林　第四版",
-      "hash": "b8b8f201f79b",
+      "dict": "大辞泉 第二版",
+      "hash": "18f60d8c6c89",
       "density": 0.0,
       "total": 0.0,
       "kanji_count": 21
      },
      {
-      "dict": "大辞泉 第二版",
-      "hash": "18f60d8c6c89",
+      "dict": "大辞林　第四版",
+      "hash": "b8b8f201f79b",
       "density": 0.0,
       "total": 0.0,
       "kanji_count": 21
@@ -4154,17 +4154,17 @@
       "kanji_count": 21
      },
      {
-      "dict": "大辞林　第四版",
-      "hash": "b8b8f201f79b",
-      "density": 2.0,
-      "total": 26.0,
-      "kanji_count": 21
-     },
-     {
       "dict": "大辞泉 第二版",
       "hash": "18f60d8c6c89",
       "density": 2.0,
       "total": 25.0,
+      "kanji_count": 21
+     },
+     {
+      "dict": "大辞林　第四版",
+      "hash": "b8b8f201f79b",
+      "density": 2.0,
+      "total": 26.0,
       "kanji_count": 21
      },
      {

@@ -450,7 +450,7 @@ def test_yomitan_error_state() -> None:
 
 
 def test_rank_definitions() -> None:
-    """picker.rank_definitions: deterministic total order (gap: new in
+    """picker.rank_definitions: (score, kanji) ordering (gap: new in
     the picker-audit work; engine._pick_best agreement is pinned in
     Ring 1 on real captured data)."""
     rk = compredef_picker.rank_definitions
@@ -461,10 +461,11 @@ def test_rank_definitions() -> None:
     check("unit: richer definition ranks first",
           titles[0] in ("A", "B") and titles[-1] == "C",
           f"got {titles}")
-    check("unit: full tie breaks by title, not input order",
-          titles[:2] == ["A", "B"], f"got {titles}")
-    check("unit: shuffled input ranks identically",
-          [t for (t, _), _ in rk(list(reversed(cands)), kp, {})] == titles)
+    check("unit: exact ties keep encounter order (stable sort)",
+          titles[:2] == ["B", "A"], f"got {titles}")
+    check("unit: distinct scores order identically when shuffled",
+          [t for (t, _), _ in rk([("C", "かなだけ。"), ("A", "公平だ。")],
+                                  kp, {})] == ["A", "C"])
     check("unit: empty in -> empty out", rk([], kp, {}) == [])
     # Density (v1.3 default): a succinct fully-known definition beats
     # a long mostly-unknown one — raw sums ranked the reverse

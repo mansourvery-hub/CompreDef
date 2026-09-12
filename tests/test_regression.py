@@ -2008,6 +2008,12 @@ PICKER_AUDIT_FIXTURE = os.path.join(
     REPO_ROOT, "tests", "fixtures", "picker_audit.json")
 
 
+def _picker_def_hash(definition: str) -> str:
+    """Short stable id matching debug/audit_picker.py (same sha1:12)."""
+    import hashlib
+    return hashlib.sha1(definition.encode("utf-8")).hexdigest()[:12]
+
+
 def _picker_audit_points(fixture: dict, profile: str,
                          candidates: list,
                          exclude: tuple = ()) -> tuple:
@@ -2043,20 +2049,21 @@ def test_picker_audit_strict() -> None:
     zero-hit words), frozen in tests/fixtures/picker_audit.json by
     debug/audit_picker.py --capture.
 
-    For each source (local dictionaries / Yomitan) x word x profile (mine /
-    beginner / native) the test recomputes the FULL ranking with
-    scoring.rank_definitions and pins it exactly (order, winner,
-    totals): given N definitions and one learner there is exactly ONE
-    correct comprehensibility ordering, so ANY move is a loud FAIL —
-    never a silent behavior change. It also pins:
+    For each source (local dictionaries / Yomitan) x word x profile
+    (mine / beginner / native) the test recomputes the ranking with
+    the CURRENT code and pins the WINNING pick (dictionary + content
+    hash + score) — the decision — without pinning the full ordering
+    (runner-up order is not a decision and must stay free to move).
+    It also pins:
     - rank()[0] == engine._pick_best() (picker/rank agreement);
     - order-independence (reversed input, same winner — Q-G2);
-    - profile sanity (beginner: all totals 0, most-kanji wins;
-      native: kanji_score == kanji_count);
+    - profile sanity (beginner: all scores 0, most-kanji wins;
+      native: kanji_score == kanji_count on cleaned text);
     - empty words rank empty and pick None (missing-word contract).
     Refresh workflow: change dictionaries/knowledge legitimately, then
-    re-run debug/audit_picker.py --capture --html and review the HTML
-    diff — the fixture diff shows exactly which picks moved and why.
+    re-run debug/audit_picker.py --capture --html (or --refreeze for
+    pure scoring changes) and review the HTML diff — the fixture diff
+    shows exactly which picks moved and why.
     """
     import scoring as scoring_mod
     import engine as engine_mod
@@ -2122,12 +2129,22 @@ def test_picker_audit_strict() -> None:
                 # The frozen rows store rounded densities; recompute the
                 # comparison on the same rounding so float repr can
                 # never cause a phantom drift.
-                live_rows = [(t, d, n) for t, d, _, n in live]
-                frozen_rows = [(r["dict"], r["density"], r["kanji_count"])
-                               for r in frozen]
-                check(f"audit: {label}/{profile} ranking frozen",
-                      live_rows == frozen_rows,
-                      f"live={live_rows[:3]} frozen={frozen_rows[:3]}")
+                live_winner = None
+                if ranked:
+                    (live_title, _), _ = ranked[0]
+                    live_winner = (live_title,
+                                   _picker_def_hash(ranked[0][0][1]))
+                frozen_winner = None
+                if frozen:
+                    frozen_winner = (frozen[0]["dict"], frozen[0]["hash"])
+                check(f"audit: {label}/{profile} winner frozen",
+                      live_winner == frozen_winner,
+                      f"live={live_winner} frozen={frozen_winner}")
+                if live and frozen:
+                    check(f"audit: {label}/{profile} winner score stable",
+                          live[0][1] == frozen[0]["density"]
+                          and live[0][3] == frozen[0]["kanji_count"],
+                          f"live={live[0]} frozen={frozen[0]}")
                 picked = engine_mod._pick_best(valid, kp, vp)
                 live_winner = ranked[0][0][1] if ranked else None
                 check(f"audit: {label}/{profile} picker agrees with rank",
@@ -2135,9 +2152,23 @@ def test_picker_audit_strict() -> None:
                 if valid:
                     rev = engine_mod._pick_best(
                         list(reversed(valid)), kp, vp)
-                    check(f"audit: {label}/{profile} order-independent",
-                          rev is not None and picked is not None
-                          and rev[1] == picked[1])
+                    # Unique best: reversed input must pick the same
+                    # winner. Exact tie at the top: encounter order
+                    # decides, so the reversed winner must be one of
+                    # the tied best (by design, not a bug).
+                    top = min((-res.density_total, -res.kanji_count)
+                              for _, res in scored)
+                    tied_defs = {d for (t, d), res in ranked
+                                 if (-res.density_total, -res.kanji_count)
+                                 == top}
+                    if len(tied_defs) == 1:
+                        check(f"audit: {label}/{profile} order-independent",
+                              rev is not None and picked is not None
+                              and rev[1] == picked[1])
+                    else:
+                        check(f"audit: {label}/{profile} tied best kept",
+                              rev is not None and rev[1] in tied_defs,
+                              f"{len(tied_defs)} tied")
                 else:
                     check(f"audit: {label}/{profile} empty picks None",
                           picked is None and ranked == [])

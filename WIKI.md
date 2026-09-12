@@ -180,15 +180,13 @@ Two deliberate properties:
 
 ## Step 6 — Ranking
 
-Best first, strict order — given $N$ definitions and one learner,
-there is exactly one correct ordering:
+Best first:
 
 1. Highest $\mathrm{score}(D)$.
-2. Tie-break: **most kanji** (among equals, prefer richer prose).
-3. Tie-break: dictionary title, then definition text.
+2. Tie-break: **most kanji**.
 
-Keys 2–3 compare the definitions themselves, never their positions in
-any list — shuffling the input can never change the winner.
+Exact ties keep encounter order, so a fixed input always yields the
+same winner.
 
 ---
 
@@ -198,24 +196,66 @@ Word **不公平**, 4 definitions, one learner: the repo owner, whose
 snapshot holds **1379 kanji and 1310 compounds** (totals only — the
 full lists live in the Learner Knowledge dialog, not here).
 
-### Pass 1 — clean each definition
+### Step 0 — the raw material
+
+The four stored definitions, exactly as parsed. Not human-readable — that is the point: everything above this section is what scoring starts from.
+
+<details><summary>デジタル大辞泉 — stored HTML (75 bytes, click to expand)</summary>
+
+```html
+ふ‐こうへい【不公平】<br>［名・形動］公平でないこと。片寄りがあること。また、そのさま。「不公平な扱いを受ける」<br>[派生]ふこうへいさ［名］
+```
+
+</details>
+
+<details><summary>三省堂国語辞典　第八版 — stored HTML (1678 bytes, click to expand)</summary>
+
+```html
+<span class="structured-content"><span class="gloss-sc-span" data-sc-name="見出部"><span class="gloss-sc-span" data-sc-name="見出仮名" style="font-weight: bold">ふ<span class="gloss-sc-span" data-sc-name="語構成" style="margin-right: 0.5em"></span>こ<span class="gloss-sc-span" data-sc-name="アクセント"><span class="gloss-sc-span" style="vertical-align: text-bottom"><img class="gloss-image" src="sankoku8/svg-accent/アクセント.svg" alt="image"></span></span>うへい</span><span class="gloss-sc-span" data-sc-name="表記G">［<span class="gloss-sc-span" data-sc-name="表記"><span class="gloss-sc-span" data-sc-name="教育漢字">不公平</span></span>］</span><span class="gloss-sc-span" data-sc-name="品詞G"><span class="gloss-sc-span" data-sc-name="品詞subG">｟<span class="gloss-sc-span" data-sc-name="品詞">名</span>・<span class="gloss-sc-span" data-sc-name="品詞"><span class="gloss-sc-span" data-sc-name="割書">ダナ</span></span>｠</span></span></span><div class="gloss-sc-div" data-sc-name="解説部"><div class="gloss-sc-div" data-sc-name="大語義"><div class="gloss-sc-div" data-sc-name="語義"><span class="gloss-sc-span" data-sc-name="語釈">あつかいが平等でないこと。</span><span class="gloss-sc-span" data-sc-name="対義語G">（↔<span class="gloss-sc-span" data-sc-name="対義語subG"><span class="gloss-sc-span" data-sc-name="対義語">公平</span></span>）</span></div></div><div class="gloss-sc-div" data-sc-name="派生語G"><span class="gloss-sc-span" style="vertical-align: text-bottom; margin-right: 0.25em"><img class="gloss-image" src="sankoku8/svg-logo/派.svg" alt="［派生語］"></span><span class="gloss-sc-span" data-sc-name="派生語"><span class="gloss-sc-span" data-sc-name="派生語見出"><span class="gloss-sc-span" data-sc-name="派生語省略">不公平</span>さ</span>。</span></div></div></span>
+```
+
+</details>
+
+<details><summary>大辞泉 第二版 — stored HTML (6184 bytes, click to expand)</summary>
+
+```html
+<span class="structured-content"><span class="gloss-sc-span" data-sc-html="" data-sc-lang="ja" data-sc-hmhtml="2" data-sc-xmlns="http://www.w3.org/1999/xhtml"><span class="gloss-sc-span" data-sc-body=""><div class="gloss-sc-div" data-sc-contents="" data-sc-xmlns=""><div class="gloss-sc-div" data-sc-見出g=""><span class="gloss-sc-span" data-sc-headword="" data-sc-見出="" data-sc-class="見出"><span class="gloss-sc-span">ふ</span><span class="gloss-sc-span" data-sc-hhyphen=""><span class="gloss-sc-span" data-sc-span="" data-sc-style="glyph:9769;"><span class="gloss-sc-span">‐</span></span></span><span class="gloss-sc-span">こうへい</span></span><span class="gloss-sc-span" data-sc-headword="" data-sc-表記="" data-sc-class="表記"><span class="gloss-sc-span">【不公平】</span></span><div class="gloss-sc-div" data-sc-maccentaudiog=""><span class="gloss-sc-span" data-sc-a="" data-sc-href="$c-accent"><span class="gloss-sc-span" data-sc-補足ロゴg=""><span class="gloss-sc-span" data-sc-補足ロゴ=""><span class="gloss-sc-span">アクセント</span></span></span></span><span class="gloss-sc-span"> ふこ</span><span class="gloss-sc-span" data-sc-maccentm=""><span class="gloss-sc-span">↓</span></span><span class="gloss-sc-span">うへい </span><span class="gloss-sc-span" data-sc-a="" data-sc-href="s00034429.aac"><span class="gloss-sc-span" data-sc-img="" data-sc-audio="" data-sc-class="audio" data-sc-src="Audio.png"></span></span></div></div><div class="gloss-sc-div" data-sc-解説g=""><div class="gloss-sc-div" data-sc-mg="" data-sc-id=""><div class="gloss-sc-div" data-sc-meaning=""><span class="gloss-sc-span" data-sc-hinshi="" data-sc-fm="" data-sc-class="FM"><span class="gloss-sc-span">〘</span><span class="gloss-sc-span" data-sc-a="" data-sc-href="$hi"><span class="gloss-sc-span">名・形動</span></span><span class="gloss-sc-span">〙</span></span><span class="gloss-sc-span">公平でないこと。片寄りがあること。また、そのさま。</span><span class="gloss-sc-span" data-sc-exg="" data-sc-id="319066-5001"><span class="gloss-sc-span">「―な扱いを受ける」</span></span></div></div><div class="gloss-sc-div" data-sc-mg="" data-sc-id=""><div class="gloss-sc-div" data-sc-meaning="" data-sc-c="" data-sc-class="C"><span class="gloss-sc-span" data-sc-a="" data-sc-href="$c-hasei"><span class="gloss-sc-span" data-sc-補足ロゴg=""><span class="gloss-sc-span" data-sc-補足ロゴ=""><span class="gloss-sc-span">派生</span></span></span></span><span class="gloss-sc-span"> </span><span class="gloss-sc-span" data-sc-bold=""><span class="gloss-sc-span">ふこうへいさ</span></span><span class="gloss-sc-span" data-sc-hinshi="" data-sc-bm="" data-sc-class="BM"><span class="gloss-sc-span">〘</span><span class="gloss-sc-span" data-sc-a="" data-sc-href="$hi"><span class="gloss-sc-span">名</span></span><span class="gloss-sc-span">〙</span></span></div><div class="gloss-sc-div" data-sc-meaning="" data-sc-c="" data-sc-class="C"><span class="gloss-sc-span" data-sc-a="" data-sc-href="$c-ruigo"><span class="gloss-sc-span" data-sc-補足ロゴg=""><span class="gloss-sc-span" data-sc-補足ロゴ=""><span class="gloss-sc-span">類語</span></span></span></span><span class="gloss-sc-span"> </span><a class="gloss-sc-a" href="?query=先入観&amp;wildcards=off"><span class="gloss-sc-span">先入観</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=先入主&amp;wildcards=off"><span class="gloss-sc-span">先入主</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=先入見&amp;wildcards=off"><span class="gloss-sc-span">先入見</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=僻目&amp;wildcards=off"><span class="gloss-sc-span">僻目</span><span class="gloss-sc-span" data-sc-wari=""><span class="gloss-sc-span">ひがめ</span></span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=贔屓目&amp;wildcards=off"><span class="gloss-sc-span">贔屓目</span><span class="gloss-sc-span" data-sc-wari=""><span class="gloss-sc-span">ひいきめ</span></span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=欲目&amp;wildcards=off"><span class="gloss-sc-span">欲目</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=固定観念&amp;wildcards=off"><span class="gloss-sc-span">固定観念</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏る&amp;wildcards=off"><span class="gloss-sc-span">偏る</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=不平等&amp;wildcards=off"><span class="gloss-sc-span">不平等</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏る&amp;wildcards=off"><span class="gloss-sc-span">偏る</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏する&amp;wildcards=off"><span class="gloss-sc-span">偏する</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏向&amp;wildcards=off"><span class="gloss-sc-span">偏向</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=僻する&amp;wildcards=off"><span class="gloss-sc-span">僻する</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏見&amp;wildcards=off"><span class="gloss-sc-span">偏見</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏在&amp;wildcards=off"><span class="gloss-sc-span">偏在</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏重&amp;wildcards=off"><span class="gloss-sc-span">偏重</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=偏頗&amp;wildcards=off"><span class="gloss-sc-span">偏頗</span><span class="gloss-sc-span" data-sc-wari=""><span class="gloss-sc-span">へんぱ</span></span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=差別&amp;wildcards=off"><span class="gloss-sc-span">差別</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=片手落ち&amp;wildcards=off"><span class="gloss-sc-span">片手落ち</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=バイアス&amp;wildcards=off"><span class="gloss-sc-span">バイアス</span></a><span class="gloss-sc-span">・</span><a class="gloss-sc-a" href="?query=アンフェア&amp;wildcards=off"><span class="gloss-sc-span">アンフェア</span></a></div></div></div></div></span></span></span>
+```
+
+</details>
+
+<details><summary>小学館例解学習国語 第十二版 — stored HTML (4528 bytes, click to expand)</summary>
+
+```html
+<span class="structured-content"><span class="gloss-sc-span" data-sc-html="" data-sc-hmhtml="5" data-sc-lang="ja" data-sc-xmlns="http://www.w3.org/1999/xhtml"><span class="gloss-sc-span" data-sc-body=""><div class="gloss-sc-div" data-sc-dic-item="" data-sc-dic_item="" data-sc-id="30055" data-sc-xmlns=""><div class="gloss-sc-div" data-sc-head2=""><span class="gloss-sc-span" data-sc-headword="" data-sc-rank="" data-sc-class="rank"><span class="gloss-sc-span" data-sc-rank="" data-sc-em="" data-sc-class="em"><span class="gloss-sc-span" data-sc-rank-num="" data-sc-rank_num=""><span class="gloss-sc-span">５</span></span></span><span class="gloss-sc-span" data-sc-em=""><span class="gloss-sc-span">ふこうへい</span></span></span><span class="gloss-sc-span" data-sc-headword="" data-sc-標準表記="" data-sc-class="標準表記"><span class="gloss-sc-span" data-sc-paren=""><span class="gloss-sc-span">【</span></span><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">不</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">４</span></rt></ruby><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">公</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">２</span></rt></ruby><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">平</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">３</span></rt></ruby><span class="gloss-sc-span" data-sc-paren=""><span class="gloss-sc-span">】</span></span></span><span class="gloss-sc-span" data-sc-posg=""><span class="gloss-sc-span"> </span><span class="gloss-sc-span" data-sc-pos="" data-sc-href="appendix/050_記号一覧.html#名・形動だな"><span class="gloss-sc-span" data-sc-ws=""><span class="gloss-sc-span">名・形動だな</span></span><span class="gloss-sc-span"> </span></span><span class="gloss-sc-span" data-sc-acc=""><span class="gloss-sc-span">フ</span><span class="gloss-sc-span" data-sc-b=""><span class="gloss-sc-span">コ</span></span><span class="gloss-sc-span">ーヘー</span></span></span></div><div class="gloss-sc-div" data-sc-div="" data-sc-main="" data-sc-class="main"><div class="gloss-sc-div" data-sc-meaning="" data-sc-id="30055-F001"><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">公</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">こう</span></rt></ruby><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">平</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">へい</span></rt></ruby><span class="gloss-sc-span">でないこと。えこひいきがあること。</span><a class="gloss-sc-a" href="?query=【例解】付録：記号一覧&amp;wildcards=off"><span class="gloss-sc-span" data-sc-bc="" data-sc-gray="" data-sc-class="gray" data-sc-alt="［例］"><span class="gloss-sc-span">例</span></span></a><span class="gloss-sc-span"> </span><span class="gloss-sc-span" data-sc-ex="" data-sc-id="30055-5001"><span class="gloss-sc-span" data-sc-b=""><span class="gloss-sc-span">不公平な</span></span><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">判</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">はん</span></rt></ruby><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">定</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">てい</span></rt></ruby><span class="gloss-sc-span">。</span></span><a class="gloss-sc-a" href="?query=【例解】付録：記号一覧&amp;wildcards=off"><span class="gloss-sc-span" data-sc-bs="" data-sc-blue="" data-sc-class="blue" data-sc-alt="［対］"><span class="gloss-sc-span">対</span></span></a><span class="gloss-sc-span"> </span><span class="gloss-sc-span" data-sc-ref=""><a class="gloss-sc-a" href="?query=公平&amp;wildcards=off"><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">公</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">こう</span></rt></ruby><ruby class="gloss-sc-ruby" data-sc-ruby=""><span class="gloss-sc-span" data-sc-rb=""><span class="gloss-sc-span">平</span></span><rt class="gloss-sc-rt" data-sc-rt=""><span class="gloss-sc-span">へい</span></rt></ruby></a></span><span class="gloss-sc-span">。</span></div></div></div></span></span></span>
+```
+
+</details>
+
+---
+
+### Pass 1
 
 Raw base text first, then what cleaning removes:
 
 - **三省堂国語辞典** (39 chars): no boilerplate. Headword 不公平
   appears twice (［不公平］ header, 不公平さ) → removed. Left:
   `ふこうへい［］｟名・ダナ｠あつかいが平等でないこと。（↔公平）さ。`
-  (33 chars)
+  (33 chars).
+  **Result:** 39 → 33 chars, 11 → 5 kanji counted.
 - **小学館例解学習国語** (57 chars): no boilerplate. Headword
   twice (【不公平】 header, 不公平な判定) → removed. (51 chars)
+  **Result:** 57 → 51 chars, 17 → 11 kanji counted.
 - **デジタル大辞泉** (67 chars): no boilerplate. Headword twice
   (【不公平】 header, 不公平な扱い) → removed. (61 chars)
+  **Result:** 67 → 61 chars, 18 → 12 kanji counted.
 - **大辞泉 第二版** (168 chars): the 類語 block goes first — 93
   characters of synonym links (先入観・贔屓目・偏見・偏頗 …),
   including 5 kanji the learner does **not** know (**偏**, **僻**,
-  **屓**, **贔**, **頗**) and 19 unknown compounds. Then the
-  headword (【不公平】 header) → removed. Left: 72 characters of
-  actual explanation.
+  **屓**, **贔**, **頗**) and 15 unknown compounds (the block's only
+  known compound is 不平等). Then the headword (【不公平】 header)
+  → removed. Left: 72 characters of actual explanation.
+  **Result:** 168 → 72 chars, 59 → 12 kanji counted.
 
 What stays: 三省堂's plain-text POS tag ｟名・ダナ｠ has no HTML
 markers, so its 名 survives as scoring input (known — harmless,
