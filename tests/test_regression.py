@@ -2203,7 +2203,8 @@ def _check_picker_grades(fixture: dict) -> None:
     - verdict "correct" -> PASS, counted in the agreement summary.
     """
     grades = fixture.get("grades", {})
-    total = sum(len(words) for words in grades.values())
+    total = sum(len(profiles)
+                for words in grades.values() for profiles in words.values())
     if not total:
         check("audit: no human grades recorded yet", True)
         return

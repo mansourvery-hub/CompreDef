@@ -3193,7 +3193,264 @@
    }
   ]
  },
- "grades": {},
+ "grades": {
+  "local": {
+   "1788225826910": {
+    "mine": {
+     "hash": "0a90b812ee49",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "ca03c8e0bfed",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "ca03c8e0bfed",
+     "verdict": "correct"
+    }
+   },
+   "1788226736721": {
+    "mine": {
+     "hash": "2286a4ea7b05",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "8f1713429b2e",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "8f1713429b2e",
+     "verdict": "correct"
+    }
+   },
+   "1788227111298": {
+    "mine": {
+     "hash": "f39d5acd7887",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "f39d5acd7887",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "f39d5acd7887",
+     "verdict": "correct"
+    }
+   },
+   "1788227860554": {
+    "mine": {
+     "hash": "9b97b75da6c4",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "cbc5ee69bed4",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "cbc5ee69bed4",
+     "verdict": "correct"
+    }
+   },
+   "1788229170093": {
+    "mine": {
+     "hash": "d172e3c30f35",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "d172e3c30f35",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "d172e3c30f35",
+     "verdict": "correct"
+    }
+   },
+   "1788229950449": {
+    "mine": {
+     "hash": "d58d882e67f0",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "f0c1af947dd9",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "f0c1af947dd9",
+     "verdict": "correct"
+    }
+   },
+   "1788230362277": {
+    "mine": {
+     "hash": "d25566659799",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "d25566659799",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "d25566659799",
+     "verdict": "correct"
+    }
+   },
+   "1788230976242": {
+    "mine": {
+     "hash": "b41a98b02af8",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "738dc1f3181d",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "738dc1f3181d",
+     "verdict": "correct"
+    }
+   }
+  },
+  "yomitan": {
+   "1788225826910": {
+    "mine": {
+     "hash": "d3d17a57a735",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "d3d17a57a735",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "d3d17a57a735",
+     "verdict": "correct"
+    }
+   },
+   "1788226736721": {
+    "mine": {
+     "hash": "c6c2984a6d1b",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "c6c2984a6d1b",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "c6c2984a6d1b",
+     "verdict": "correct"
+    }
+   },
+   "1788227111298": {
+    "mine": {
+     "hash": "56fb8aa00d52",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "b8b8f201f79b",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "b8b8f201f79b",
+     "verdict": "correct"
+    }
+   },
+   "1788227860554": {
+    "mine": {
+     "hash": "6a33749b56e4",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "8fc33c9389a3",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "8fc33c9389a3",
+     "verdict": "correct"
+    }
+   },
+   "1788229170093": {
+    "mine": {
+     "hash": "a26c378e0f74",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "a26c378e0f74",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "a26c378e0f74",
+     "verdict": "correct"
+    }
+   },
+   "1788229490686": {
+    "mine": {
+     "hash": "c7cfe362fb46",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "c7cfe362fb46",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "c7cfe362fb46",
+     "verdict": "correct"
+    }
+   },
+   "1788229950449": {
+    "mine": {
+     "hash": "ab74b4834d05",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "ab74b4834d05",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "ab74b4834d05",
+     "verdict": "correct"
+    }
+   },
+   "1788230362277": {
+    "mine": {
+     "hash": "3490370d4260",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "3490370d4260",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "3490370d4260",
+     "verdict": "correct"
+    }
+   },
+   "1788230976242": {
+    "mine": {
+     "hash": "15c2a2c670da",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "96702ddf83b5",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "96702ddf83b5",
+     "verdict": "correct"
+    }
+   },
+   "1788231002801": {
+    "mine": {
+     "hash": "529a5be075df",
+     "verdict": "correct"
+    },
+    "beginner": {
+     "hash": "529a5be075df",
+     "verdict": "correct"
+    },
+    "native": {
+     "hash": "529a5be075df",
+     "verdict": "correct"
+    }
+   }
+  }
+ },
  "expected": {
   "local": {
    "1788225826910": {

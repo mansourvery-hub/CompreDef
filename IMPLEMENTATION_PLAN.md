@@ -52,6 +52,9 @@ Backlog at the bottom — never by silent scope creep mid-session.
   POS tags) stripped via a depth-counted HTML parser, headword
   self-mentions excluded (multi-char terms only), shared
   `scoring_base_text` for kanji + vocab paths.
+- **T15 — Human grading verdicts.** All 54 ★ picks (11 words x
+  2 sources x 3 profiles, minus empty cases) graded correct by the
+  owner; agreement pinned at 54/54 by `test_picker_audit_strict`.
 
 ## Dependency graph (historical — all edges satisfied)
 
@@ -71,11 +74,7 @@ T11 covers all (release)
 
 ## Backlog
 
-- **T15 — Human grading verdicts (OPEN — owner's homework).** Grade
-  the ★ picks in `debug/reports/picker_audit_*.html` as correct/wrong
-  in chat; verdicts are recorded via
-  `debug/audit_picker.py --import-grades` and the suite checks
-  agreement (a `wrong` FAILs until the picker is fixed).
+Empty. All 15 slices shipped; new work enters here per request.
 
 ## Working agreements (from experience)
 
