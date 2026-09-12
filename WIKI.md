@@ -198,7 +198,7 @@ full lists live in the Learner Knowledge dialog, not here).
 
 ### Step 0 — the raw material
 
-The four stored definitions, exactly as parsed. Not human-readable — that is the point: everything above this section is what scoring starts from.
+The four stored definitions, exactly as parsed. Not human-readable — that is the point: everything below this section is what scoring starts from.
 
 <details><summary>デジタル大辞泉 — stored HTML (75 bytes, click to expand)</summary>
 
@@ -234,7 +234,40 @@ The four stored definitions, exactly as parsed. Not human-readable — that is t
 
 ---
 
-### Pass 1
+### Pass 1 — from stored HTML to scoring text
+
+One definition travels three micro-steps before a single kanji is
+counted. All three live in `scoring.py` and are combined by
+`scoring_base_text` (which `score_definition` calls first). Display
+is never touched — the Anki card keeps the full HTML from Step 0.
+
+**Micro-step 1a — drop the boilerplate**
+(`strip_scoring_boilerplate`). A parser from Python's standard
+`html.parser` library walks the HTML tag by tag, keeping a stack of
+open elements. It drops exactly two shapes: the thesaurus section
+(the element carrying `data-sc-href="$c-ruigo"`, plus its whole
+enclosing `<div>`) and part-of-speech tags (any element carrying
+`data-sc-hinshi`). Everything without these markers passes through
+byte-identical, and if parsing ever surprises, the input is returned
+unchanged — scoring degrades to un-stripped, never to empty.
+Here only 大辞泉 has tagged boilerplate; the other three pass
+through untouched. 三省堂's ｟名・ダナ｠ looks like a POS tag but
+carries no HTML markers (plain text), so it survives — accepted
+noise, documented below.
+
+**Micro-step 1b — base text** (`extract_base_text` in `utils.py`).
+Three regex passes: first delete `<rt>`/`<rp>` elements (furigana
+readings — e.g. 小学館's header ruby 不[4]公[2]平[3] contributes the
+kanji 不公平 but its readings ４２３ must not), then delete all
+remaining tags, then unescape entities. What remains is plain
+readable text.
+
+**Micro-step 1c — remove the headword** (`remove_excluded_terms`).
+Plain substring deletion of the defined word 不公平 from the base
+text. The learner looked the word up because it is unknown, so its
+self-mentions (headers included) earn nothing. Only multi-character
+terms are deleted — excluding a single kanji would wipe a common
+character everywhere.
 
 Raw base text first, then what cleaning removes:
 
@@ -263,8 +296,13 @@ documented noise).
 
 ### Pass 2 — kanji view: type each definition, highlight what is known
 
-Same cleaned text as Pass 1, typed a first time with every **known**
-kanji highlighted and every **unknown** kanji bold. Kana and
+How: `score_definition` in `scoring.py` runs the regex
+`[\u4e00-\u9fff]` over the Pass-1 scoring text and finds every kanji
+occurrence. Each one is looked up in the learner's kanji points
+(`point(k)`, Step 1 — 1.0 for a year-old interval, 0 for unknown)
+and the points are summed. Same cleaned text as Pass 1, typed here a
+first time with every **known** kanji highlighted and every
+**unknown** kanji bold. Kana and
 punctuation stay plain — they are never scored.
 
 **三省堂国語辞典** — 5 occurrences, all known → $5/5 = 1.0$:
@@ -289,8 +327,15 @@ four; the decision moves to compounds entirely.
 
 ### Pass 3 — compound view: type each definition again, highlight the words
 
-Same text typed a second time, now with every **known compound**
-highlighted and every **unknown** compound bold. Single kanji stay
+How: `extract_kanji_words` in `scoring.py` runs one regex pass that
+collects maximal runs of 2+ kanji (会社, 不公平) — no dictionary, no
+network, no MeCab; runs split at any kana or punctuation, which is
+also why okurigana inflections (偏る → 偏) never pollute vocab.
+Each distinct run is looked up in the learner's vocab points and the
+points are summed; a definition with no runs scores 0 here (no
+signal, not a penalty). Same text typed a second time, now with
+every **known compound** highlighted and every **unknown** compound
+bold. Single kanji stay
 plain here — they already had their turn in Pass 2; only
 multi-kanji runs score as words.
 
@@ -312,6 +357,13 @@ multi-kanji runs score as words.
 
 ### Pass 4 — score and rank
 
+How: `DensityPicker.rank_key` in `picker.py` turns each result into
+the pair `(-density, -kanji_count)` and Python's stable sort orders
+lowest first — so the highest score wins, then the most kanji, and
+exact ties keep encounter order. `pick_best` walks the same keys in
+one pass, which is why the ranked list and the generated pick can
+never disagree.
+
 | dictionary | kanji | vocab | **score** |
 |---|---|---|---|
 | 三省堂国語辞典 | $5/5 = 1.0$ | $2/2 = 1.0$ | **2.0** ★ |
@@ -319,8 +371,9 @@ multi-kanji runs score as words.
 | デジタル大辞泉 | $12/12 = 1.0$ | $1/4 = 0.25$ | 1.25 |
 | 大辞泉 第二版 | $12/12 = 1.0$ | $1/4 = 0.25$ | 1.25 |
 
-デジタル大辞泉 and 大辞泉 tie on everything (1.25, 12 kanji) — the
-tertiary key decides: デジタル大辞泉 sorts before 大辞泉 第二版.
+**Result:** 三省堂 wins outright at 2.0. デジタル大辞泉 and 大辞泉
+tie exactly (1.25, 12 kanji each) — encounter order keeps デジタル
+(the earlier candidate) ahead of 大辞泉.
 
 三省堂 wins because it is the only definition whose every compound
 is known. Under the old raw sums 大辞泉 won with 49 points of
