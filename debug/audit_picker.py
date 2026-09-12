@@ -4,7 +4,7 @@ debug/audit_picker.py — Offline dictionary-picker audit (Ring 2/3 tooling).
 
 Compares every dictionary's definition for each card of the user's
 real 10-card deck, under 3 learner profiles (mine / beginner / native)
-and both dictionary sources (local ladder / Yomitan bridge), then
+and both dictionary sources (local dictionaries / Yomitan bridge), then
 writes a human-readable HTML report for grading.
 
 NOT part of the regression suite and NEVER run by CI, build.sh or
@@ -110,7 +110,7 @@ def _ac(action: str, **params):  # type: ignore[no-untyped-def]
 
 
 def _installed_config() -> dict:
-    """The user's REAL add-on config (ladder, scope, targets)."""
+    """The user's REAL add-on config (dictionaries, scope, targets)."""
     with open(INSTALLED_META, encoding="utf-8") as f:
         meta = json.load(f)
     cfg = meta.get("config")
@@ -119,12 +119,12 @@ def _installed_config() -> dict:
     return cfg
 
 
-def _native_points(candidates: list) -> tuple:
+def _native_points(candidates: list, exclude: tuple = ()) -> tuple:
     """A Japanese native knows every kanji/compound in the candidates."""
     kanji: dict = {}
     vocab: dict = {}
     for title, definition in candidates:
-        base = utils_mod.extract_base_text(definition)
+        base = scoring_mod.scoring_base_text(definition, exclude)
         for ch in set(c for c in base if "\u4e00" <= c <= "\u9fff"):
             kanji[ch] = 1.0
         for word in scoring_mod.extract_kanji_words(base):
@@ -132,24 +132,26 @@ def _native_points(candidates: list) -> tuple:
     return kanji, vocab
 
 
-def _profile_points(profile: str, mine: dict, candidates: list) -> tuple:
+def _profile_points(profile: str, mine: dict, candidates: list,
+                    exclude: tuple = ()) -> tuple:
     """(kanji_points, vocab_points) for one audit profile."""
     if profile == "mine":
         return mine["kanji"], mine["vocab"]
     if profile == "beginner":
-        # Total beginner: knows no words and no kanji — every total is
+        # Total beginner: knows no words and no kanji — every score is
         # 0.0, so the ranking is pure tie-break (most kanji first).
         return {}, {}
     if profile == "native":
-        return _native_points(candidates)
+        return _native_points(candidates, exclude)
     raise ValueError(f"unknown profile {profile!r}")
 
 
-def _ranked(candidates: list, kanji: dict, vocab: dict) -> list:
+def _ranked(candidates: list, kanji: dict, vocab: dict,
+            exclude: tuple = ()) -> list:
     """picker.rank_definitions as JSON-able rows (best first)."""
     out = []
     for (title, definition), res in picker_mod.rank_definitions(
-            candidates, kanji, vocab):
+            candidates, kanji, vocab, exclude=exclude):
         out.append({
             "dict": title,
             "hash": _def_hash(definition),
@@ -272,14 +274,14 @@ def _capture_mine_points(scope_decks: list) -> dict:
             "mature_notes": len(rows)}
 
 
-def _capture_local(words: list, ladder: list) -> dict:
-    """Every ladder dictionary's raw entries per word (unfiltered)."""
+def _capture_local(words: list, dictionary_paths: list) -> dict:
+    """Every dictionary's raw entries per word (unfiltered)."""
     from provider import LocalSQLiteProvider
     provider = LocalSQLiteProvider(PROFILE_CACHE)
     out: dict = {}
     for item in words:
         per_word = []
-        for path in ladder:
+        for path in dictionary_paths:
             try:
                 entries = provider.lookup_by_path(
                     path, item["word"], item["reading"])
@@ -320,20 +322,20 @@ def _capture_yomitan(words: list) -> dict:
 def cmd_capture(words_file: str = "") -> dict:
     """Runs the full live capture and writes the frozen fixture."""
     cfg = _installed_config()
-    ladder = utils_mod.resolve_ladder_paths(
+    dictionary_paths = utils_mod.resolve_dictionary_paths(
         cfg.get("dictionaries"), cfg.get("dictionary_folder", ""),
         cfg.get("disabled_dictionaries"))
-    if not ladder:
+    if not dictionary_paths:
         raise RuntimeError("no dictionaries in installed config")
     scope = cfg.get("scope_decks") or []
-    print(f"ladder ({len(ladder)}):")
-    for path in ladder:
+    print(f"dictionaries ({len(dictionary_paths)}):")
+    for path in dictionary_paths:
         print(f"  - {path}")
     print(f"scope: {scope}")
     words = _capture_words(words_file)
     print(f"words: {len(words)}")
     mine = _capture_mine_points(scope)
-    local = _capture_local(words, ladder)
+    local = _capture_local(words, dictionary_paths)
     yomitan = _capture_yomitan(words)
     try:
         from provider import LocalSQLiteProvider
@@ -345,7 +347,7 @@ def cmd_capture(words_file: str = "") -> dict:
             "captured_at": datetime.datetime.now().isoformat(
                 timespec="seconds"),
             "deck": TARGET_DECK,
-            "ladder": ladder,
+            "dictionaries": dictionary_paths,
             "scope": scope,
             "renderer_version": renderer_version,
             "strategy": picker_mod.get_active_strategy().name,
@@ -382,16 +384,17 @@ def _compute_expected(words: list, mine: dict, local: dict, yomitan: dict) -> di
         for item in words:
             nid = str(item["note_id"])
             cands = _filtered_candidates(raws[source].get(nid, []))
+            exclude = (item["word"],) if item.get("word") else ()
             per_profile = {}
             for profile in PROFILES:
-                kp, vp = _profile_points(profile, mine, cands)
+                kp, vp = _profile_points(profile, mine, cands, exclude)
                 per_profile[profile] = [
                     {"dict": title, "hash": _def_hash(defn),
                      "density": round(res.density_total, 4),
                      "total": round(res.total_score, 3),
                      "kanji_count": res.kanji_count}
                     for (title, defn), res in picker_mod.rank_definitions(
-                        cands, kp, vp)
+                        cands, kp, vp, exclude=exclude)
                 ]
             expected[source][nid] = per_profile
     return expected
@@ -430,8 +433,8 @@ def _short_dict(title: str) -> str:
 def _html_head(fixture: dict) -> str:
     meta = fixture["meta"]
     mine = fixture["mine"]
-    ladder_items = "".join(
-        f"<li>{html_mod.escape(p)}</li>" for p in meta["ladder"])
+    dictionary_items = "".join(
+        f"<li>{html_mod.escape(p)}</li>" for p in meta["dictionaries"])
     return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <title>CompreDef picker audit — {meta["captured_at"]}</title>
@@ -466,7 +469,7 @@ full ranking. Grey rows in rankings = cross-reference titles the picker
 drops (shown, never picked unless alone). 「no entry」= that dictionary
 has nothing for the word.</p>
 {_html_matrix(fixture)}
-<h2>Ladder ({len(meta["ladder"])})</h2><ol>{ladder_items}</ol>"""
+<h2>Dictionaries ({len(meta["dictionaries"])})</h2><ol>{dictionary_items}</ol>"""
 
 
 def _html_matrix(fixture: dict) -> str:
@@ -485,11 +488,12 @@ def _html_matrix(fixture: dict) -> str:
         for source in SOURCES:
             raw = fixture[source].get(nid, [])
             cands = _filtered_candidates(raw)
+            exclude = (item["word"],) if item.get("word") else ()
             for profiles in (("mine",), ("beginner", "native")):
                 parts = []
                 for profile in profiles:
-                    kp, vp = _profile_points(profile, mine, cands)
-                    ranked = _ranked(cands, kp, vp)
+                    kp, vp = _profile_points(profile, mine, cands, exclude)
+                    ranked = _ranked(cands, kp, vp, exclude)
                     if ranked:
                         parts.append(
                             f"{html_mod.escape(_short_dict(ranked[0]['dict']))} "
@@ -519,14 +523,15 @@ def _html_word(fixture: dict, item: dict, open_first: bool) -> str:
     for source in SOURCES:
         raw = fixture[source].get(nid, [])
         cands = _filtered_candidates(raw)
+        exclude = (item["word"],) if item.get("word") else ()
         chunks.append(f"<h3>{source} — {len(cands)} candidates "
                       f"({len(raw)} raw)</h3>")
         if not cands:
             chunks.append("<p><em>no entry in any dictionary.</em></p>")
             continue
         for profile in PROFILES:
-            kp, vp = _profile_points(profile, mine, cands)
-            ranked = _ranked(cands, kp, vp)
+            kp, vp = _profile_points(profile, mine, cands, exclude)
+            ranked = _ranked(cands, kp, vp, exclude)
             frozen = fixture["expected"][source][nid][profile]
             live_order = [r["hash"] for r in ranked]
             frozen_order = [r["hash"] for r in frozen]
@@ -587,6 +592,27 @@ def cmd_import_grades(path: str) -> None:
     print(f"merged {count} grades into {FIXTURE_PATH}")
 
 
+def cmd_refreeze() -> None:
+    """Recomputes frozen expectations from the stored candidates.
+
+    No network, no databases: reads the fixture's captured words,
+    candidates and knowledge, re-ranks with the CURRENT picker code,
+    and overwrites `expected` (+ strategy + timestamp). For scoring
+    changes like headword exclusion or boilerplate stripping, where
+    the captured definitions are still valid but their order moves.
+    """
+    fixture = _load_fixture()
+    fixture["expected"] = _compute_expected(
+        fixture["words"], fixture["mine"],
+        fixture["local"], fixture["yomitan"])
+    fixture["meta"]["strategy"] = picker_mod.get_active_strategy().name
+    fixture["meta"]["refrozen_at"] = datetime.datetime.now().isoformat(
+        timespec="seconds")
+    with open(FIXTURE_PATH, "w", encoding="utf-8") as f:
+        json.dump(fixture, f, ensure_ascii=False, indent=1)
+    print(f"refrozen expectations in {FIXTURE_PATH}")
+
+
 def main(argv: list = None) -> int:  # type: ignore[assignment]
     """CLI entry point (--capture and/or --html, --import-grades)."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -594,14 +620,23 @@ def main(argv: list = None) -> int:  # type: ignore[assignment]
                         help="live capture -> frozen fixture")
     parser.add_argument("--html", action="store_true",
                         help="fixture -> human HTML report")
+    parser.add_argument("--refreeze", action="store_true",
+                        help="recompute frozen expectations with current code")
     parser.add_argument("--words-file", default="",
                         help="JSON word list (used when Anki is closed)")
     parser.add_argument("--import-grades", default="", metavar="FILE",
-                        help="merge exported grades JSON into the fixture")
+                        help="merge grades JSON into the fixture")
     args = parser.parse_args(argv)
     if args.import_grades:
         try:
             cmd_import_grades(args.import_grades)
+        except Exception as e:  # noqa: BLE001 — debug tool fails loud
+            print(f"audit_picker FAILED: {e}")
+            return 1
+        return 0
+    if args.refreeze:
+        try:
+            cmd_refreeze()
         except Exception as e:  # noqa: BLE001 — debug tool fails loud
             print(f"audit_picker FAILED: {e}")
             return 1

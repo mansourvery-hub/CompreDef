@@ -1,5 +1,6 @@
 import re
-from typing import Dict, Set
+from html.parser import HTMLParser
+from typing import Dict, Iterable, Set
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
@@ -46,6 +47,15 @@ def extract_kanji_words(text: str) -> Set[str]:
     (会社, 不公平). Single kanji are kanji-score territory; runs split
     at any non-kanji character, mirroring how compounds appear inside
     Japanese definitions.
+
+    Deliberately NOT a morphological analyzer (MeCab is an explicit
+    non-goal: heavy native dependency inside Anki, version drift).
+    Consequences, accepted: runs can glue adjacent compounds when no
+    kana/punctuation separates them (rare in prose; synonym lists are
+    stripped before this ever runs), and okurigana splits inflections
+    (偏る → 偏, correctly kept OUT of vocab — inflection-robust by
+    construction). Deterministic on every machine, which a MeCab
+    version never is.
     """
     if not text:
         return set()
@@ -56,10 +66,136 @@ def extract_kanji_words(text: str) -> Set[str]:
     }
 
 
+class _BoilerplateStripper(HTMLParser):
+    """Drops dictionary boilerplate elements for SCORING ONLY.
+
+    Display keeps the full rich HTML (synonym lists are useful to
+    read); scoring must not reward or punish them:
+    - thesaurus sections: <div data-sc-href="$c-ruigo">…</div>
+      (the 類語 synonym chains — dozens of compounds that say nothing
+      about how readable the explanation is);
+    - part-of-speech tags: any element with data-sc-hinshi
+      (〘名〙 and friends — grammatical labels, not prose).
+    Depth-counted so nested markup can never leak residue; anything
+    without these markers passes through byte-identical. Plain-text
+    POS labels (三省堂's ｟名・ダナ｠) carry no tags and are accepted
+    noise (1–2 kanji, bounded effect — documented, not stripped,
+    because tag-less stripping would eat real prose).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        # Stack depth (len of _stack) to pop back to before emitting
+        # again; None = not dropping. The stack itself is ALWAYS
+        # maintained so unbalanced markup can never corrupt tracking.
+        self._drop_until: int | None = None
+        self._stack: list = []
+        self._out: list = []
+
+    def _is_boilerplate(self, attrs: list) -> bool:
+        attr_map = dict(attrs)
+        return (attr_map.get("data-sc-href") == "$c-ruigo"
+                or "data-sc-hinshi" in attr_map)
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        self._stack.append((tag, attrs))
+        if self._drop_until is not None:
+            return
+        if self._is_boilerplate(attrs):
+            if "data-sc-hinshi" in dict(attrs):
+                # Part-of-speech tag: drop just this element.
+                self._drop_until = len(self._stack)
+            else:
+                # Thesaurus marker ($c-ruigo) sits on an inner label
+                # span — the section is the nearest enclosing div.
+                # No enclosing div: drop just the marked element.
+                self._drop_until = len(self._stack)
+                for depth, (open_tag, _) in enumerate(self._stack):
+                    if open_tag == "div":
+                        self._drop_until = depth
+            return
+        self._out.append(self.get_starttag_text())
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._stack:
+            self._stack.pop()
+        if self._drop_until is not None:
+            if len(self._stack) <= self._drop_until:
+                self._drop_until = None
+            return
+        self._out.append(f"</{tag}>")
+
+    def handle_startendtag(self, tag: str, attrs: list) -> None:
+        if self._drop_until is None and not self._is_boilerplate(attrs):
+            self._out.append(self.get_starttag_text())
+
+    def handle_data(self, data: str) -> None:
+        if self._drop_until is None:
+            self._out.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._drop_until is None:
+            self._out.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._drop_until is None:
+            self._out.append(f"&#{name};")
+
+    def result(self) -> str:
+        return "".join(self._out)
+
+
+def strip_scoring_boilerplate(html_text: str) -> str:
+    """Removes boilerplate sections from a definition's HTML (scoring input).
+
+    Never raises: on any parse surprise the input is returned unchanged
+    (scoring must degrade to un-stripped, never to empty).
+    """
+    if not html_text or "<" not in html_text:
+        return html_text
+    try:
+        stripper = _BoilerplateStripper()
+        stripper.feed(html_text)
+        stripper.close()
+        return stripper.result()
+    except Exception:
+        return html_text
+
+
+def remove_excluded_terms(text: str, exclude: Iterable[str] = ()) -> str:
+    """Removes headword self-mentions from scoring text.
+
+    A definition that repeats the defined word (不公平 inside 不公平's
+    own entry, header included) must not earn points for it — the
+    learner looked the word up precisely because it is unknown.
+    Only multi-character terms are removed: excluding a single kanji
+    would wipe every occurrence of a common character. Substring
+    removal can split a longer compound (documented, rare — true word
+    boundaries need a morphological analyzer, an explicit non-goal).
+    """
+    if not text or not exclude:
+        return text
+    for term in exclude:
+        if term and isinstance(term, str) and len(term) >= 2:
+            text = text.replace(term, "")
+    return text
+
+
+def scoring_base_text(html_or_text: str,
+                       exclude: Iterable[str] = ()) -> str:
+    """The exact text scoring runs on: boilerplate stripped, base text
+    extracted, headword self-mentions removed. Shared by kanji AND
+    vocab extraction so both always agree on what counts."""
+    return remove_excluded_terms(
+        extract_base_text(strip_scoring_boilerplate(html_or_text)),
+        exclude)
+
+
 def score_definition(
     html_or_text: str,
     kanji_points: Dict[str, float],
     vocab_points: Dict[str, float],
+    exclude: Iterable[str] = (),
 ) -> ScoringResult:
     """
     v1.2 definition scorer: interval-weighted kanji + vocab points.
@@ -81,10 +217,15 @@ def score_definition(
       (0.0 when the definition holds no compounds),
     - density_total = kanji_density + vocab_density.
 
+    Scoring input (see scoring_base_text): boilerplate sections
+    (thesaurus lists, POS tags) are stripped, then every `exclude`
+    surface form (the defined headword — looking a word up proves it
+    unknown) is removed, and only then are kanji/compounds counted.
+
     Kept for compatibility: `score` (normalized 0..1 over the kanji
     count) and `is_perfect` so legacy call sites keep working.
     """
-    clean_text = extract_base_text(html_or_text)
+    clean_text = scoring_base_text(html_or_text, exclude)
     kanji_in_text = _KANJI_RE.findall(clean_text)
 
     kanji_score = 0.0

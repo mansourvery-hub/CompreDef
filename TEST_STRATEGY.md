@@ -36,13 +36,14 @@ only). Everything needing Anki/DB/Qt/network lives in Ring 1+ with
 fakes. No function is tested in two places — the map below is the
 single source of truth; keep it current when adding functions.
 
-- `utils.py` — Ring 0: `normalize_reading`, `resolve_ladder_paths`,
+- `utils.py` — Ring 0: `normalize_reading`, `resolve_dictionary_paths`,
   `is_zip_dictionary`, `is_directory_dictionary`,
   `find_dictionary_folders` (+ `extract_base_text` edges). Ring 1:
   `extract_clean_word`, `parse_furigana_field`, `merge_type_targets`
   (matrices need richer fixtures than plain params allow).
 - `scoring.py` — Ring 0: `calculate_kanji_score` edges,
-  density fields (raw sums kept alongside). Ring 1:
+  density fields (raw sums kept alongside), headword exclusion,
+  boilerplate stripping, scoring-text sharing. Ring 1:
   `is_reference_title`, `extract_kanji_words`, `score_definition`
   (spec-level behavior with realistic prose), `test_picker_audit_strict`
   (frozen full rankings over the real 11-note deck fixture).
@@ -51,7 +52,7 @@ single source of truth; keep it current when adding functions.
   strategy/rank/`pick_best` agreement, frozen winners,
   order-independence, human-grade agreement (`test_picker_audit_strict`,
   `test_v12_scoring_algorithm` §7). Candidate gathering
-  (`collect_ladder_candidates`) is covered through `generate` paths;
+  (`collect_dictionary_candidates`) is covered through `generate` paths;
   engine keeps only thin delegates.
 - `scope.py` — Ring 0: `get_scope_decks`, `expand_scope_names`,
   `missing_scope_decks`, `is_scope_empty`, `_note_type_name` (bare

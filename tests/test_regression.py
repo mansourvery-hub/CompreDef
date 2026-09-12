@@ -26,7 +26,7 @@ HISTORICAL BUG MAP (bug -> test):
      forever                      -> test_renderer_version_invalidates_cache
   3. Furigana <rt> readings polluted kanji scores
                                   -> test_scoring_ignores_furigana
-  4. Ladder returned advanced def when a simpler one existed
+  4. Advanced def won when a simpler one existed
                                   -> test_order_independent_argmax
   5. Cross-reference titles won over real definitions
                                   -> test_reference_title_filtering
@@ -2009,16 +2009,17 @@ PICKER_AUDIT_FIXTURE = os.path.join(
 
 
 def _picker_audit_points(fixture: dict, profile: str,
-                         candidates: list) -> tuple:
+                         candidates: list,
+                         exclude: tuple = ()) -> tuple:
     """(kanji_points, vocab_points) for one audit profile.
 
     Mirrors debug/audit_picker.py (which never ships, so the suite
-    cannot import it — this 10-line twin is the price of that rule).
+    cannot import it — this small twin is the price of that rule).
     mine = frozen interval-weighted snapshot; beginner = nothing;
-    native = every kanji/compound in the candidates at 1.0.
+    native = every kanji/compound in the scoring-cleaned candidates
+    at 1.0.
     """
     import scoring as scoring_mod
-    import utils as utils_mod
     if profile == "mine":
         return fixture["mine"]["kanji"], fixture["mine"]["vocab"]
     if profile == "beginner":
@@ -2026,7 +2027,7 @@ def _picker_audit_points(fixture: dict, profile: str,
     kanji: dict = {}
     vocab: dict = {}
     for _, definition in candidates:
-        base = utils_mod.extract_base_text(definition)
+        base = scoring_mod.scoring_base_text(definition, exclude)
         for ch in set(c for c in base if "\u4e00" <= c <= "\u9fff"):
             kanji[ch] = 1.0
         for word in scoring_mod.extract_kanji_words(base):
@@ -2042,7 +2043,7 @@ def test_picker_audit_strict() -> None:
     zero-hit words), frozen in tests/fixtures/picker_audit.json by
     debug/audit_picker.py --capture.
 
-    For each source (local ladder / Yomitan) x word x profile (mine /
+    For each source (local dictionaries / Yomitan) x word x profile (mine /
     beginner / native) the test recomputes the FULL ranking with
     scoring.rank_definitions and pins it exactly (order, winner,
     totals): given N definitions and one learner there is exactly ONE
@@ -2100,15 +2101,19 @@ def test_picker_audit_strict() -> None:
             label = f"{source}:{item['word'] or '(empty)'}"
             raw = fixture[source].get(nid, [])
             entries = [DictionaryEntry(
-                word="", reading="", definition=c["definition"],
+                word=item["word"], reading="", definition=c["definition"],
                 dictionary_title=c["dict"],
                 dictionary_path=c.get("path", "")) for c in raw]
             valid = engine_mod._filter_valid_entries(entries)
             cands = [(e.dictionary_title, e.definition) for e in valid]
+            exclude = (item["word"],) if item.get("word") else ()
             for profile in ("mine", "beginner", "native"):
-                kp, vp = _picker_audit_points(fixture, profile, cands)
-                ranked = picker_mod.rank_definitions(cands, kp, vp)
-                scored = [(t, scoring_mod.score_definition(d, kp, vp))
+                kp, vp = _picker_audit_points(fixture, profile, cands,
+                                              exclude)
+                ranked = picker_mod.rank_definitions(cands, kp, vp,
+                                                     exclude=exclude)
+                scored = [(t, scoring_mod.score_definition(d, kp, vp,
+                                                           exclude))
                           for (t, d), _ in ranked]
                 live = [(t, round(res.density_total, 4),
                          round(res.total_score, 3), res.kanji_count)
@@ -2629,14 +2634,14 @@ def test_package_relative_imports() -> None:
             "models": ["DictionaryEntry"],
             "scoring": ["calculate_kanji_score", "is_reference_title"],
             "picker": ["PickerStrategy", "DensityPicker", "LegacySumPicker",
-                       "rank_definitions", "pick_best", "collect_ladder_candidates",
+                       "rank_definitions", "pick_best", "collect_dictionary_candidates",
                        "filter_valid_entries", "get_active_strategy"],
             "scope": ["get_scope_decks", "expand_scope_names",
                       "note_in_scope", "implied_note_types", "scope_dids",
                       "is_scope_empty", "note_deck_names",
                       "resolve_deck_for_note"],
             "utils": ["extract_clean_word", "extract_base_text",
-                      "parse_furigana_field", "resolve_ladder_paths"],
+                      "parse_furigana_field", "resolve_dictionary_paths"],
             "parser": ["get_single_dictionary", "RENDERER_VERSION",
                        "parse_furigana_field"],
             "generator": ["generate_definition"],
@@ -3369,9 +3374,9 @@ def test_knowledge_survives_new_schema(tmp_root: str) -> None:
 def test_config_survives_yomitan_toggle() -> None:
     """
     Regression for v1.0.27 bug: switching Dictionary Source to Yomitan
-    and closing the dialog wiped Local ladder and Note Types targets.
+    and closing the dialog wiped local dictionaries and Note Types targets.
 
-    The dialog's early save (before _load_config populates the ladder)
+    The dialog's early save (before _load_config populates the list)
     wrote {"dictionaries":[],"targets":{}} over the real config, and
     install_local.sh deleting meta.json made it permanent. The fix
     preserves previous config when the UI list is empty but previous
@@ -3464,7 +3469,7 @@ def test_yomitan_provider_implements_full_surface() -> None:
     delegates install/_compute_signature/_iter_term_banks to whatever
     get_provider() returns, but YomitanApiProvider lacked the latter
     two (and db_path). Unreachable in normal flows today (the engine
-    bypasses the local ladder in Yomitan mode), but one GUI path away
+    bypasses the local dictionaries in Yomitan mode), but one GUI path away
     from a crash — so the no-network surface is asserted directly.
     (is_installed/lookup are skipped: they hit the network/bridge.)
     """
@@ -3830,7 +3835,7 @@ def test_yomitan_term_list_loses_to_real_definition() -> None:
     cfgs["1619602654"] = {"dictionary_source": "yomitan"}
     try:
         gen = engine_mod.DefinitionGenerator(provider=None, known_kanji=known)
-        result = gen.generate("会社", ladder_paths=[], reading="かいしゃ")
+        result = gen.generate("会社", dictionary_paths=[], reading="かいしゃ")
     finally:
         engine_mod.fetch_yomitan_definitions = original_fetch  # type: ignore
         if had_key:
@@ -3866,7 +3871,7 @@ def test_yomitan_returns_single_best_definition() -> None:
     try:
         gen = engine_mod.DefinitionGenerator(
             provider=None, known_kanji={"不", "公", "平"})
-        result = gen.generate("不公平", ladder_paths=[], reading="ふこうへい")
+        result = gen.generate("不公平", dictionary_paths=[], reading="ふこうへい")
     finally:
         engine_mod.fetch_yomitan_definitions = original_fetch  # type: ignore
         if had_key:
@@ -3882,11 +3887,11 @@ def test_yomitan_returns_single_best_definition() -> None:
 
 
 def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
-    """v1.2.15 fail-safe: Yomitan source + dead bridge => local ladder.
+    """v1.2.15 fail-safe: Yomitan source + dead bridge => local dictionaries.
 
     The user's report: Yomitan selected, Chrome closed, Tab on a word
     present in a local dictionary silently produced nothing. Now the
-    Yomitan-primary path falls back to the local ladder (mirroring the
+    Yomitan-primary path falls back to the local dictionaries (mirroring the
     existing local->Yomitan fail-safe) instead of returning None.
     Priority stays Yomitan-first: a working bridge still wins even
     when local dictionaries are configured.
@@ -3902,12 +3907,12 @@ def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
     had_key = "1619602654" in cfgs
     old_cfg = cfgs.get("1619602654")
     try:
-        # 1. Bridge down (empty list): local ladder must produce.
+        # 1. Bridge down (empty list): local dictionaries must produce.
         engine_mod.fetch_yomitan_definitions = lambda w, r="": []  # type: ignore
         cfgs["1619602654"] = {"dictionary_source": "yomitan"}
         gen = engine_mod.DefinitionGenerator(
             provider=None, known_kanji={"先", "ず", "最", "初"})
-        result = gen.generate("先ず", ladder_paths=[dict_dir],
+        result = gen.generate("先ず", dictionary_paths=[dict_dir],
                               reading="まず")
         check("y2l: dead bridge + local dict => local definition",
               result is not None and "structured-content" in result,
@@ -3919,7 +3924,7 @@ def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
         engine_mod.fetch_yomitan_definitions = _boom  # type: ignore
         gen2 = engine_mod.DefinitionGenerator(
             provider=None, known_kanji={"先", "ず", "最", "初"})
-        result2 = gen2.generate("先ず", ladder_paths=[dict_dir],
+        result2 = gen2.generate("先ず", dictionary_paths=[dict_dir],
                                 reading="まず")
         check("y2l: raising bridge + local dict => local definition",
               result2 is not None and "structured-content" in result2,
@@ -3932,9 +3937,9 @@ def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
         engine_mod.fetch_yomitan_definitions = lambda w, r="": y_entries  # type: ignore
         gen3 = engine_mod.DefinitionGenerator(
             provider=None, known_kanji={"先", "ず", "最", "初"})
-        result3 = gen3.generate("先ず", ladder_paths=[dict_dir],
+        result3 = gen3.generate("先ず", dictionary_paths=[dict_dir],
                                 reading="まず")
-        check("y2l: working bridge still beats local ladder",
+        check("y2l: working bridge still beats local dictionaries",
               result3 == "YOMITAN wins here",
               f"got: {(result3 or '')[:80]!r}")
 
@@ -3942,7 +3947,7 @@ def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
         engine_mod.fetch_yomitan_definitions = lambda w, r="": []  # type: ignore
         gen4 = engine_mod.DefinitionGenerator(provider=None,
                                               known_kanji=set())
-        result4 = gen4.generate("先ず", ladder_paths=[], reading="まず")
+        result4 = gen4.generate("先ず", dictionary_paths=[], reading="まず")
         check("y2l: dead bridge + no local dicts => None (unchanged)",
               result4 is None, f"got: {(result4 or '')[:80]!r}")
     finally:

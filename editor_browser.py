@@ -53,7 +53,7 @@ from aqt.qt import QMenu, QKeySequence
 from aqt.utils import tooltip
 
 from .core import get_generator
-from .utils import parse_furigana_field, extract_clean_word, resolve_ladder_paths
+from .utils import parse_furigana_field, extract_clean_word, resolve_dictionary_paths
 
 # Dual-context sibling import (see core.py for why both forms are needed).
 if __package__:
@@ -560,7 +560,7 @@ def on_editor_generate_definition(editor) -> None:
     def task() -> Optional[str]:
         return get_generator().generate(
             word_text,
-            ladder_paths=resolve_ladder_paths(dictionaries, dictionary_folder, disabled_dictionaries),
+            dictionary_paths=resolve_dictionary_paths(dictionaries, dictionary_folder, disabled_dictionaries),
             reading=reading_text,
         )
 
@@ -1066,11 +1066,11 @@ def on_bulk_generate_definitions(browser: Browser) -> None:
                     note, word_field, reading_field
                 )
 
-                # Generate definition using the Dictionary Ladder (pure
-                # SQLite lookups — no indexing ever happens here).
+                # Generate definition (pure SQLite lookups — no indexing
+                # ever happens here).
                 definition_result = get_generator().generate(
                     word_text,
-                    ladder_paths=resolve_ladder_paths(dictionaries, dictionary_folder, disabled_dictionaries),
+                    dictionary_paths=resolve_dictionary_paths(dictionaries, dictionary_folder, disabled_dictionaries),
                     reading=reading_text,
                 )
                 if not definition_result:

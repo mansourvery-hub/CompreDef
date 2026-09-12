@@ -98,18 +98,18 @@ def test_extract_base_text_edges() -> None:
     check("unit: entities unescaped", b("&lt;食&gt;") == "<食>")
 
 
-def test_resolve_ladder_paths() -> None:
-    """utils.resolve_ladder_paths: pure list shaping (gap: only covered
+def test_resolve_dictionary_paths() -> None:
+    """utils.resolve_dictionary_paths: pure list shaping (gap: only covered
     implicitly inside full generation runs)."""
-    r = compredef_utils.resolve_ladder_paths
-    check("unit: all-empty -> no ladder", r(None, "", None) == [])
+    r = compredef_utils.resolve_dictionary_paths
+    check("unit: all-empty -> no dictionaries", r(None, "", None) == [])
     check("unit: blanks stripped, order kept",
           r(["/b ", "", "  ", "/a"], "", None) == ["/b", "/a"])
     check("unit: non-list dictionaries ignored",
           r("notalist", "", None) == [])
 
 
-def test_resolve_ladder_paths_disabled(tmp_root: str) -> None:
+def test_resolve_dictionary_paths_disabled(tmp_root: str) -> None:
     """Disabled-path filtering uses realpath comparison (gap: the
     disabled-dictionaries branch has no isolated test)."""
     keep = os.path.join(tmp_root, "keep.txt")
@@ -117,10 +117,10 @@ def test_resolve_ladder_paths_disabled(tmp_root: str) -> None:
     for p in (keep, drop):
         with open(p, "w") as f:
             f.write("x")
-    got = compredef_utils.resolve_ladder_paths([keep, drop], "", [drop])
+    got = compredef_utils.resolve_dictionary_paths([keep, drop], "", [drop])
     check("unit: disabled path filtered out", got == [keep], f"got {got}")
-    got2 = compredef_utils.resolve_ladder_paths([keep], "", [drop])
-    check("unit: unrelated disabled entry keeps ladder",
+    got2 = compredef_utils.resolve_dictionary_paths([keep], "", [drop])
+    check("unit: unrelated disabled entry keeps the set",
           got2 == [keep], f"got {got2}")
 
 
@@ -483,6 +483,51 @@ def test_rank_definitions() -> None:
           f"got {[t for (t, _), _ in ranked3]}")
 
 
+def test_scoring_exclusion_and_boilerplate() -> None:
+    """scoring.remove_excluded_terms / strip_scoring_boilerplate /
+    scoring_base_text (gap: new in the fat-removal work; end-to-end
+    refreeze agreement is pinned in Ring 1 on real captured data)."""
+    sc = compredef_scoring
+    kp = {"不": 1.0, "公": 1.0, "平": 1.0}
+    defn = "不公平でないこと。公平だ。"
+    plain = sc.score_definition(defn, kp, {})
+    excl = sc.score_definition(defn, kp, {}, exclude=("不公平",))
+    check("unit: headword mentions earn nothing",
+          excl.kanji_count < plain.kanji_count
+          and excl.kanji_score < plain.kanji_score,
+          f"plain={plain.kanji_score}/{plain.kanji_count} "
+          f"excl={excl.kanji_score}/{excl.kanji_count}")
+    check("unit: other occurrences of the same kanji still count",
+          excl.kanji_score == 2.0 and excl.kanji_count == 2,
+          f"got {excl.kanji_score}/{excl.kanji_count}")
+    check("unit: single-char exclusion is ignored (too destructive)",
+          sc.remove_excluded_terms("公平だ。", ("公",)) == "公平だ。")
+    check("unit: empty exclusion is a no-op",
+          sc.remove_excluded_terms("公平だ。", ()) == "公平だ。")
+    ruigo = ('<div data-sc-meaning="" data-sc-class="C">'
+             '<span data-sc-href="$c-ruigo">類語</span>'
+             '<a href="?query=X">偏見</a></div>'
+             '<span>公平だ。</span>')
+    stripped = sc.strip_scoring_boilerplate(ruigo)
+    check("unit: thesaurus block stripped for scoring",
+          "偏見" not in stripped and "公平" in stripped,
+          f"got {stripped!r}")
+    hinshi = ('<span data-sc-hinshi="" data-sc-bm="">〘名〙</span>'
+              '<span>公平だ。</span>')
+    check("unit: part-of-speech tag stripped for scoring",
+          "名" not in sc.strip_scoring_boilerplate(hinshi))
+    check("unit: untagged text passes through identical",
+          sc.strip_scoring_boilerplate("公平だ。") == "公平だ。")
+    check("unit: display text untouched (strip is scoring-only)",
+          "偏見" in ruigo)
+    res = sc.score_definition(ruigo, {"公": 1.0, "平": 1.0, "偏": 1.0,
+                                      "見": 1.0}, {})
+    check("unit: stripped compounds never enter vocab",
+          "偏見" not in sc.extract_kanji_words(
+              sc.scoring_base_text(ruigo)),
+          f"got {sc.extract_kanji_words(sc.scoring_base_text(ruigo))}")
+
+
 def main() -> int:
     import shutil as _sh
     import tempfile as _tf
@@ -490,8 +535,8 @@ def main() -> int:
     try:
         test_normalize_reading()
         test_extract_base_text_edges()
-        test_resolve_ladder_paths()
-        test_resolve_ladder_paths_disabled(tmp_root)
+        test_resolve_dictionary_paths()
+        test_resolve_dictionary_paths_disabled(tmp_root)
         test_is_zip_and_directory_dictionary(tmp_root)
         test_find_dictionary_folders(tmp_root)
         test_calculate_kanji_score_edges()
@@ -506,6 +551,7 @@ def main() -> int:
         test_render_definition_text()
         test_filter_valid_entries()
         test_rank_definitions()
+        test_scoring_exclusion_and_boilerplate()
         test_maturity_points()
         test_first_field_text()
         test_yomitan_normalize_reading()

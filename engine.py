@@ -4,12 +4,12 @@ from typing import Dict, List, Optional, Set, Tuple
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
     from .provider import DictionaryProvider
-    from .picker import collect_ladder_candidates, filter_valid_entries, pick_best
+    from .picker import collect_dictionary_candidates, filter_valid_entries, pick_best
     from .utils import extract_clean_word, extract_base_text
     from .models import DictionaryEntry, ScoringResult
 else:
     from provider import DictionaryProvider
-    from picker import collect_ladder_candidates, filter_valid_entries, pick_best
+    from picker import collect_dictionary_candidates, filter_valid_entries, pick_best
     from utils import extract_clean_word, extract_base_text
     from models import DictionaryEntry, ScoringResult
 
@@ -104,26 +104,25 @@ def _pick_best(entries: List[DictionaryEntry],
     return pick_best(entries, kanji_points, vocab_points)
 
 
-def _collect_local_candidates(provider, ladder_paths: List[str],
+def _collect_local_candidates(provider, dictionary_paths: List[str],
                                word: str, reading: str = "") -> list:
-    """Walks the local ladder with the given provider — never raises.
+    """Walks the local dictionaries with the given provider — never raises.
 
-    Thin delegate to picker.collect_ladder_candidates (kept here so
+    Thin delegate to picker.collect_dictionary_candidates (kept here so
     existing callers keep working; the picker module owns gathering).
     """
-    return collect_ladder_candidates(provider, ladder_paths, word, reading)
+    return collect_dictionary_candidates(provider, dictionary_paths, word, reading)
 
 
 class DefinitionGenerator:
     """
     Orchestrates the definition generation process.
 
-    v1.2 algorithm: all candidates from all dictionaries are scored with
-    interval-weighted kanji + vocab points; the single best definition
-    wins (ties break toward more kanji). The ladder ORDER still matters
-    as the source enumeration, but selection is pure argmax — the user
-    reads the definition they can best understand, regardless of which
-    dictionary it came from.
+    All candidates from all dictionaries are scored with
+    interval-weighted density points; the single best definition
+    wins (ties break toward more kanji). Selection is pure argmax —
+    the user reads the definition they can best understand,
+    regardless of which dictionary it came from.
     """
 
     def __init__(self, provider: DictionaryProvider,
@@ -144,17 +143,17 @@ class DefinitionGenerator:
     def generate(
         self,
         target_word: str,
-        ladder_paths: List[str],
+        dictionary_paths: List[str],
         reading: str = "",
         plain_text: Optional[bool] = None,
     ) -> Optional[str]:
         """
-        Core generation algorithm (v1.2):
+        Core generation algorithm:
         1. Gather candidates from the Yomitan source (if selected) or
-           walk the local ladder collecting EVERY dictionary's entries.
+           walk the local dictionaries collecting EVERY entry.
         2. Drop reference titles / child-entry lists.
-        3. Score all candidates: kanji pts + vocab pts (ivl/365, cap 1).
-        4. Return the highest total; ties break to most kanji count.
+        3. Score all candidates: comprehension density (ivl/365, cap 1).
+        4. Return the highest score; ties break to most kanji count.
 
         When plain_text is True (or config plain_text_definitions is
         enabled) the returned definition is plain text (no HTML) —
@@ -191,10 +190,10 @@ class DefinitionGenerator:
                         return _finalize(picked[1])
             # v1.2.15 fail-safe (mirrors the local->Yomitan one below):
             # Yomitan selected but unreachable (browser closed) or with
-            # no entry for this word => default to the LOCAL ladder
+            # no entry for this word => default to the LOCAL dictionaries
             # instead of returning nothing. Only fires when local
             # dictionaries are actually configured.
-            if ladder_paths:
+            if dictionary_paths:
                 local_provider = None
                 try:
                     # Lazy import: core imports this module at load, so a
@@ -208,9 +207,9 @@ class DefinitionGenerator:
                     local_provider = None
                 if local_provider is not None:
                     print(f"CompreDef: Yomitan gave nothing for '{word}' — "
-                          f"falling back to local ladder.")
+                          f"falling back to local dictionaries.")
                     local_candidates = _collect_local_candidates(
-                        local_provider, ladder_paths, word, reading)
+                        local_provider, dictionary_paths, word, reading)
                     picked_local = _pick_best(
                         local_candidates, self.kanji_points,
                         self.vocab_points)
@@ -218,9 +217,9 @@ class DefinitionGenerator:
                         return _finalize(picked_local[1])
             return None
 
-        # Local ladder: collect ALL candidates, then argmax (v1.2).
+        # Local dictionaries: collect ALL candidates, then argmax.
         all_candidates = _collect_local_candidates(
-            self.provider, ladder_paths, word, reading)
+            self.provider, dictionary_paths, word, reading)
 
         picked = _pick_best(all_candidates, self.kanji_points,
                             self.vocab_points)
@@ -228,7 +227,7 @@ class DefinitionGenerator:
             return _finalize(picked[1])
 
         # ------------------------------------------------------------------
-        # Fail-safe: if local ladder produced nothing, try Yomitan API.
+        # Fail-safe: if the local dictionaries produced nothing, try Yomitan API.
         # Minimal, no GUI toggle — if the user has Yomitan running with
         # dictionaries, we borrow them instead of returning None. All local
         # dictionaries still take precedence; this only fires when CompreDef

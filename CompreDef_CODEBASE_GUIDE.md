@@ -286,50 +286,33 @@ This produces a simple, deterministic score.
 
 ---
 
-# 7. The dictionary ladder
+# 7. Picking the winning definition
 
 This is one of the central ideas of CompreDef.
 
-The user chooses dictionaries in priority order:
+The user installs a set of dictionaries. CompreDef roughly does:
 
 ```text
-1. Dictionary A
-2. Dictionary B
-3. Dictionary C
-```
-
-CompreDef roughly does:
-
-```text
-Dictionary A
+every dictionary
     ↓
 get candidates
     ↓
-any perfect candidate?
-    ├── yes → stop
-    └── no
-          ↓
-Dictionary B
+score each candidate (comprehension density)
     ↓
-get candidates
-    ↓
-any perfect candidate?
-    ├── yes → stop
-    └── no
-          ↓
-Dictionary C
+return the highest-scoring one
 ```
 
-If no candidate reaches 100% comprehensibility, the highest-scoring candidate encountered is used as the fallback.
+So there is one principle:
 
-So there are two principles:
-
-1. **Dictionary order matters.**
-2. **A sufficiently understandable definition can terminate the search early.**
+1. **Every definition is ranked with the same logic.** Dictionary order
+   never decides anything.
 
 This is not the same as asking for the objectively best dictionary definition. It is asking:
 
-> “What is the most useful definition for this learner, while respecting the user's dictionary preferences?”
+> “What is the most useful definition for this learner?”
+
+See `picker.py` (the self-contained picking module) and the
+Dictionary Picker Algorithm wiki page for the full scoring details.
 
 ---
 

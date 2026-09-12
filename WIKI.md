@@ -74,16 +74,25 @@ yields no candidates at all (never an error, never a freeze).
 ## Step 3 — Clean the text
 
 Dictionary entries are rich HTML (ruby furigana, styling). Before
-scoring, each definition is reduced to its **base text**:
+scoring, each definition is reduced to **scoring text** in three
+passes. Display keeps the full HTML untouched — only the scoring
+copy is cleaned.
 
-- Remove `<rt>` / `<rp>` furigana readings.
-- Remove all remaining HTML tags.
-- Unescape entities (`&lt;` → `<`).
-
-Furigana must never pollute the score: the reading ま above 先 is a
-hint for display, not a kanji the learner needs to know. The full
-HTML is kept untouched for the Anki card — only the scoring copy is
-cleaned.
+- **Drop the boilerplate.** Thesaurus sections (`類語` synonym
+  chains) and part-of-speech tags (〘名〙 and friends) are identified
+  by their HTML markers and removed. A 20-synonym list says nothing
+  about how readable the explanation is — scoring it rewards and
+  punishes noise. Only tagged blocks are stripped; plain-text labels
+  without tags are accepted noise (bounded, documented).
+- **Strip the markup.** Remove `<rt>` / `<rp>` furigana readings,
+  all remaining HTML tags, unescape entities (`&lt;` → `<`).
+  Furigana must never pollute the score: the reading ま above 先 is a
+  hint for display, not a kanji the learner needs to know.
+- **Remove the headword.** The defined word itself is deleted before
+  counting. The learner looked the word up precisely because it is
+  unknown — its self-mentions (headers included) earn nothing. Only
+  multi-character terms are removed (excluding a single kanji would
+  wipe a common character everywhere).
 
 ---
 
@@ -114,6 +123,15 @@ For one definition $D$, write:
 - $K(D)$ — its kanji, counted **with repetition**
   (a kanji appearing 3 times counts 3 times).
 - $W(D)$ — its **distinct** multi-kanji compounds.
+
+Compounds are found without a morphological analyzer: maximal runs
+of kanji characters, length 2 or more (MeCab is an explicit
+non-goal — heavy native dependency, version drift). Runs split at
+any kana or punctuation, so okurigana inflections (偏る → 偏) stay
+out of vocab by construction, and synonyms glued by ・ split
+correctly. Adjacent compounds with no separator at all can glue
+(rare in prose; synonym lists are stripped first). Deterministic on
+every machine.
 
 ### Kanji density
 

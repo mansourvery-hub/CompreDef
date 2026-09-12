@@ -103,7 +103,7 @@ else
 1. Download **\`CompreDef.ankiaddon\`** below.
 2. In Anki, go to **Tools → Add-ons → Install from file...**
 3. Select \`CompreDef.ankiaddon\` and restart Anki.
-4. Open **Tools → Add-ons → CompreDef → Config** to configure your note fields and dictionary ladder.
+4. Open **Tools → Add-ons → CompreDef → Config** to configure your note fields and dictionaries.
 
 Already installed from AnkiWeb? Just restart Anki twice (update check → install → restart) and the new version is active."
 fi

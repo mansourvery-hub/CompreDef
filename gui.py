@@ -4,10 +4,10 @@ gui.py - Configuration GUI for the CompreDef Anki add-on.
 Provides a PyQt dialog allowing users to:
 - Select the Target Note Type and map Target Word & Definition fields
   with intelligent automatic field matching.
-- Configure and order the Dictionary Ladder (drag-and-drop or Move Up/Down
-  buttons). Order is pure user preference — dictionaries are tried top to
-  bottom and the first fully comprehensible definition wins (early exit).
-  Recommended: richest dictionary you can comfortably read at the top.
+- Configure your Dictionaries (add folder/ZIP, drag-and-drop or Move Up/Down
+  buttons). Every dictionary contributes its definitions; the most
+  readable one wins regardless of order (order-independent scoring).
+  Recommended: include the richest dictionaries you can almost read.
 """
 
 import os
@@ -369,7 +369,7 @@ class ConfigDialog(QDialog):
     Dialog for configuring CompreDef add-on options.
 
     Allows picking the Scope decks, mapping note-type fields, and
-    ordering dictionaries in the Ladder.
+    managing the dictionary set.
     """
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -557,13 +557,13 @@ class ConfigDialog(QDialog):
         self.tabs.addTab(mapping_tab, "Fields")
 
         # -------------------------------------------------------------
-        # Tab 2 — Dictionary Ladder
+        # Tab 2 — Dictionaries
         # -------------------------------------------------------------
-        ladder_tab = QWidget()
-        ladder_layout = QVBoxLayout()
-        ladder_tab.setLayout(ladder_layout)
-        ladder_header = QLabel("<b>Dictionary Ladder</b> — order of preference")
-        ladder_layout.addWidget(ladder_header)
+        dicts_tab = QWidget()
+        dicts_layout = QVBoxLayout()
+        dicts_tab.setLayout(dicts_layout)
+        dicts_header = QLabel("<b>Dictionaries</b> — every entry is scored, the most readable wins")
+        dicts_layout.addWidget(dicts_header)
 
         # --- Dictionary Source selector (Local vs Yomitan) ---
         source_row = QHBoxLayout()
@@ -588,7 +588,7 @@ class ConfigDialog(QDialog):
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         source_row.addWidget(self.source_combo)
         source_row.addStretch()
-        ladder_layout.addLayout(source_row)
+        dicts_layout.addLayout(source_row)
 
         # --- Yomitan settings row (visible only when Yomitan selected) ---
         self.yomitan_settings_widget = QWidget()
@@ -619,7 +619,7 @@ class ConfigDialog(QDialog):
         self.yomitan_debug_btn.setToolTip("Collects bridge manifests, serverVersion, ankiFields for 口, error.log tail into clipboard + console. Paste it back when reporting.")
         self.yomitan_debug_btn.clicked.connect(self._on_copy_yomitan_debug)
         yomitan_row2.addWidget(self.yomitan_debug_btn)
-        ladder_layout.addLayout(yomitan_row2)
+        dicts_layout.addLayout(yomitan_row2)
         self.yomitan_install_btn = _size_button(QPushButton("Install / Repair Bridge"))
         self.yomitan_install_btn.setToolTip(
             "One-click install of the Yomitan bridge (native messaging host).\n"
@@ -633,12 +633,12 @@ class ConfigDialog(QDialog):
         self.yomitan_test_btn.setToolTip("Ping Yomitan API (/serverVersion). Browser must be open + Yomitan API enabled + bridge installed.")
         self.yomitan_test_btn.clicked.connect(self._on_test_yomitan)
         yomitan_layout.addWidget(self.yomitan_test_btn)
-        ladder_layout.addWidget(self.yomitan_settings_widget)
+        dicts_layout.addWidget(self.yomitan_settings_widget)
 
         self.yomitan_status_label = QLabel("")
         self.yomitan_status_label.setStyleSheet("color: gray; font-size: 11px;")
         self.yomitan_status_label.setWordWrap(True)
-        ladder_layout.addWidget(self.yomitan_status_label)
+        dicts_layout.addWidget(self.yomitan_status_label)
 
         desc_label = QLabel(
             "Dictionaries are tried top to bottom; the first definition you can\n"
@@ -648,12 +648,12 @@ class ConfigDialog(QDialog):
         )
         desc_label.setStyleSheet("color: gray; font-size: 11px;")
         desc_label.setWordWrap(True)
-        ladder_layout.addWidget(desc_label)
+        dicts_layout.addWidget(desc_label)
 
         # List Widget with drag-and-drop reordering
         list_and_buttons_layout = QHBoxLayout()
 
-        # --- Left/center: the ladder list itself ---
+        # --- Left/center: the dictionary list itself ---
         list_column = QVBoxLayout()
 
         # Add-actions sit in ONE compact row ABOVE the list (they were a
@@ -694,19 +694,19 @@ class ConfigDialog(QDialog):
         buttons_vbox = QVBoxLayout()
 
         self.move_up_btn = _size_button(QPushButton("Move Up ↑"))
-        self.move_up_btn.setToolTip("Move selected dictionary earlier in ladder (tried earlier)")
+        self.move_up_btn.setToolTip("Move selected dictionary up in the list")
         self.move_up_btn.clicked.connect(self._on_move_up)
         buttons_vbox.addWidget(self.move_up_btn)
 
         self.move_down_btn = _size_button(QPushButton("Move Down ↓"))
-        self.move_down_btn.setToolTip("Move selected dictionary later in ladder (more advanced)")
+        self.move_down_btn.setToolTip("Move selected dictionary down in the list")
         self.move_down_btn.clicked.connect(self._on_move_down)
         buttons_vbox.addWidget(self.move_down_btn)
 
         buttons_vbox.addSpacing(10)
 
         self.remove_btn = _size_button(QPushButton("Remove"))
-        self.remove_btn.setToolTip("Remove selected dictionary from ladder (and its index)")
+        self.remove_btn.setToolTip("Remove selected dictionary (and its index)")
         self.remove_btn.clicked.connect(self._on_remove_dictionary)
         buttons_vbox.addWidget(self.remove_btn)
 
@@ -722,8 +722,8 @@ class ConfigDialog(QDialog):
         buttons_vbox.addStretch()
         list_and_buttons_layout.addLayout(buttons_vbox)
 
-        ladder_layout.addLayout(list_and_buttons_layout)
-        self.tabs.addTab(ladder_tab, "Dictionaries")
+        dicts_layout.addLayout(list_and_buttons_layout)
+        self.tabs.addTab(dicts_tab, "Dictionaries")
 
         # -------------------------------------------------------------
         # Tab 3 — Generation / Options
@@ -748,7 +748,7 @@ class ConfigDialog(QDialog):
         )
         # CRITICAL: restore the saved state AT CREATION TIME, before any
         # _save_config_now() can fire. _load_config() restores the dictionary
-        # ladder AFTER _init_ui(), and each added dictionary persists the
+        # set AFTER _init_ui(), and each added dictionary persists the
         # dialog state immediately (crash-safety design). With the default
         # unchecked Qt state, merely OPENING the dialog used to write
         # tab_generate=False to disk before the real value was ever shown.
@@ -1273,7 +1273,7 @@ class ConfigDialog(QDialog):
         """Toggles Yomitan vs Local UI and persists immediately.
 
         save=False is used during initial load to avoid overwriting the
-        ladder with an empty list before _load_config populates it
+        set with an empty list before _load_config populates it
         (the v1.0.20 'disappearing dictionaries' bug).
         """
         is_yomitan = self.source_combo.currentData() == "yomitan"
@@ -1287,7 +1287,7 @@ class ConfigDialog(QDialog):
                 "then enable Yomitan → Settings → Advanced → General → Enable Yomitan API.\n"
                 "After that 'Test' should turn green."
             )
-        # Grey out local ladder when Yomitan is active (still visible for reference)
+        # Grey out local dictionaries when Yomitan is active (still visible for reference)
         for w in (self.dict_list, self.add_zip_btn, self.add_dict_btn, self.add_folder_btn,
                   self.move_up_btn, self.move_down_btn, self.remove_btn, self.reindex_btn):
             w.setEnabled(not is_yomitan)
@@ -1649,7 +1649,7 @@ class ConfigDialog(QDialog):
         pass
 
     def _add_dict_path(self, path: str) -> bool:
-        """Adds a dictionary path (zip or folder) to the ladder list if not already present."""
+        """Adds a dictionary path (zip or folder) to the set if not already present."""
         if not path:
             return False
 
@@ -1801,7 +1801,7 @@ class ConfigDialog(QDialog):
                 self._add_dict_path(sub)
 
     def _on_move_up(self) -> None:
-        """Moves the currently selected dictionary up in ladder order."""
+        """Moves the currently selected dictionary up in the list order."""
         curr_row = self.dict_list.currentRow()
         if curr_row > 0:
             item = self.dict_list.takeItem(curr_row)
@@ -1810,7 +1810,7 @@ class ConfigDialog(QDialog):
             self._refresh_item_labels()
 
     def _on_move_down(self) -> None:
-        """Moves the currently selected dictionary down in ladder order."""
+        """Moves the currently selected dictionary down in the list order."""
         curr_row = self.dict_list.currentRow()
         if curr_row >= 0 and curr_row < self.dict_list.count() - 1:
             item = self.dict_list.takeItem(curr_row)
@@ -1820,7 +1820,7 @@ class ConfigDialog(QDialog):
 
     def _on_remove_dictionary(self) -> None:
         """
-        Removes the selected dictionary from the ladder AND deletes its
+        Removes the selected dictionary from the set AND deletes its
         SQLite index, persisting the config immediately so a crash cannot
         silently revert the removal.
         """
@@ -1880,7 +1880,7 @@ class ConfigDialog(QDialog):
         if self.note_types_list.count():
             self.note_types_list.setCurrentRow(0)
 
-        # Load dictionary ladder
+        # Load dictionary set
         saved_dicts = self.config.get("dictionaries", [])
         if not saved_dicts and self.config.get("dictionary_folder"):
             # Auto-detect from legacy single folder path
@@ -1916,7 +1916,7 @@ class ConfigDialog(QDialog):
 
         for d_path in saved_dicts:
             self._add_dict_path(d_path)
-        # Sync Yomitan/Local visibility after ladder is populated (must be
+        # Sync Yomitan/Local visibility after the set is populated (must be
         # after _add_dict_path so ordered_dicts is not empty when we save).
         try:
             self._on_source_changed(save=False)
@@ -1947,7 +1947,7 @@ class ConfigDialog(QDialog):
             self.dict_list.item(i).data(role)
             for i in range(self.dict_list.count())
         ]
-        # Never clobber Local ladder when Yomitan is selected — the list is
+            # Never clobber local dictionaries when Yomitan is selected — the list is
         # disabled but still holds the Local dictionaries. Preserve them.
         _is_yomitan = self.source_combo.currentData() == "yomitan"
         if _is_yomitan and not ordered_dicts and isinstance(self.config.get("dictionaries"), list) and self.config["dictionaries"]:
@@ -1970,7 +1970,7 @@ class ConfigDialog(QDialog):
             "yomitan_extension_id": self.yomitan_extid_edit.text().strip() if hasattr(self, "yomitan_extid_edit") else "",
             # Backwards compatibility
             "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
-            "mode": "Ladder",
+            "mode": "Dictionaries",
         }
 
         mw.addonManager.writeConfig(self.addon_name, updated_config)
@@ -2007,7 +2007,7 @@ class ConfigDialog(QDialog):
                 self.dict_list.item(i).data(role)
                 for i in range(self.dict_list.count())
             ]
-            # Never clobber Local ladder when Yomitan is selected or during
+            # Never clobber local dictionaries when Yomitan is selected or during
             # the initial toggle race (v1.0.20 bug). Preserve previous config.
             _is_yomitan_now = False
             try:
@@ -2054,7 +2054,7 @@ class ConfigDialog(QDialog):
                 "yomitan_url": self.yomitan_url_edit.text().strip() or "http://127.0.0.1:19633",
                 "yomitan_extension_id": _extid,
                 "dictionary_folder": ordered_dicts[0] if ordered_dicts else "",
-                "mode": "Ladder",
+                "mode": "Dictionaries",
             })
             self.config = mw.addonManager.getConfig(self.addon_name) or self.config
         except Exception:

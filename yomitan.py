@@ -3,7 +3,7 @@ yomitan.py - Minimal Yomitan API fallback for CompreDef.
 
 Uses Yomitan's native-messaging HTTP bridge (yomitan-api) via POST /ankiFields
 (which returns FULLY RENDERED native Yomitan HTML, split per-dictionary so
-the ladder can pick the best SINGLE definition) with fallback to
+the picker can score each slice and return the best SINGLE definition) with fallback to
 /termEntries for edge cases (e.g. single kanji lookups). When CompreDef has
 no local dictionary result, we ask Yomitan instead of returning None.
 
@@ -44,7 +44,7 @@ else:
 # ---------------------------------------------------------------------------
 YOMITAN_URL = "http://127.0.0.1:19633"
 YOMITAN_TIMEOUT = 10.0  # must exceed bridge YOMITAN_RESPONSE_TIMEOUT (8s); cold first query can take seconds
-YOMITAN_MAX_ENTRIES = 8  # enough to let ladder scoring see a good candidate
+YOMITAN_MAX_ENTRIES = 8  # enough candidates for scoring to see a good one
 _WORD_CACHE_TTL = 300.0  # seconds
 _NEGATIVE_CACHE_TTL = 30.0  # seconds after a failure, skip Yomitan quickly
 

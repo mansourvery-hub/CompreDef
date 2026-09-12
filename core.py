@@ -23,7 +23,7 @@ _provider = None
 _generator = None
 _provider_source = None  # tracks which source the singleton was built for
 # Dedicated local-dictionary provider, independent of the configured
-# source. Used ONLY by the Yomitan->local fail-safe ladder (engine.py):
+# source. Used ONLY by the Yomitan->local fail-safe (engine.py):
 # when Yomitan is selected but unreachable/empty, generation falls back
 # to local dictionaries instead of returning nothing.
 _local_provider = None
@@ -109,8 +109,8 @@ def get_local_provider():
 
     Powers the Yomitan->local fail-safe: the main provider singleton
     follows the user's source choice (and is a YomitanApiProvider when
-    Yomitan is selected — whose lookups ignore ladder paths), so the
-    fallback ladder needs its own local handle. Separate singleton so
+    Yomitan is selected — whose lookups ignore dictionary paths), so the
+    fallback needs its own local handle. Separate singleton so
     source switches never disturb it; cleared by reset_provider_cache().
     Never raises (returns None only if the cache dir itself is broken).
     """

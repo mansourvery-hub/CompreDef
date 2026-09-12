@@ -8,8 +8,8 @@ Backlog at the bottom — never by silent scope creep mid-session.
 
 - **T1 — Install-time dictionary indexing** (folder/ZIP, SQLite
   cache, signature + renderer-version invalidation)
-- **T2 — Dictionary Ladder generation** (early exit, maximal
-  fallback, argmax scoring, tie-breaks)
+- **T2 — Definition generation** (density argmax scoring with
+  maximal fallback, order-independent tie-breaks)
 - **T3 — Learner knowledge snapshot** (first-field extraction,
   mastered ≥ 365d / seen > 0, Scope-bounded, session-cached)
 - **T4 — Deck Scope + quick-fix** (subdeck expansion, ANY-card
@@ -50,7 +50,7 @@ T11 covers all (release)
   for the picker: `debug/audit_picker.py` captures every dictionary's
   definitions for each card of the real 11-note deck
   (`My Life Decks::Japanese::anki-japanese-template`) under 3 profiles
-  (mine/beginner/native) x 2 sources (local ladder/Yomitan) into
+  (mine/beginner/native) x 2 sources (local dictionaries/Yomitan) into
   `tests/fixtures/picker_audit.json`, renders
   `debug/reports/picker_audit_<ts>.html` (winners matrix + collapsed
   rankings + ok/bad grading radios with JSON export +
@@ -59,10 +59,16 @@ T11 covers all (release)
 - **T13 — Density scoring + swappable picker (SHIPPED v1.3).**
   Length-normalized comprehension density replaces raw-sum argmax
   (succinct 90%-known beats 20-paragraph 5%-known); deterministic
-  tertiary tie-break (title, text); `picker.py` owns filter/rank/pick
-  behind a `PickerStrategy` interface (`DensityPicker` default,
-  `LegacySumPicker` for A/B via the `picker_strategy` config key);
-  algorithm + equations documented in ARCHITECTURE.md.
+  tertiary tie-break (title, text); `picker.py` owns gather/filter/
+  rank/pick behind a `PickerStrategy` interface (`DensityPicker`
+  default, `LegacySumPicker` for A/B via the `picker_strategy` config
+  key); algorithm + equations documented in ARCHITECTURE.md and the
+  wiki; the dictionary set is never ordered by rank (order-free).
+- **T14 — Scoring fat removal (SHIPPED v1.3).** Scoring runs on
+  cleaned text: tagged boilerplate (thesaurus `$c-ruigo` sections,
+  `data-sc-hinshi` POS tags) stripped via a depth-counted HTML
+  parser, headword self-mentions excluded (multi-char terms only),
+  shared `scoring_base_text` for kanji + vocab paths.
 
 ## Working agreements (from experience)
 

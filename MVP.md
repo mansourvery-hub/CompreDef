@@ -12,7 +12,7 @@ can currently read — automatically, without per-word effort.
 
 ## Included capabilities (all shipped, all tested)
 
-- Dictionary Ladder GUI (add folder/ZIP, reorder, enable/disable)
+- Dictionary management GUI (add folder/ZIP, reorder, enable/disable)
 - Install-time indexing → pure-SQLite generation (button, Tab,
   Browser bulk with `Ctrl+Shift+D`)
 - Deck Scope (subdecks included, fail-closed, quick-fix add-deck)

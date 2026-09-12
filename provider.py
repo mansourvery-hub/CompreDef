@@ -35,7 +35,7 @@ class DictionaryProvider(abc.ABC):
         Concrete default delegates to lookup() (path-agnostic
         providers like the Yomitan API ignore it); LocalSQLiteProvider
         overrides with a path-scoped query. Declared here (not just
-        duck-typed) so engine.py's per-path ladder loop type-checks.
+        duck-typed) so engine.py's per-path loop type-checks.
         """
         return self.lookup(word, reading)
 

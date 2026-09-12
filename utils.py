@@ -93,28 +93,28 @@ def normalize_reading(reading: str) -> str:
             out.append(ch)
     return re.sub(r"[\s\-・.。_ー()()「」【】]", "", "".join(out))
 
-def resolve_ladder_paths(
+def resolve_dictionary_paths(
     dictionaries: Optional[List[str]],
     dictionary_folder: str,
     disabled_dictionaries: Optional[List[str]],
 ) -> List[str]:
-    """Resolves the ordered ladder of dictionary paths from user config."""
-    ladder_paths: List[str] = []
+    """Resolves the ordered dictionary paths from user config."""
+    dictionary_paths: List[str] = []
 
     if dictionaries and isinstance(dictionaries, list):
-        ladder_paths = [str(p).strip() for p in dictionaries if p and str(p).strip()]
+        dictionary_paths = [str(p).strip() for p in dictionaries if p and str(p).strip()]
 
-    if not ladder_paths and dictionary_folder:
-        ladder_paths = find_dictionary_folders(dictionary_folder)
+    if not dictionary_paths and dictionary_folder:
+        dictionary_paths = find_dictionary_folders(dictionary_folder)
 
-    if disabled_dictionaries and ladder_paths:
+    if disabled_dictionaries and dictionary_paths:
         disabled = {os.path.realpath(os.path.expanduser(str(p))) for p in disabled_dictionaries}
-        ladder_paths = [
-            p for p in ladder_paths
+        dictionary_paths = [
+            p for p in dictionary_paths
             if os.path.realpath(os.path.expanduser(p)) not in disabled
         ]
 
-    return ladder_paths
+    return dictionary_paths
 
 def is_zip_dictionary(path: str) -> bool:
     """Checks if path points to a valid Yomitan dictionary zip archive."""

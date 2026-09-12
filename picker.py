@@ -1,7 +1,7 @@
 """picker.py — the dictionary picker: WHICH definition wins, and why.
 
 Self-contained by design: everything about deciding one definition
-out of many lives here (ladder gathering, filtering, scoring
+    out of many lives here (dictionary gathering, filtering, scoring
 strategy, ranking, picking) and depends ONLY on scoring/models/utils
 plus a duck-typed provider — never on engine, providers, Anki, or Qt.
 To try a new picking method a week from now, add a PickerStrategy
@@ -13,7 +13,7 @@ delegates every decision here.
 """
 
 import abc
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
@@ -36,13 +36,13 @@ def filter_valid_entries(entries: List[DictionaryEntry]) -> List[DictionaryEntry
     return non_ref if non_ref else (entries if len(entries) == 1 else [])
 
 
-def collect_ladder_candidates(provider, ladder_paths: List[str],
-                              word: str, reading: str = "") -> List[DictionaryEntry]:
-    """Walks the ladder with the given provider — never raises.
+def collect_dictionary_candidates(provider, dictionary_paths: List[str],
+                                      word: str, reading: str = "") -> List[DictionaryEntry]:
+    """Walks the dictionaries with the given provider — never raises.
 
     Shared by the main local path and the Yomitan->local fail-safe so
     Tab and button can never diverge. One corrupt dictionary must not
-    kill the whole ladder (or the fallback), so each path is isolated.
+    kill the whole set (or the fallback), so each path is isolated.
     A None provider (headless tests) simply yields no candidates.
     The provider is duck-typed (needs lookup_by_path, like
     LocalSQLiteProvider) so this module never imports providers, Anki,
@@ -53,7 +53,7 @@ def collect_ladder_candidates(provider, ladder_paths: List[str],
     all_candidates: List[DictionaryEntry] = []
     if provider is None:
         return all_candidates
-    for path in ladder_paths or []:
+    for path in dictionary_paths or []:
         try:
             if hasattr(provider, 'lookup_by_path'):
                 entries = provider.lookup_by_path(path, word, reading)
@@ -71,7 +71,7 @@ class PickerStrategy(abc.ABC):
 
     rank_key() must be a TOTAL order over (result, title, definition)
     built from input PROPERTIES only — never input positions — so
-    shuffling the ladder can never change the winner (Q-G2
+    dictionary order can never change the winner (Q-G2
     order-independence). lower key == more comprehensible.
     """
 
@@ -164,16 +164,19 @@ def rank_definitions(
     kanji_points: Dict[str, float],
     vocab_points: Dict[str, float],
     strategy: Optional[PickerStrategy] = None,
+    exclude: Iterable[str] = (),
 ) -> List[Tuple[Tuple[str, str], ScoringResult]]:
     """Deterministic TOTAL order over candidates, best first.
 
     Scores each (dictionary_title, definition) with score_definition
     and sorts by the strategy key (default: the active strategy).
+    `exclude` surface forms (the defined headword) earn no points.
     Returns [((title, definition), ScoringResult), ...].
     """
     active = strategy or get_active_strategy()
     scored = [((title, definition),
-               score_definition(definition, kanji_points, vocab_points))
+               score_definition(definition, kanji_points, vocab_points,
+                                exclude))
               for title, definition in candidates]
     scored.sort(key=lambda item: active.rank_key(
         item[1], item[0][0], item[0][1]))
@@ -188,12 +191,15 @@ def pick_best(entries: List[DictionaryEntry],
     """The single winning definition, or None when there is no entry.
 
     Single-pass argmax using the same strategy key as rank_definitions,
-    so rank()[0] always agrees with this pick.
+    so rank()[0] always agrees with this pick. Each entry's own word
+    is excluded from its scoring (a definition never earns points for
+    repeating the word being defined).
     """
     active = strategy or get_active_strategy()
     best: Optional[Tuple[tuple, ScoringResult, str]] = None
     for entry in entries:
-        res = score_definition(entry.definition, kanji_points, vocab_points)
+        res = score_definition(entry.definition, kanji_points, vocab_points,
+                               (entry.word,) if entry.word else ())
         key = active.rank_key(res, entry.dictionary_title, entry.definition)
         if best is None or key < best[0]:
             best = (key, res, entry.definition)

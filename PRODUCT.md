@@ -26,9 +26,9 @@ vocabulary into Anki and want each card's definition to be readable
    into the Expression field; CompreDef fills the Definition field —
    via toolbar button, Tab-to-Generate on field blur, or Browser bulk
    generation for hundreds of notes at once.
-2. **Climb the ladder once.** User orders their dictionaries
-   top-to-bottom (richest readable first); every future generation
-   follows that order automatically.
+2. **Set up dictionaries once.** User installs their dictionaries;
+   every future generation scores every dictionary's definitions and
+   returns the most readable one automatically.
 3. **Scope their decks.** User picks which decks count as "their
    Japanese"; everything else (e.g. a French deck) never influences
    scoring or knowledge.
@@ -38,10 +38,10 @@ vocabulary into Anki and want each card's definition to be readable
 
 ## Functional requirements
 
-- **Dictionary Ladder with early exit:** dictionaries are tried top to
-  bottom; the first fully comprehensible definition wins and the
-  search stops; otherwise the highest-scoring definition wins
-  (maximal fallback).
+- **One scoring logic for every definition:** all dictionaries'
+  candidates are scored with comprehension density and the highest
+  score wins (maximal fallback included — never nothing when a
+  dictionary has the word).
 - **Kanji-matrix scoring:** comprehension is measured in kanji —
   interval-weighted mastery (`ivl/365`, capped at 1.0) over kanji
   occurrences plus multi-kanji compounds; kana-only words are never
@@ -87,7 +87,7 @@ vocabulary into Anki and want each card's definition to be readable
 
 - First-field convention: word/expression/front holds the term.
 - One-year interval ≈ mastery (user decision, `_MATURE_IVL_DAYS`).
-- The user curates the ladder order; CompreDef never reorders it.
+- The user curates the dictionary set; CompreDef never changes it.
 
 ## Open questions
 
