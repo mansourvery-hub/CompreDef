@@ -49,25 +49,15 @@ _WORD_CACHE_TTL = 300.0  # seconds
 _NEGATIVE_CACHE_TTL = 30.0  # seconds after a failure, skip Yomitan quickly
 
 
+from config import get_setting
+
+# Yomitan fallback settings
+YOMITAN_URL = "http://127.0.0.1:19633"
+
 def _get_configured_url() -> str:
     """Reads yomitan_url from add-on config, falls back to default."""
-    try:
-        from aqt import mw  # type: ignore
-        if mw and hasattr(mw, "addonManager"):
-            try:
-                name = mw.addonManager.addonFromModule(__name__)
-            except Exception:
-                name = None
-            if not name:
-                name = "1619602654"
-            cfg = mw.addonManager.getConfig(name)
-            if isinstance(cfg, dict) and cfg.get("yomitan_url"):
-                url = str(cfg["yomitan_url"]).strip()
-                if url:
-                    return url.rstrip("/")
-    except Exception:
-        pass
-    return YOMITAN_URL
+    url = str(get_setting("yomitan_url", YOMITAN_URL)).strip()
+    return url.rstrip("/") if url else YOMITAN_URL
 
 # ---------------------------------------------------------------------------
 # Caches (process-wide, thread-safe)

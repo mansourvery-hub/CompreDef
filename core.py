@@ -12,11 +12,13 @@ if __package__:
     from .anki import (get_known_kanji_set, get_kanji_points,
                        get_vocab_points, sync_reset_caches)
     from .engine import DefinitionGenerator
+    from .config import get_config_value
 else:
     from provider import LocalSQLiteProvider
     from anki import (get_known_kanji_set, get_kanji_points,
                       get_vocab_points, sync_reset_caches)
     from engine import DefinitionGenerator
+    from config import get_config_value
 
 # Singletons for the application lifecycle
 _provider = None
@@ -30,44 +32,16 @@ _local_provider = None
 
 def _get_dictionary_source() -> str:
     """Reads the user's chosen dictionary source from config."""
-    try:
-        from aqt import mw  # type: ignore
-        if mw and hasattr(mw, "addonManager"):
-            try:
-                name = mw.addonManager.addonFromModule(__name__)
-            except Exception:
-                name = None
-            if not name:
-                name = "1619602654"
-            cfg = mw.addonManager.getConfig(name)
-            if isinstance(cfg, dict):
-                src = str(cfg.get("dictionary_source") or "local").strip().lower()
-                if src in ("yomitan", "yomitan_api", "api"):
-                    return "yomitan"
-    except Exception:
-        pass
+    src = str(get_config_value("dictionary_source") or "local").strip().lower()
+    if src in ("yomitan", "yomitan_api", "api"):
+        return "yomitan"
     return "local"
 
 
 def _get_yomitan_url() -> str:
     """Reads Yomitan API URL from config, defaulting to localhost:19633."""
-    try:
-        from aqt import mw  # type: ignore
-        if mw and hasattr(mw, "addonManager"):
-            try:
-                name = mw.addonManager.addonFromModule(__name__)
-            except Exception:
-                name = None
-            if not name:
-                name = "1619602654"
-            cfg = mw.addonManager.getConfig(name)
-            if isinstance(cfg, dict) and cfg.get("yomitan_url"):
-                url = str(cfg["yomitan_url"]).strip()
-                if url:
-                    return url.rstrip("/")
-    except Exception:
-        pass
-    return "http://127.0.0.1:19633"
+    url = str(get_config_value("yomitan_url") or "").strip()
+    return url.rstrip("/") if url else "http://127.0.0.1:19633"
 
 
 def get_provider():

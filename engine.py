@@ -7,11 +7,13 @@ if __package__:
     from .picker import collect_dictionary_candidates, filter_valid_entries, pick_best
     from .utils import extract_clean_word, extract_base_text
     from .models import DictionaryEntry, ScoringResult
+    from .config import get_config_value
 else:
     from provider import DictionaryProvider
     from picker import collect_dictionary_candidates, filter_valid_entries, pick_best
     from utils import extract_clean_word, extract_base_text
     from models import DictionaryEntry, ScoringResult
+    from config import get_config_value
 
 # Yomitan fail-safe import — never crash if yomitan.py is missing or aqt stub incomplete
 try:
@@ -25,47 +27,15 @@ except Exception:
 
 def _get_dictionary_source() -> str:
     """Reads the user's chosen dictionary source from config."""
-    try:
-        from aqt import mw  # type: ignore
-        if mw and hasattr(mw, "addonManager"):
-            try:
-                name = mw.addonManager.addonFromModule(__name__)
-            except Exception:
-                name = None
-            if not name:
-                name = "1619602654"
-            cfg = mw.addonManager.getConfig(name)
-            if isinstance(cfg, dict):
-                src = str(cfg.get("dictionary_source") or "local").strip().lower()
-                if src in ("yomitan", "yomitan_api", "api"):
-                    return "yomitan"
-    except Exception:
-        pass
+    src = str(get_config_value("dictionary_source") or "local").strip().lower()
+    if src in ("yomitan", "yomitan_api", "api"):
+        return "yomitan"
     return "local"
 
 
 def _is_plain_text_mode() -> bool:
-    """Reads the GUI toggle 'plain_text_definitions' from add-on config.
-
-    In headless/test environments (no mw) returns False so existing
-    regression tests keep expecting HTML.
-    """
-    try:
-        from aqt import mw  # type: ignore
-        if mw is None or not hasattr(mw, "addonManager"):
-            return False
-        try:
-            name = mw.addonManager.addonFromModule(__name__)
-        except Exception:
-            name = None
-        if not name:
-            name = "1619602654"
-        cfg = mw.addonManager.getConfig(name)
-        if isinstance(cfg, dict) and cfg.get("plain_text_definitions"):
-            return True
-        return False
-    except Exception:
-        return False
+    """Reads the GUI toggle 'plain_text_definitions' from add-on config."""
+    return bool(get_config_value("plain_text_definitions", False))
 
 
 def _to_plain_text(html_or_text: str) -> str:

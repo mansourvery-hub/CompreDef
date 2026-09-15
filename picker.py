@@ -18,9 +18,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # Dual-context sibling imports (relative inside Anki's package load,
 # absolute in the top-level test harness — see core.py for why).
 if __package__:
+    from .config import get_setting
     from .models import DictionaryEntry, ScoringResult
     from .scoring import is_reference_title, score_definition
 else:
+    from config import get_setting
     from models import DictionaryEntry, ScoringResult
     from scoring import is_reference_title, score_definition
 
@@ -135,22 +137,10 @@ def get_active_strategy() -> PickerStrategy:
     print (a silent fallback to a different ranking would corrupt
     grading comparisons).
     """
-    try:
-        from aqt import mw  # type: ignore
-        if mw is not None and hasattr(mw, "addonManager"):
-            try:
-                name = mw.addonManager.addonFromModule(__name__)
-            except Exception:
-                name = None
-            cfg = mw.addonManager.getConfig(name or "1619602654")
-            if isinstance(cfg, dict):
-                key = str(cfg.get("picker_strategy") or "density")
-                if key in _STRATEGIES:
-                    return _STRATEGIES[key]
-                print(f"CompreDef: unknown picker_strategy {key!r} — "
-                      f"using 'density'.")
-    except Exception:
-        pass
+    key = str(get_config_value("picker_strategy", "density"))
+    if key in _STRATEGIES:
+        return _STRATEGIES[key]
+    print(f"CompreDef: unknown picker_strategy {key!r} — using 'density'.")
     return _STRATEGIES["density"]
 
 
