@@ -164,7 +164,9 @@ class LocalSQLiteProvider(DictionaryProvider):
                         meta = json.loads(z.read("index.json").decode("utf-8"))
                         if isinstance(meta, dict) and meta.get("title"):
                             return str(meta["title"]).strip()
-            except Exception: pass
+            except Exception as e:
+                # Log error but don't fail - return fallback title
+                print(f"CompreDef: Failed to read ZIP dictionary title for {norm_path}: {e}")
         elif os.path.isdir(norm_path):
             try:
                 idx = os.path.join(norm_path, "index.json")
@@ -173,7 +175,9 @@ class LocalSQLiteProvider(DictionaryProvider):
                         meta = json.load(f)
                         if isinstance(meta, dict) and meta.get("title"):
                             return str(meta["title"]).strip()
-            except Exception: pass
+            except Exception as e:
+                # Log error but don't fail - return fallback title
+                print(f"CompreDef: Failed to read directory dictionary title for {norm_path}: {e}")
         
         base = os.path.basename(norm_path.rstrip("/\\"))
         if base.endswith(".zip"): base = base[:-4]
@@ -199,7 +203,10 @@ class LocalSQLiteProvider(DictionaryProvider):
             try:
                 st = os.stat(path)
                 return f"zip:{self.RENDERER_VERSION}:{st.st_mtime_ns}:{st.st_size}"
-            except Exception: return f"zip_error:{self.RENDERER_VERSION}"
+            except Exception as e:
+                # Log error but don't fail - return error signature
+                print(f"CompreDef: Failed to compute ZIP signature for {path}: {e}")
+                return f"zip_error:{self.RENDERER_VERSION}"
         if os.path.isdir(path):
             parts = [self.RENDERER_VERSION]
             try:
@@ -207,7 +214,9 @@ class LocalSQLiteProvider(DictionaryProvider):
                 for f in bank_files:
                     st = os.stat(os.path.join(path, f))
                     parts.append(f"{f}:{st.st_mtime_ns}:{st.st_size}")
-            except Exception: pass
+            except Exception as e:
+                # Log error but don't fail - return minimal signature
+                print(f"CompreDef: Failed to compute directory signature for {path}: {e}")
             # FIX: Using md5 on the string is fine, but we must ensure the string includes
             # the RENDERER_VERSION. The original code did this via `parts = [self.RENDERER_VERSION]`.
             # The test fails because it expects the signature to change.

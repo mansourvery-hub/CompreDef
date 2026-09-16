@@ -7,13 +7,13 @@ if __package__:
     from .picker import collect_dictionary_candidates, filter_valid_entries, pick_best
     from .utils import extract_clean_word, extract_base_text
     from .models import DictionaryEntry, ScoringResult
-    from .config import get_config_value
+    from .config import get_dictionary_source, is_plain_text_mode
 else:
     from provider import DictionaryProvider
     from picker import collect_dictionary_candidates, filter_valid_entries, pick_best
     from utils import extract_clean_word, extract_base_text
     from models import DictionaryEntry, ScoringResult
-    from config import get_config_value
+    from config import get_dictionary_source, is_plain_text_mode
 
 # Yomitan fail-safe import — never crash if yomitan.py is missing or aqt stub incomplete
 try:
@@ -25,33 +25,13 @@ except Exception:
     fetch_yomitan_definitions = None  # type: ignore
 
 
-def _get_dictionary_source() -> str:
-    """Reads the user's chosen dictionary source from config."""
-    src = str(get_config_value("dictionary_source") or "local").strip().lower()
-    if src in ("yomitan", "yomitan_api", "api"):
-        return "yomitan"
-    return "local"
-
-
-def _is_plain_text_mode() -> bool:
-    """Reads the GUI toggle 'plain_text_definitions' from add-on config."""
-    return bool(get_config_value("plain_text_definitions", False))
-
-
 def _to_plain_text(html_or_text: str) -> str:
     """Converts a stored definition (HTML or plain) to plain text.
 
     Uses extract_base_text which strips <rt>/<rp>/tags and unescapes
-    entities. If the stored value is already plain, it is returned (stripped)
-    unchanged. This is the cheap O(def_len) path for plain mode — no HTML
-    was generated at generation time; existing HTML entries are just stripped.
+    entities. If the input is already plain text, this is essentially a no-op.
     """
-    if not html_or_text:
-        return ""
-    # Heuristic: if it looks like HTML, strip it; else just strip.
-    if "<" in html_or_text and ">" in html_or_text:
-        return extract_base_text(html_or_text)
-    return html_or_text.strip()
+    return extract_base_text(html_or_text)
 
 
 def _filter_valid_entries(entries: List[DictionaryEntry]) -> List[DictionaryEntry]:
@@ -136,7 +116,7 @@ class DefinitionGenerator:
 
         # Resolve plain-text mode: explicit arg wins, else config.
         if plain_text is None:
-            plain_text = _is_plain_text_mode()
+            plain_text = is_plain_text_mode()
 
         def _finalize(definition: str) -> str:
             if plain_text:
@@ -146,7 +126,7 @@ class DefinitionGenerator:
 
         # If user selected Yomitan as primary source, query Yomitan
         # directly (single fetch, then score).
-        if _get_dictionary_source() == "yomitan":
+        if get_dictionary_source() == "yomitan":
             if fetch_yomitan_definitions is not None:
                 try:
                     y_entries = fetch_yomitan_definitions(word, reading)

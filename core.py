@@ -12,13 +12,13 @@ if __package__:
     from .anki import (get_known_kanji_set, get_kanji_points,
                        get_vocab_points, sync_reset_caches)
     from .engine import DefinitionGenerator
-    from .config import get_config_value
+    from .config import get_setting, get_dictionary_source, is_plain_text_mode, get_yomitan_url
 else:
     from provider import LocalSQLiteProvider
     from anki import (get_known_kanji_set, get_kanji_points,
                       get_vocab_points, sync_reset_caches)
     from engine import DefinitionGenerator
-    from config import get_config_value
+    from config import get_setting, get_dictionary_source, is_plain_text_mode, get_yomitan_url
 
 # Singletons for the application lifecycle
 _provider = None
@@ -30,23 +30,10 @@ _provider_source = None  # tracks which source the singleton was built for
 # to local dictionaries instead of returning nothing.
 _local_provider = None
 
-def _get_dictionary_source() -> str:
-    """Reads the user's chosen dictionary source from config."""
-    src = str(get_config_value("dictionary_source") or "local").strip().lower()
-    if src in ("yomitan", "yomitan_api", "api"):
-        return "yomitan"
-    return "local"
-
-
-def _get_yomitan_url() -> str:
-    """Reads Yomitan API URL from config, defaulting to localhost:19633."""
-    url = str(get_config_value("yomitan_url") or "").strip()
-    return url.rstrip("/") if url else "http://127.0.0.1:19633"
-
 
 def get_provider():
     global _provider, _provider_source
-    src = _get_dictionary_source()
+    src = get_dictionary_source()
     # Rebuild singleton if source changed (user toggled in GUI)
     if _provider is not None and _provider_source != src:
         _provider = None
@@ -62,7 +49,7 @@ def get_provider():
                     from .yomitan import YomitanApiProvider
                 else:
                     from yomitan import YomitanApiProvider
-                _provider = YomitanApiProvider(base_url=_get_yomitan_url())
+                _provider = YomitanApiProvider(base_url=get_yomitan_url())
             except Exception:
                 # Fallback to local if Yomitan provider fails to import
                 addon_dir = os.path.dirname(os.path.abspath(__file__))
@@ -79,68 +66,52 @@ def get_provider():
 
 
 def get_local_provider():
-    """LocalSQLiteProvider regardless of the configured source.
-
-    Powers the Yomitan->local fail-safe: the main provider singleton
-    follows the user's source choice (and is a YomitanApiProvider when
-    Yomitan is selected — whose lookups ignore dictionary paths), so the
-    fallback needs its own local handle. Separate singleton so
-    source switches never disturb it; cleared by reset_provider_cache().
-    Never raises (returns None only if the cache dir itself is broken).
-    """
+    """LocalSQLiteProvider regardless of configured source (for fail-safe)."""
     global _local_provider
     if _local_provider is None:
-        try:
-            addon_dir = os.path.dirname(os.path.abspath(__file__))
-            cache_dir = os.path.join(addon_dir, "user_files", "cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            _local_provider = LocalSQLiteProvider(cache_dir)
-        except Exception:
-            return None
+        addon_dir = os.path.dirname(os.path.abspath(__file__))
+        cache_dir = os.path.join(addon_dir, "user_files", "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        _local_provider = LocalSQLiteProvider(cache_dir)
     return _local_provider
 
 
-def reset_provider_cache() -> None:
-    """Forces next get_provider() to re-read config — called after GUI save."""
-    global _provider, _generator, _provider_source, _local_provider
+def reset_provider_cache():
+    """Called when user changes dictionaries in the GUI."""
+    global _provider, _generator, _local_provider, _provider_source
     _provider = None
     _generator = None
-    _provider_source = None
     _local_provider = None
-
-
-def reset_generator() -> None:
-    """Forces the next get_generator() to re-snapshot learner knowledge.
-
-    The generator caches the knowledge at build time; after the Scope
-    changes (GUI save, quick-fix add-deck), the old generator would keep
-    scoring against the STALE snapshot — the v1.1.4 "add deck does not
-    fix it" contributor. Also rebuilds knowledge from Anki's DB when
-    possible. Uses the SYNCHRONOUS reset because this can be reached from
-    background threads (generation tasks); mw.taskman must never be
-    called off the main thread (Anki prints a 'bug:' traceback).
-    """
-    global _generator
-    _generator = None
-    try:
-        sync_reset_caches()
-    except Exception:
-        pass
+    _provider_source = None
 
 
 def get_generator():
-    """Returns the DefinitionGenerator singleton (knowledge-aware).
-
-    Built with interval-weighted kanji + vocab points (v1.2). The
-    snapshot is read ONCE per generator; reset_generator() forces a
-    rebuild after knowledge-relevant changes.
-    """
+    """Returns the singleton DefinitionGenerator."""
     global _generator
     if _generator is None:
-        _generator = DefinitionGenerator(
-            get_provider(),
-            get_known_kanji_set(),
-            kanji_points=dict(get_kanji_points()),
-            vocab_points=dict(get_vocab_points()),
-        )
+        _generator = DefinitionGenerator()
     return _generator
+
+
+def generate_definition_for_editor(
+    word: str, reading: str, note_type: str = ""
+) -> str:
+    """Entry point for editor/browser UI: returns HTML or plain text."""
+    gen = get_generator()
+    return gen.generate(word, reading, note_type)
+
+
+def generate_definition_for_browser(
+    word: str, reading: str, note_type: str = ""
+) -> str:
+    """Entry point for browser bulk action: returns HTML or plain text."""
+    return generate_definition_for_editor(word, reading, note_type)
+
+
+def trigger_knowledge_rebuild():
+    """Background task to rebuild the learner knowledge snapshot."""
+    if __package__:
+        from .anki import reset_caches
+    else:
+        from anki import reset_caches
+    reset_caches()

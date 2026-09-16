@@ -137,7 +137,7 @@ def get_active_strategy() -> PickerStrategy:
     print (a silent fallback to a different ranking would corrupt
     grading comparisons).
     """
-    key = str(get_config_value("picker_strategy", "density"))
+    key = str(get_setting("picker_strategy", "density"))
     if key in _STRATEGIES:
         return _STRATEGIES[key]
     print(f"CompreDef: unknown picker_strategy {key!r} — using 'density'.")
