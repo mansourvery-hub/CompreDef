@@ -283,9 +283,10 @@ class LocalSQLiteProvider(DictionaryProvider):
                 return self.get_entry_count(norm)
 
             conn = self._get_conn()
+            staging_norm = norm + ".staging"
             try:
-                conn.execute("DELETE FROM entries WHERE dict_path = ?", (norm,))
-                conn.execute("DELETE FROM dictionaries WHERE path = ?", (norm,))
+                # Clean up any leftover staging entries from a previous aborted run
+                conn.execute("DELETE FROM entries WHERE dict_path = ?", (staging_norm,))
                 conn.commit()
 
                 total = 0
@@ -303,13 +304,13 @@ class LocalSQLiteProvider(DictionaryProvider):
                 grand_total = [0]
                 for entries in self._iter_term_banks(norm):
                     grand_total[0] += len(entries)
-                
+
                 if grand_total[0] == 0: raise IndexingError("No entries found")
 
                 for entries in self._iter_term_banks(norm):
                     for entry in entries:
                         if cancel_check and cancel_check():
-                            conn.execute("DELETE FROM entries WHERE dict_path = ?", (norm,))
+                            conn.execute("DELETE FROM entries WHERE dict_path = ?", (staging_norm,))
                             conn.commit()
                             raise IndexingError("Cancelled")
                         if not isinstance(entry, list) or len(entry) < 6: continue
@@ -318,23 +319,34 @@ class LocalSQLiteProvider(DictionaryProvider):
                         reading = entry[1] if isinstance(entry[1], str) else ""
                         for def_block in entry[5]:
                             if plain_text:
-                                # Plain-text path: NO HTML generation at all.
                                 text_def = render_yomitan_definition_text(def_block)
                                 if text_def:
-                                    batch.append((norm, word, text_def, self._normalize_reading(reading)))
+                                    batch.append((staging_norm, word, text_def, self._normalize_reading(reading)))
                             else:
                                 html_def = render_yomitan_definition_html(def_block)
                                 if html_def:
-                                    batch.append((norm, word, html_def, self._normalize_reading(reading)))
+                                    batch.append((staging_norm, word, html_def, self._normalize_reading(reading)))
                         if len(batch) >= self._INDEX_BATCH_SIZE:
                             flush()
                             if progress_cb: progress_cb(total, grand_total[0])
-                
+
                 flush()
                 if progress_cb: progress_cb(total, grand_total[0])
-                conn.execute("INSERT INTO dictionaries VALUES (?, ?, ?, ?)", (norm, title, sig, total))
-                conn.commit()
+
+                # Atomic promotion: replace old entries/dictionary with staging entries in a transaction
+                with conn:
+                    conn.execute("DELETE FROM entries WHERE dict_path = ?", (norm,))
+                    conn.execute("DELETE FROM dictionaries WHERE path = ?", (norm,))
+                    conn.execute("UPDATE entries SET dict_path = ? WHERE dict_path = ?", (norm, staging_norm))
+                    conn.execute("INSERT INTO dictionaries VALUES (?, ?, ?, ?)", (norm, title, sig, total))
                 return total
+            except Exception:
+                try:
+                    conn.execute("DELETE FROM entries WHERE dict_path = ?", (staging_norm,))
+                    conn.commit()
+                except Exception:
+                    pass
+                raise
             finally:
                 conn.close()
 
