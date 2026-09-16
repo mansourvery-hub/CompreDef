@@ -1,4 +1,5 @@
 import os
+from typing import List, Optional
 
 # Sibling imports must resolve in BOTH contexts:
 # - inside Anki the add-on loads as package "1619602654" whose folder is
@@ -85,27 +86,63 @@ def reset_provider_cache():
     _provider_source = None
 
 
+def reset_generator() -> None:
+    """Forces the next get_generator() to re-snapshot learner knowledge.
+
+    The generator caches the knowledge snapshot at creation time;
+    reset_generator() clears the singleton and invalidates knowledge
+    caches so the next get_generator() builds a fresh snapshot.
+    """
+    global _generator
+    _generator = None
+    sync_reset_caches()
+
+
 def get_generator():
     """Returns the singleton DefinitionGenerator."""
     global _generator
     if _generator is None:
-        _generator = DefinitionGenerator()
+        _generator = DefinitionGenerator(
+            provider=get_provider(),
+            known_kanji=get_known_kanji_set(),
+            kanji_points=get_kanji_points(),
+            vocab_points=get_vocab_points(),
+        )
     return _generator
 
 
 def generate_definition_for_editor(
-    word: str, reading: str, note_type: str = ""
-) -> str:
+    word: str,
+    reading: str = "",
+    dictionary_paths: Optional[List[str]] = None,
+    note_type: str = "",
+) -> Optional[str]:
     """Entry point for editor/browser UI: returns HTML or plain text."""
+    if dictionary_paths is None:
+        if __package__:
+            from .utils import resolve_dictionary_paths
+        else:
+            from utils import resolve_dictionary_paths
+        dictionaries = get_setting("dictionaries", [])
+        dictionary_folder = get_setting("dictionary_folder", "")
+        disabled_dictionaries = get_setting("disabled_dictionaries", [])
+        dictionary_paths = resolve_dictionary_paths(
+            dictionaries, dictionary_folder, disabled_dictionaries
+        )
     gen = get_generator()
-    return gen.generate(word, reading, note_type)
+    return gen.generate(word, dictionary_paths=dictionary_paths, reading=reading)
 
 
 def generate_definition_for_browser(
-    word: str, reading: str, note_type: str = ""
-) -> str:
+    word: str,
+    reading: str = "",
+    dictionary_paths: Optional[List[str]] = None,
+    note_type: str = "",
+) -> Optional[str]:
     """Entry point for browser bulk action: returns HTML or plain text."""
-    return generate_definition_for_editor(word, reading, note_type)
+    return generate_definition_for_editor(
+        word, reading=reading, dictionary_paths=dictionary_paths, note_type=note_type
+    )
 
 
 def trigger_knowledge_rebuild():

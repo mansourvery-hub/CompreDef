@@ -3990,6 +3990,22 @@ def test_yomitan_source_falls_back_to_local(tmp_root: str) -> None:
             cfgs.pop("1619602654", None)
 
 
+def test_application_runtime_wiring() -> None:
+    """Verifies core.reset_generator() and get_generator() singleton wiring."""
+    import core as _core
+    gen1 = _core.get_generator()
+    check("core: get_generator returns DefinitionGenerator instance",
+          gen1 is not None)
+
+    _core.reset_generator()
+    check("core: reset_generator clears singleton",
+          _core._generator is None)
+
+    gen2 = _core.get_generator()
+    check("core: get_generator rebuilds fresh instance after reset",
+          gen2 is not gen1 and gen2 is not None)
+
+
 def main() -> int:
     print("=" * 70)
     print("CompreDef fundamental regression suite")
@@ -4042,6 +4058,7 @@ def main() -> int:
         test_yomitan_term_list_loses_to_real_definition()
         test_yomitan_returns_single_best_definition()
         test_yomitan_source_falls_back_to_local(tmp_root)
+        test_application_runtime_wiring()
         test_real_dictionary_smoke()
     finally:
         # Clean up all synthetic dictionaries from the shared cache DB.

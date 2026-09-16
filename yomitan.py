@@ -35,9 +35,11 @@ from typing import Dict, List, Optional, Tuple
 if __package__:
     from .models import DictionaryEntry
     from .renderer import render_yomitan_definition_html
+    from .config import get_yomitan_url
 else:
     from models import DictionaryEntry
     from renderer import render_yomitan_definition_html
+    from config import get_yomitan_url
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -49,15 +51,9 @@ _WORD_CACHE_TTL = 300.0  # seconds
 _NEGATIVE_CACHE_TTL = 30.0  # seconds after a failure, skip Yomitan quickly
 
 
-from config import get_setting
-
-# Yomitan fallback settings
-YOMITAN_URL = "http://127.0.0.1:19633"
-
 def _get_configured_url() -> str:
     """Reads yomitan_url from add-on config, falls back to default."""
-    url = str(get_setting("yomitan_url", YOMITAN_URL)).strip()
-    return url.rstrip("/") if url else YOMITAN_URL
+    return get_yomitan_url()
 
 # ---------------------------------------------------------------------------
 # Caches (process-wide, thread-safe)
